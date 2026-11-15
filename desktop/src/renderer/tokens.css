@@ -1,0 +1,35 @@
+@import '@fontsource/atkinson-hyperlegible/latin-400.css';
+@import '@fontsource/atkinson-hyperlegible/latin-700.css';
+
+/* Switchboard tokens, shared by the sidebar and the SMS view. */
+:root {
+  --rail: #dde4e1;
+  --rail-edge: #c5d0cc;
+  --surface: #f6f8f7;
+  --ink: #1c2a2d;
+  --ink-soft: #4b5c5f;
+  --teal: #0e6b66;
+  /* Deep amber: the lamp sits in a ring of --behind, so it needs 3:1 against the rail and surface. */
+  --lamp: #9a6200;
+  --lamp-ink: #ffffff;
+  --alert: #b3261e;
+  --rail-width: 68px;
+  --tile: 44px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rail: #162024;
+    --rail-edge: #24343a;
+    --surface: #0e1619;
+    --ink: #d6e2df;
+    --ink-soft: #93a6a6;
+    --teal: #4cbcb1;
+    --lamp: #f0b42e;
+    --lamp-ink: #162024;
+    --alert: #f2a59f;
+    color-scheme: dark;
+  }
+}
+

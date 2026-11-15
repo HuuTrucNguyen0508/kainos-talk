@@ -1,0 +1,405 @@
+@import './tokens.css';
+
+/* Switchboard: the rail is a panel of sockets, the active one is plugged into the page. */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+/* The page is a transparent view laid over the service: the bar on its side, and the stage
+   (filling the rest) only while the service is loading or failed. */
+body {
+  display: grid;
+  grid-template-columns: var(--rail-width) 1fr;
+  grid-template-areas: 'rail stage';
+  overflow: hidden;
+  background: transparent;
+  color: var(--ink);
+  font: 400 15px/1.45 'Atkinson Hyperlegible', system-ui, sans-serif;
+  user-select: none;
+}
+
+/* Rail */
+
+.rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 18px;
+  padding-top: 16px;
+  background: var(--rail);
+  box-shadow: inset -1px 0 var(--rail-edge);
+}
+
+.mark-button {
+  display: grid;
+  place-items: center;
+  align-self: center;
+  width: 40px;
+  height: 40px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+.mark-button:hover {
+  background: var(--rail-edge);
+}
+.mark-button:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
+}
+.mark {
+  width: 30px;
+  height: 30px;
+}
+.mark rect {
+  fill: var(--teal);
+}
+.mark-ring {
+  fill: none;
+  stroke: var(--rail);
+  stroke-width: 2.6;
+}
+.mark-dot {
+  fill: var(--rail);
+}
+
+.sockets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.socket {
+  --behind: var(--rail);
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 56px;
+}
+
+/* The active socket shares the page's colour and curves into it. */
+.socket-tab {
+  position: absolute;
+  inset: 0 0 0 7px;
+  border-radius: 18px 0 0 18px;
+  background: var(--surface);
+  opacity: 0;
+}
+.socket-tab::before,
+.socket-tab::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  width: 16px;
+  height: 16px;
+}
+.socket-tab::before {
+  top: -16px;
+  background: radial-gradient(circle at 0 0, transparent 15.5px, var(--surface) 16px);
+}
+.socket-tab::after {
+  bottom: -16px;
+  background: radial-gradient(circle at 0 100%, transparent 15.5px, var(--surface) 16px);
+}
+.socket[data-active] {
+  --behind: var(--surface);
+}
+.socket[data-active] .socket-tab {
+  opacity: 1;
+}
+.socket[data-active]::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 16px;
+  bottom: 16px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--teal);
+}
+
+.tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--tile);
+  height: var(--tile);
+  margin: 0 0 0 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: var(--brand);
+  color: #fff;
+  cursor: pointer;
+  transition: border-radius 160ms ease, transform 160ms ease;
+}
+.tile:hover,
+.socket[data-active] .tile {
+  border-radius: 12px;
+}
+.tile:active {
+  transform: scale(0.95);
+}
+.tile:focus-visible,
+.socket[data-status='loading'] .tile:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 3px;
+}
+.tile > svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Loading: a dashed patch line around the tile, not yet seated. The glyph keeps full contrast.
+   A focus ring replaces it (same outline), and the button's label still says "loading". */
+.socket[data-status='loading'] .tile {
+  outline: 2px dashed var(--teal);
+  outline-offset: 2px;
+}
+
+/* Asleep: the website is unloaded to save memory. The tile goes quiet; its lamp still shows
+   what the phone's inbox has unread for it. */
+.socket[data-status='asleep'] .tile {
+  filter: saturate(0.3);
+  opacity: 0.7;
+}
+.socket[data-status='asleep'] .tile:hover,
+.socket[data-status='asleep'] .tile:focus-visible {
+  filter: none;
+  opacity: 1;
+}
+
+/* Unread lamp */
+.badge {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 2px solid var(--behind);
+  border-radius: 10px;
+  background: var(--lamp);
+  color: var(--lamp-ink);
+  font: 700 11px/16px 'Atkinson Hyperlegible', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.badge[data-marker] {
+  top: -3px;
+  right: -3px;
+  min-width: 14px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  font-size: 0;
+}
+.badge:empty {
+  display: none;
+}
+
+/* Muted and failed marks share the bottom-right corner; failed wins. */
+.flag {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  display: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--behind);
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--rail);
+}
+.flag > svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.socket[data-muted] .flag-muted,
+.socket[data-status='failed'] .flag-failed {
+  display: grid;
+}
+.socket[data-status='failed'] .flag-muted {
+  display: none;
+}
+.flag-failed {
+  background: var(--alert);
+  color: var(--surface);
+}
+
+/* Stage: what shows while the active service is not on screen. */
+
+/* Empty while the service is on screen, when the page is only the bar's strip. */
+.stage:empty {
+  display: none;
+}
+.stage {
+  grid-area: stage;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--surface);
+  place-items: center;
+  padding: 32px;
+}
+
+.notice {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  width: min(100%, 26rem);
+}
+.notice .tile {
+  width: 56px;
+  height: 56px;
+  margin: 0 0 14px;
+  border-radius: 16px;
+  cursor: default;
+}
+.notice .tile > svg {
+  width: 28px;
+  height: 28px;
+}
+.notice h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+}
+.notice p {
+  margin: 0;
+  max-width: 36ch;
+  color: var(--ink-soft);
+}
+.notice .host {
+  font-size: 13px;
+}
+
+.signal {
+  position: relative;
+  width: 180px;
+  height: 2px;
+  margin-top: 18px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: var(--rail-edge);
+}
+.signal::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 48px;
+  border-radius: 1px;
+  background: var(--teal);
+  animation: travel 1.4s ease-in-out infinite alternate;
+}
+
+.retry {
+  margin-top: 18px;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--teal);
+  color: var(--surface);
+  font: 700 15px/1.2 'Atkinson Hyperlegible', system-ui, sans-serif;
+  cursor: pointer;
+}
+.retry:hover {
+  filter: brightness(1.08);
+}
+.retry:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 3px;
+}
+
+/* Bar on the right: everything that touches the page side is mirrored. */
+body[data-side='right'] {
+  grid-template-columns: 1fr var(--rail-width);
+  grid-template-areas: 'stage rail';
+}
+body[data-side='right'] .rail {
+  box-shadow: inset 1px 0 var(--rail-edge);
+}
+body[data-side='right'] .socket-tab {
+  inset: 0 7px 0 0;
+  border-radius: 0 18px 18px 0;
+}
+body[data-side='right'] .socket-tab::before,
+body[data-side='right'] .socket-tab::after {
+  right: auto;
+  left: 0;
+}
+body[data-side='right'] .socket-tab::before {
+  background: radial-gradient(circle at 100% 0, transparent 15.5px, var(--surface) 16px);
+}
+body[data-side='right'] .socket-tab::after {
+  background: radial-gradient(circle at 100% 100%, transparent 15.5px, var(--surface) 16px);
+}
+body[data-side='right'] .socket[data-active]::before {
+  left: auto;
+  right: 0;
+  border-radius: 3px 0 0 3px;
+}
+body[data-side='right'] .rail .tile {
+  margin: 0 4px 0 0;
+}
+
+/* Auto-hidden bar: it comes out over the page, so the active socket cannot curve into it.
+   A teal patch line marks the edge it slid out of the page from. */
+body[data-auto-hide] .socket-tab {
+  display: none;
+}
+body[data-auto-hide] .socket[data-active] {
+  --behind: var(--rail);
+}
+body[data-auto-hide] .socket[data-active] .tile {
+  outline: 2px solid var(--teal);
+  outline-offset: 3px;
+}
+body[data-auto-hide] .rail {
+  box-shadow: inset -2px 0 var(--teal);
+}
+body[data-auto-hide][data-side='right'] .rail {
+  box-shadow: inset 2px 0 var(--teal);
+}
+
+@keyframes travel {
+  to {
+    transform: translateX(132px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile {
+    transition: none;
+  }
+  .signal::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+}

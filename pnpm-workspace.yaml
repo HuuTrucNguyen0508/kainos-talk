@@ -1,0 +1,7 @@
+packages:
+  - desktop
+
+# pnpm blocks dependency install scripts unless listed here.
+# Electron 45 has no install script any more: desktop's own postinstall fetches its binary.
+allowBuilds:
+  esbuild: true

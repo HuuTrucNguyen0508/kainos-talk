@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The switchboard surface colour, so the window behind Compose matches it while it starts. -->
+    <style name="Theme.KainosTalk" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E1619</item>
+    </style>
+</resources>

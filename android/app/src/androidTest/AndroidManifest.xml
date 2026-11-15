@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merged into the test APK (app.kainos.talk.test), which plays the fake chat app. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- Runs in the test APK's own process, so it posts as a separate app. -->
+        <receiver
+            android:name="app.kainos.talk.fake.FakeSenderReceiver"
+            android:exported="true" />
+    </application>
+</manifest>

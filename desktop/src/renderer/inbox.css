@@ -1,0 +1,780 @@
+@import './tokens.css';
+
+/* SMS: the phone's texts on the switchboard. Conversations on a rail-coloured panel, the open
+   thread on the page surface, teal for every action, the amber lamp for unread. */
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 15px/1.45 'Atkinson Hyperlegible', system-ui, sans-serif;
+}
+button,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+button:focus-visible,
+textarea:focus-visible,
+.row:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+#app {
+  height: 100%;
+}
+
+/* Inbox: list and thread, in the phone's Pocket Switchboard language. */
+
+:root {
+  /* From the phone: bubbles and tiles sit on "raised"; each source has its line colour. */
+  --raised: #e8edeb;
+  --outline: #6c807d;
+  --line-ink: #ffffff;
+  --wa: #2e6b4f;
+  --dc: #4a5591;
+  --fm: #1f5fad;
+  --sms: #96395b;
+  --pm: #73478a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --raised: #1b282d;
+    --outline: #6f8585;
+    --line-ink: #0e1619;
+    --wa: #8fd0ae;
+    --dc: #aab4ec;
+    --fm: #9cc6f2;
+    --sms: #efa7c0;
+    --pm: #d3a8e6;
+  }
+}
+
+.inbox {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  height: 100%;
+}
+.list {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  min-height: 0;
+  background: var(--rail);
+  box-shadow: inset -1px 0 var(--rail-edge);
+}
+.list-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 14px 14px 8px 16px;
+}
+.search {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 1.5px solid var(--rail-edge);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink-soft);
+}
+.search:focus-within {
+  border-color: var(--teal);
+}
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+.icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.new-text {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--teal);
+  color: var(--surface);
+  cursor: pointer;
+}
+.board {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 14px 8px 16px;
+}
+.chip {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  border: 1.5px solid var(--rail-edge);
+  border-radius: 15px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip[aria-selected='true'] {
+  border-color: var(--teal);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+}
+.chip-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--lamp);
+  color: var(--lamp-ink);
+  font: 700 11px/18px 'Atkinson Hyperlegible', system-ui, sans-serif;
+  text-align: center;
+}
+.open-app {
+  margin-left: auto;
+  padding: 8px 14px;
+  border: 1.5px solid var(--rail-edge);
+  border-radius: 12px;
+  background: none;
+  color: var(--teal);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.open-app:hover {
+  background: var(--raised);
+}
+.mail {
+  grid-row: 2 / -1;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  max-width: 44rem;
+  padding: 24px 28px;
+}
+.mail-time {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.mail-subject {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.3;
+}
+.mail-note {
+  margin: 0;
+  color: var(--ink-soft);
+}
+.mail-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+.rows {
+  margin: 0;
+  padding: 4px 0 8px;
+  overflow-y: auto;
+  list-style: none;
+}
+.no-match {
+  padding: 16px 20px;
+  color: var(--ink-soft);
+}
+.row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 14px 10px 16px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.row:hover {
+  background: color-mix(in srgb, var(--rail-edge) 45%, transparent);
+}
+.row[aria-current='true'] {
+  background: var(--surface);
+  box-shadow: inset 3px 0 var(--teal);
+}
+.row-body {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  min-width: 0;
+}
+.row-title,
+.row-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.row-title {
+  font-weight: 400;
+}
+.row[data-unread] .row-title {
+  font-weight: 700;
+}
+.row-time {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.row[data-unread] .row-time {
+  color: var(--ink);
+  font-weight: 700;
+}
+.row-text {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+.lamp {
+  justify-self: end;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--lamp);
+  color: var(--lamp-ink);
+  font: 700 11px/20px 'Atkinson Hyperlegible', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* The conversation tile: initials on a rimmed tile, the line's jack in the corner. */
+.avatar {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 1.5px solid var(--rail-edge);
+  border-radius: 14px;
+  background: var(--raised);
+  color: var(--teal);
+  font-weight: 700;
+}
+.avatar-row {
+  width: 44px;
+  height: 44px;
+  font-size: 15px;
+}
+.avatar-head {
+  width: 40px;
+  height: 40px;
+  font-size: 14px;
+}
+.avatar-glyph {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+/* Jacks, as on the phone: WhatsApp round, Discord a rounded square, Messenger a speech bubble,
+   SMS an octagon, Mail a wide envelope. */
+.jack {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--sms);
+  color: var(--line-ink);
+  font-size: 9px;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px var(--rail);
+}
+.jack[data-line='whatsapp'] {
+  border-radius: 50%;
+  background: var(--wa);
+}
+.jack[data-line='discord'] {
+  background: var(--dc);
+}
+.jack[data-line='messenger'] {
+  border-radius: 50% 50% 50% 2px;
+  background: var(--fm);
+}
+.jack[data-line='sms'] {
+  box-shadow: none;
+  background: var(--sms);
+  clip-path: polygon(30% 0, 70% 0, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0 70%, 0 30%);
+}
+.jack[data-line='mail'] {
+  width: 22px;
+  border-radius: 3px;
+  background: var(--pm);
+}
+.jack-inline {
+  position: static;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 0;
+}
+.row[aria-current='true'] .jack:not([data-line='sms']),
+.thread-head .jack:not([data-line='sms']) {
+  box-shadow: 0 0 0 2px var(--surface);
+}
+.jack-inline {
+  box-shadow: none !important;
+}
+
+.phone {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 14px 18px;
+  border-top: 1px solid var(--rail-edge);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.phone-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--outline);
+}
+.phone[data-connected] .phone-dot {
+  background: var(--teal);
+}
+.phone-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.link {
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--teal);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.thread {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  min-height: 0;
+}
+.thread-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 28px;
+  border-bottom: 1px solid var(--rail-edge);
+}
+.thread-names {
+  min-width: 0;
+}
+.thread-head h1 {
+  margin: 0;
+  overflow: hidden;
+  font-size: 18px;
+  line-height: 1.25;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.thread-head p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.bubbles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 16px 28px 20px;
+  overflow-y: auto;
+  list-style: none;
+}
+.bubble {
+  /* Sized to its content, as on the phone; long texts wrap at 34rem. */
+  align-self: flex-start;
+  width: fit-content;
+  max-width: min(34rem, 72%);
+  padding: 8px 12px;
+  border-radius: 6px 18px 18px 18px;
+  background: var(--raised);
+  overflow-wrap: anywhere;
+}
+.bubble[data-out] {
+  align-self: flex-end;
+  border-radius: 18px 18px 6px 18px;
+  background: var(--teal);
+  color: var(--surface);
+}
+.bubble[data-out][data-failed] {
+  border: 1.5px solid var(--alert);
+  background: transparent;
+  color: var(--ink);
+}
+.bubble-from {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--teal);
+  font-size: 13px;
+  font-weight: 700;
+}
+.bubble-text {
+  white-space: pre-wrap;
+}
+.bubble-meta {
+  float: right;
+  margin: 6px 0 -2px 14px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.bubble[data-out] .bubble-meta {
+  color: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+.bubble[data-out][data-failed] .bubble-meta {
+  color: var(--alert);
+}
+.bubble-image {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  margin: 2px 0 6px;
+  border-radius: 12px;
+  background: var(--rail-edge);
+  object-fit: cover;
+  cursor: zoom-in;
+}
+.bubble-image[data-loading] {
+  width: 260px;
+  height: 180px;
+}
+.bubble-image[data-missing] {
+  width: auto;
+  height: auto;
+  padding: 8px 10px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  cursor: default;
+}
+.day {
+  align-self: center;
+  margin: 12px 0 4px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: end;
+  padding: 12px 28px 16px;
+  border-top: 1px solid var(--rail-edge);
+  background: var(--rail);
+}
+.field {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 52px;
+  padding: 8px 14px;
+  border: 1.5px solid var(--outline);
+  border-radius: 18px;
+  background: var(--surface);
+}
+.field:focus-within {
+  border-color: var(--teal);
+}
+.field textarea {
+  flex: 1;
+  max-height: 160px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  resize: none;
+}
+.field textarea:disabled {
+  color: var(--ink-soft);
+}
+.send,
+.primary {
+  border: 0;
+  background: var(--teal);
+  color: var(--surface);
+  font-weight: 700;
+  cursor: pointer;
+}
+.composer .send {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: 16px;
+  font-size: 0;
+}
+.composer .send .icon {
+  width: 22px;
+  height: 22px;
+}
+.send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.primary {
+  padding: 10px 20px;
+  border-radius: 12px;
+}
+.composer-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.composer-note[data-failed] {
+  color: var(--alert);
+}
+
+.new-form {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  max-width: 36rem;
+  padding: 20px 28px;
+}
+.new-form input,
+.new-form textarea {
+  padding: 10px 14px;
+  border: 1.5px solid var(--outline);
+  border-radius: 14px;
+  background: var(--surface);
+  resize: vertical;
+}
+.new-form .send {
+  justify-self: start;
+  padding: 10px 20px;
+  border-radius: 12px;
+}
+.new-form .send .icon {
+  display: none;
+}
+
+.empty-thread {
+  grid-row: 1 / -1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 32px;
+  text-align: center;
+}
+.empty-thread h2 {
+  margin: 10px 0 0;
+  font-size: 22px;
+}
+.empty-thread p {
+  max-width: 36ch;
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.mark rect {
+  fill: var(--teal);
+}
+.mark-ring {
+  fill: none;
+  stroke: var(--surface);
+  stroke-width: 2.6;
+}
+.mark-dot {
+  fill: var(--surface);
+}
+.mark-large {
+  width: 56px;
+  height: 56px;
+}
+
+.lightbox {
+  max-width: 100vw;
+  max-height: 100vh;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 24px;
+  border: 0;
+  background: transparent;
+  cursor: zoom-out;
+}
+.lightbox::backdrop {
+  background: rgb(8 12 14 / 0.86);
+}
+.lightbox[open] {
+  display: grid;
+  place-items: center;
+}
+.lightbox img {
+  max-width: 100%;
+  max-height: calc(100vh - 96px);
+  border-radius: 12px;
+}
+.lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Setup: pairing and waiting */
+
+.setup {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 32px;
+}
+.card {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  width: min(100%, 30rem);
+}
+.card h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.25;
+}
+.card p {
+  margin: 0;
+  color: var(--ink-soft);
+}
+.steps {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+.steps li {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 10px;
+  counter-increment: step;
+}
+.steps li::before {
+  content: counter(step);
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1.5px solid var(--teal);
+  border-radius: 50%;
+  color: var(--teal);
+  font-size: 13px;
+  font-weight: 700;
+}
+.address {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.code {
+  margin: 12px 0 4px;
+  color: var(--ink);
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+}
+.actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+.secondary {
+  padding: 10px 20px;
+  border: 1.5px solid var(--rail-edge);
+  border-radius: 12px;
+  background: none;
+  font-weight: 700;
+  cursor: pointer;
+}
+.problem {
+  color: var(--alert) !important;
+}
+.signal {
+  position: relative;
+  width: 180px;
+  height: 2px;
+  margin-top: 16px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: var(--rail-edge);
+}
+.signal::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 48px;
+  background: var(--teal);
+  animation: travel 1.4s ease-in-out infinite alternate;
+}
+@keyframes travel {
+  to {
+    transform: translateX(132px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .signal::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+}

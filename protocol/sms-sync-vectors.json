@@ -1,0 +1,62 @@
+{
+  "about": "Shared by desktop/src/shared/sync-protocol.test.ts and the Android SyncProtocolTest.",
+  "pairing": [
+    {
+      "pcFingerprint": "9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
+      "phoneFingerprint": "3B1F0C9A6D2E4F5A8B7C6D5E4F3A2B1C0D9E8F7A6B5C4D3E2F1A0B9C8D7E6F5A",
+      "phoneNonce": "cGhvbmUtbm9uY2UtMQ==",
+      "pcNonce": "cGMtbm9uY2UtMQ==",
+      "code": "621943"
+    },
+    {
+      "pcFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "phoneFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "phoneNonce": "AAAA",
+      "pcNonce": "BBBB",
+      "code": "497766"
+    },
+    {
+      "pcFingerprint": "a3f1c2d4e5b6978877665544332211ffeeddccbbaa99887766554433221100aa",
+      "phoneFingerprint": "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1",
+      "phoneNonce": "x",
+      "pcNonce": "y",
+      "code": "712890"
+    }
+  ],
+  "addresses": {
+    "local": [
+      "10.0.2.2",
+      "192.168.1.20",
+      "172.16.0.1",
+      "172.31.255.255",
+      "169.254.10.1",
+      "127.0.0.1",
+      "::1",
+      "fd12:3456::1",
+      "fe80::1",
+      "::ffff:192.168.0.4"
+    ],
+    "remote": [
+      "8.8.8.8",
+      "172.32.0.1",
+      "100.64.0.1",
+      "2001:4860::8888",
+      "example.com",
+      ""
+    ]
+  },
+  "frameHash": [
+    {
+      "frame": "",
+      "hash": "e3b0c44298fc1c14"
+    },
+    {
+      "frame": "{\"t\":\"removed\",\"key\":\"sms|0|s:mum\"}",
+      "hash": "b6b51d1cfb277d1f"
+    },
+    {
+      "frame": "{\"t\":\"conversation\",\"conversation\":{\"source\":\"sms\",\"sourceLabel\":\"SMS\",\"key\":\"sms|0|s:mum\",\"title\":\"Maman ❤️\",\"isGroup\":false,\"unread\":1,\"lastActivityMs\":1000,\"canReply\":true,\"messages\":[{\"id\":\"1\",\"sender\":\"Maman ❤️\",\"text\":\"Dîner dimanche ? 🍲\",\"timeMs\":1000,\"outgoing\":false,\"status\":\"incoming\",\"media\":null,\"image\":null}]}}",
+      "hash": "b6dd71f0d853d309"
+    }
+  ]
+}

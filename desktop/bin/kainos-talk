@@ -1,0 +1,12 @@
+#!/bin/sh
+# Starts Kainos Talk from this checkout: rebuilds first when the source is newer than the
+# build, then runs Electron. The app's launcher entry (scripts/install-launcher.ts) runs this.
+set -e
+here=$(dirname "$(readlink -f "$0")")
+desktop=$(dirname "$here")
+cd "$desktop"
+if [ ! -f dist/main.cjs ] || [ -n "$(find src scripts/build.ts -newer dist/main.cjs -print -quit)" ]; then
+  node scripts/build.ts >/dev/null
+fi
+electron=$(node -e "process.stdout.write(require('electron'))")
+exec "$electron" "$desktop" "$@"
