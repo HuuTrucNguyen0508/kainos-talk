@@ -1,7 +1,6 @@
 package app.kainos.talk.core
 
 import android.app.Notification
-import android.service.notification.NotificationListenerService
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -20,15 +19,5 @@ class PlatformConstantsTest {
         assertEquals(Notification.Action.SEMANTIC_ACTION_NONE, SemanticAction.NONE)
         assertEquals(Notification.Action.SEMANTIC_ACTION_REPLY, SemanticAction.REPLY)
         assertEquals(Notification.Action.SEMANTIC_ACTION_MARK_AS_READ, SemanticAction.MARK_AS_READ)
-    }
-
-    @Test
-    fun removalReasonsMatchThePlatform() {
-        assertEquals(NotificationListenerService.REASON_CLICK, RemovalReason.CLICK)
-        assertEquals(NotificationListenerService.REASON_CANCEL, RemovalReason.CANCEL)
-        assertEquals(NotificationListenerService.REASON_CANCEL_ALL, RemovalReason.CANCEL_ALL)
-        assertEquals(NotificationListenerService.REASON_APP_CANCEL, RemovalReason.APP_CANCEL)
-        assertEquals(NotificationListenerService.REASON_LISTENER_CANCEL, RemovalReason.LISTENER_CANCEL)
-        assertEquals(NotificationListenerService.REASON_GROUP_SUMMARY_CANCELED, RemovalReason.GROUP_SUMMARY_CANCELED)
     }
 }

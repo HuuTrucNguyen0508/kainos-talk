@@ -1,42 +1,27 @@
-import { BaseWindow, Menu, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
+import { BaseWindow, Menu, clipboard, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { Channel, parseMenuPoint, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
+import { Channel, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
+import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
 import { SERVICES, findService, partitionFor } from '../shared/services.ts';
-import { NO_UNREAD, totalUnread, unreadLabel, windowTitle, type Unread } from '../shared/unread.ts';
+import { totalUnread, unreadLabel, windowTitle } from '../shared/unread.ts';
 import { markPng } from './app-icon.ts';
 import { DEFAULT_SIZE, MIN_SIZE, fitToDisplays, loadAppState, saveAppState, type AppState } from './app-state.ts';
-import { layoutBar, parsePointerEdge, resolveSide, type SidePreference } from './bar.ts';
+import { layoutBar } from './bar.ts';
+import { REVEAL_TIMING, initialReveal, onScreen, raised, stepReveal, type RevealEvent, type RevealPhase, type RevealState } from './dock-reveal.ts';
 import { forwardNotifications } from './notifications.ts';
 import { startVencord } from './vencord.ts';
-import { watchScreenSide } from './screen-side.ts';
 import { startSmsSync } from './sms-sync.ts';
-import { IMAGE_SCHEME, SmsChannel } from '../shared/sms.ts';
-import type { SourceId } from '../shared/sync-protocol.ts';
+import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
+import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
 
-/** How long a website may stay out of sight before it sleeps (KAINOS_SLEEP_AFTER_MS for tests). */
-const SLEEP_AFTER_MS = Number(process.env.KAINOS_SLEEP_AFTER_MS) || 15 * 60_000;
-
-const isMirroredWebsite = (id: string) => Object.values(WEBSITE_FOR_SOURCE).includes(id);
-
-/** The website each phone source has in the bar, if any. */
-const WEBSITE_FOR_SOURCE: Record<SourceId, string | null> = {
-  whatsapp: 'whatsapp',
-  'whatsapp-business': null,
-  discord: 'discord',
-  messenger: 'messenger',
-  sms: null,
-  protonmail: 'proton-mail',
-};
 import { createServiceRuntime, type ServiceRuntime } from './service-runtime.ts';
 import { shortcutFor } from './shortcuts.ts';
 import { trayHostPresent } from './tray-host.ts';
 import { chromeUserAgent } from './user-agent.ts';
 
 const APP_NAME = 'Kainos Talk';
-/** The sidebar's --rail colour, so the window never flashes white while it loads. */
-const RAIL_BACKGROUND = { light: '#DDE4E1', dark: '#162024' };
-/** The sidebar's --surface colour, behind a service page until it paints. */
-const SURFACE_BACKGROUND = { light: '#F6F8F7', dark: '#0E1619' };
+/** Longest phone name the dock shows; the name comes from the phone. */
+const PHONE_NAME_MAX = 60;
 
 app.setName(APP_NAME);
 if (process.env.KAINOS_USER_DATA) app.setPath('userData', process.env.KAINOS_USER_DATA);
@@ -62,15 +47,13 @@ if (app.requestSingleInstanceLock()) {
   app.quit();
 }
 
-function themeBackground(colors = RAIL_BACKGROUND): string {
-  return nativeTheme.shouldUseDarkColors ? colors.dark : colors.light;
-}
-
 async function start(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   const serviceIds = SERVICES.map((service) => service.id);
   const statePath = join(app.getPath('userData'), 'kainos-state.json');
   let state: AppState = loadAppState(statePath, serviceIds);
+  /** The theme's --surface: behind the pages until they paint, so nothing flashes in another colour. */
+  const themeBackground = () => resolveTheme(state.theme, nativeTheme.shouldUseDarkColors).surface;
   const icons = { plain: nativeImage.createFromBuffer(markPng(64, false)), lamp: nativeImage.createFromBuffer(markPng(64, true)) };
 
   const saved = state.bounds && fitToDisplays(state.bounds, screen.getAllDisplays().map((display) => display.workArea));
@@ -85,8 +68,8 @@ async function start(): Promise<void> {
     autoHideMenuBar: true,
   });
 
-  // The sidebar page (the bar, plus the notice while a service loads or fails) is a view above
-  // the services, so an auto-hidden bar can slide out over the page's edge.
+  // The dock page: the dock floating over the page's bottom edge (or its strip, when always
+  // shown), plus the notice over the whole window while the active service loads or fails.
   const chrome = new WebContentsView({
     webPreferences: {
       preload: join(__dirname, 'preload-app.cjs'),
@@ -96,32 +79,29 @@ async function start(): Promise<void> {
       spellcheck: false,
     },
   });
-  // Transparent, so the bar can slide in over the page beneath it.
+  // Transparent, so the floating islands and their shadow sit over the page beneath.
   chrome.setBackgroundColor('#00000000');
-  const sidebarContents = chrome.webContents;
-  // The sidebar is local and never navigates or opens windows.
-  sidebarContents.on('will-navigate', (event) => event.preventDefault());
-  sidebarContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const dockContents = chrome.webContents;
+  // The dock page is local and never navigates or opens windows.
+  dockContents.on('will-navigate', (event) => event.preventDefault());
+  dockContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   // Before the service pages start loading, or Discord's first load runs without Vencord.
   await startVencord({
     dir: join(app.getPath('userData'), 'vencord'),
     services: SERVICES.filter((service) => service.clientMod === 'vencord'),
     onFirstInstall: () => {
-      // An asleep Discord picks Vencord up when it wakes; reloading it would wake it now.
-      for (const runtime of runtimes) if (runtime.service.clientMod === 'vencord' && runtime.status().kind !== 'asleep') runtime.reload();
+      for (const runtime of runtimes) if (runtime.service.clientMod === 'vencord') runtime.reload();
     },
   });
 
   let runtimesReady = false;
-  // The inbox: every conversation and mail from the phone, over the local network. It starts
-  // before the service views, so the inbox page's first request finds it ready.
+  // The Texts page: the phone's SMS and RCS conversations, over the local network. It starts
+  // before the service views, so the page's first request finds it ready.
   const smsView = () => runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view.webContents;
-  /** Shows a desktop notification for the inbox; a click opens that conversation or mail. */
-  function notifyFromInbox(source: SourceId, key: string, title: string, body: string): void {
-    const website = WEBSITE_FOR_SOURCE[source];
-    // Muting the Inbox, or the source's own website, silences it.
-    const muted = state.mutedServiceIds.includes('inbox') || (website !== null && state.mutedServiceIds.includes(website));
+  /** Shows a desktop notification for a new text; a click opens that conversation. */
+  function notifyFromInbox(key: string, title: string, body: string): void {
+    const muted = state.mutedServiceIds.includes('inbox');
     if (muted || !Notification.isSupported()) {
       app.emit('kainos-notification', { serviceId: 'inbox', muted, notification: undefined });
       return;
@@ -141,14 +121,13 @@ async function start(): Promise<void> {
     advertise: process.env.KAINOS_SYNC_MDNS !== '0',
     onChange: () => {
       smsView()?.send(SmsChannel.state, sms.state());
-      // Badges of asleep websites and the window title follow the inbox.
+      // The window title and tray lamp follow the inbox.
       if (runtimesReady) render();
     },
     onIncoming: (conversation, message) => {
       const who = conversation.isGroup && message.sender ? `${message.sender} in ${conversation.title}` : conversation.title;
-      notifyFromInbox(conversation.source, conversation.key, `${who} · ${conversation.sourceLabel}`, message.text || 'Picture or attachment');
+      notifyFromInbox(conversation.key, who, message.text || 'Picture or attachment');
     },
-    onMail: (mail) => notifyFromInbox(mail.source, mail.key, `${mail.sender ?? 'New mail'} · ${mail.sourceLabel}`, mail.subject),
   });
   // Pictures stay as bytes in main; the inbox page shows them by URL, and no other session can.
   session.fromPartition(partitionFor(SERVICES.find((service) => service.localPage === 'inbox')!)).protocol.handle(IMAGE_SCHEME, async (request) => {
@@ -160,102 +139,101 @@ async function start(): Promise<void> {
       userAgent: app.userAgentFallback,
       preload: join(__dirname, 'preload-service.cjs'),
       localDir: __dirname,
-      background: themeBackground(SURFACE_BACKGROUND),
+      background: themeBackground(),
       onChange: render,
-      // Websites load when first opened, except the one open at last quit and those kept running.
-      asleep: !service.localPage && service.id !== state.activeServiceId && !state.keepAwakeServiceIds.includes(service.id),
     }),
   );
   const runtimeById = (id: string) => runtimes.find((runtime) => runtime.service.id === id);
   runtimesReady = true;
   for (const runtime of runtimes) win.contentView.addChildView(runtime.view);
   win.contentView.addChildView(chrome);
-  const screenSide = watchScreenSide(win, () => render());
-  nativeTheme.on('updated', () => {
+  function paintThemeBackground(): void {
     win.setBackgroundColor(themeBackground());
-    for (const runtime of runtimes) runtime.setBackground(themeBackground(SURFACE_BACKGROUND));
-  });
+    for (const runtime of runtimes) runtime.setBackground(themeBackground());
+  }
+  nativeTheme.on('updated', paintThemeBackground);
 
   let tray: Tray | undefined;
   let quitting = false;
 
-  const barSide = () => resolveSide(state.barSide, screenSide());
-
-  /**
-   * A website's badge: its page's own count while awake; while asleep, what the phone's inbox
-   * has unread for it.
-   */
-  function unreadFor(runtime: ServiceRuntime): Unread {
-    if (runtime.status().kind !== 'asleep') return runtime.unread();
-    const inbox = sms.state();
-    const mine = (source: SourceId) => WEBSITE_FOR_SOURCE[source] === runtime.service.id;
-    const count =
-      inbox.conversations.filter((c) => mine(c.source)).reduce((n, c) => n + c.unread, 0) +
-      inbox.mails.filter((m) => mine(m.source) && !m.read).length;
-    return count > 0 ? { kind: 'count', count } : NO_UNREAD;
-  }
-
-  /** The phone is paired and connected, so the inbox has every source's messages. */
-  const mirrored = () => sms.state().phone?.connected === true;
-
   function snapshot(): Snapshot {
+    const phone = sms.state().phone;
     return {
       activeId: state.activeServiceId,
-      bar: { side: barSide(), autoHide: state.barAutoHide },
+      phone: phone && { name: phone.name.slice(0, PHONE_NAME_MAX), connected: phone.connected === true },
       services: runtimes.map((runtime) => ({
         id: runtime.service.id,
         name: runtime.service.name,
         color: runtime.service.icon.color,
         glyph: runtime.service.icon.glyph,
+        paint: runtime.service.icon.paint,
+        host: runtime.service.localPage ? '' : new URL(runtime.service.url).host,
         status: runtime.status(),
-        unread: unreadFor(runtime),
+        unread: runtime.unread(),
         muted: state.mutedServiceIds.includes(runtime.service.id),
       })),
     };
   }
 
-  // Auto-hide: the bar comes out while the pointer is against its edge of the page or on the
-  // bar itself, while it has keyboard focus (F6) and while one of its menus is open.
-  let revealed = false;
-  let pointerOnRail = false;
-  let railFocused = false;
-  let menuOpen = false;
-  let hideTimer: NodeJS.Timeout | undefined;
-  function reveal(): void {
-    clearTimeout(hideTimer);
-    if (!state.barAutoHide || revealed) return;
-    revealed = true;
-    render();
+  // The auto-hiding dock: dock-reveal.ts decides, this runs its timers and lays out on change.
+  let reveal: RevealState = initialReveal;
+  let revealTimer: NodeJS.Timeout | undefined;
+  const pagePointers = new Map<WebContents, PagePointer>();
+  function clearPagePointer(contents: WebContents): void {
+    pagePointers.delete(contents);
+    if (contents === runtimeById(state.activeServiceId)?.view.webContents) revealBy({ kind: 'page', at: 'away' });
   }
-  function hideSoon(delay = 300): void {
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => {
-      if (!revealed || pointerOnRail || railFocused || menuOpen) return;
-      revealed = false;
-      render();
-    }, delay);
+  for (const runtime of runtimes) {
+    const contents = runtime.view.webContents;
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) clearPagePointer(contents);
+    });
+    contents.on('render-process-gone', () => clearPagePointer(contents));
+    contents.on('destroyed', () => clearPagePointer(contents));
+  }
+  /** The dock page's centred group, as it last measured it. */
+  let group: DockSize | undefined;
+  /** Last DockFrame sent to the dock page, as JSON. */
+  let sentFrame = '';
+  const waits: Partial<Record<RevealPhase, number>> = REVEAL_TIMING;
+  /** Steps the reveal state; true if the phase changed, so the caller lays out again. */
+  function feed(event: RevealEvent): boolean {
+    const before = reveal.phase;
+    reveal = stepReveal(reveal, event);
+    if (reveal.phase === before) return false;
+    clearTimeout(revealTimer);
+    const wait = waits[reveal.phase];
+    if (wait !== undefined) revealTimer = setTimeout(() => revealBy({ kind: 'timer' }), wait);
+    return true;
+  }
+  function revealBy(event: RevealEvent): void {
+    if (feed(event) && !win.isDestroyed()) layout();
   }
 
   function layout(): void {
     const [width = 0, height = 0] = win.getContentSize();
     const active = runtimeById(state.activeServiceId);
-    const placed = layoutBar({
-      width,
-      height,
-      side: barSide(),
-      autoHide: state.barAutoHide,
-      revealed,
-      // A service that is loading or failed stays hidden, so the sidebar page can show why.
-      activeReady: active?.status().kind === 'ready',
-      // A page in HTML fullscreen (a video, a stream) covers the bar too.
-      activeFullscreen: active?.fullscreen() === true,
-    });
+    feed({ kind: 'page', at: active ? pagePointers.get(active.view.webContents) ?? 'away' : 'away' });
+    // A service that is loading or failed stays hidden, so the dock page can show why.
+    const activeReady = active?.status().kind === 'ready';
+    // A page in HTML fullscreen (a video, a stream) covers the dock too.
+    const activeFullscreen = active?.fullscreen() === true;
+    feed({ kind: 'active', active: !state.dockAlwaysShown && activeReady && !activeFullscreen });
+    const placed = layoutBar({ width, height, activeReady, activeFullscreen, pinned: state.dockAlwaysShown, onScreen: onScreen(reveal.phase), group });
     for (const runtime of runtimes) {
       runtime.view.setBounds(placed.service);
       runtime.view.setVisible(runtime === active && runtime.status().kind === 'ready');
     }
+    // Bounds first, then the frame: the view is in place before the dock slides up into it,
+    // and keeps its bounds (onScreen while leaving) until it has slid away.
     if (placed.chrome) chrome.setBounds(placed.chrome);
     chrome.setVisible(placed.chrome !== undefined);
+    const frame: DockFrame = { kind: placed.frame, raised: placed.frame !== 'float' || raised(reveal.phase), room: width };
+    const key = JSON.stringify(frame);
+    if (key !== sentFrame) {
+      sentFrame = key;
+      dockContents.send(Channel.dockFrame, frame);
+    }
     tellInboxShown();
   }
 
@@ -301,16 +279,12 @@ async function start(): Promise<void> {
     const activeReady = runtimeById(state.activeServiceId)?.status().kind === 'ready';
     if (activeReady && readyActiveId !== state.activeServiceId) focusActiveService();
     readyActiveId = activeReady ? state.activeServiceId : undefined;
-    // With the phone connected the inbox already counts every source, so the websites'
-    // own counts would count the same messages twice.
-    const total = totalUnread(
-      runtimes.filter((runtime) => !mirrored() || !isMirroredWebsite(runtime.service.id)).map((runtime) => unreadFor(runtime)),
-    );
+    const total = totalUnread(runtimes.map((runtime) => runtime.unread()));
     win.setTitle(windowTitle(APP_NAME, total));
     const label = unreadLabel(total);
     tray?.setImage(label ? icons.lamp : icons.plain);
     tray?.setToolTip(label ? `${APP_NAME}: ${label === '•' ? 'new' : label} unread` : APP_NAME);
-    sidebarContents.send(Channel.snapshot, snapshot());
+    dockContents.send(Channel.snapshot, snapshot());
   }
 
   let saveTimer: NodeJS.Timeout | undefined;
@@ -332,46 +306,18 @@ async function start(): Promise<void> {
     updateState({ bounds: win.getNormalBounds(), maximized: win.isMaximized() });
   };
 
-  // Sleep: a website out of sight for SLEEP_AFTER_MS is unloaded to free its memory, unless it is
-  // kept running. Opening it wakes it.
-  const sleepTimers = new Map<string, NodeJS.Timeout>();
-  const keptAwake = (id: string) => state.keepAwakeServiceIds.includes(id);
-  function scheduleSleep(runtime: ServiceRuntime): void {
-    const { id } = runtime.service;
-    clearTimeout(sleepTimers.get(id));
-    sleepTimers.delete(id);
-    if (runtime.service.localPage || keptAwake(id) || id === state.activeServiceId || runtime.status().kind === 'asleep') return;
-    sleepTimers.set(
-      id,
-      setTimeout(() => {
-        sleepTimers.delete(id);
-        if (id !== state.activeServiceId && !keptAwake(id)) runtime.sleep();
-      }, SLEEP_AFTER_MS),
-    );
-  }
-
   function activate(serviceId: string): void {
     const runtime = runtimeById(serviceId);
     if (!runtime) return;
-    const previous = runtimeById(state.activeServiceId);
-    if (state.activeServiceId !== serviceId) updateState({ activeServiceId: serviceId });
-    runtime.wake();
-    scheduleSleep(runtime);
-    if (previous && previous !== runtime) scheduleSleep(previous);
+    if (state.activeServiceId !== serviceId) {
+      const previous = runtimeById(state.activeServiceId);
+      if (previous) clearPagePointer(previous.view.webContents);
+      updateState({ activeServiceId: serviceId });
+      clearPagePointer(runtime.view.webContents);
+      runtime.view.webContents.send(Channel.resetPagePointer);
+    }
     render();
     focusActiveService();
-  }
-
-  // Awake websites that are not on screen start their sleep timers.
-  for (const runtime of runtimes) scheduleSleep(runtime);
-
-  function setKeepAwake(runtime: ServiceRuntime, keep: boolean): void {
-    const { id } = runtime.service;
-    const others = state.keepAwakeServiceIds.filter((other) => other !== id);
-    updateState({ keepAwakeServiceIds: keep ? [...others, id] : others }, 0);
-    if (keep) runtime.wake();
-    scheduleSleep(runtime);
-    render();
   }
 
   function showWindow(): void {
@@ -412,80 +358,93 @@ async function start(): Promise<void> {
   function openServiceMenu(runtime: ServiceRuntime, at: MenuPoint | undefined): void {
     const { id, name } = runtime.service;
     const muted = state.mutedServiceIds.includes(id);
-    const website: Electron.MenuItemConstructorOptions[] = runtime.service.localPage
-      ? []
-      : [
-          {
-            label: 'Keep running in the background',
-            type: 'checkbox',
-            checked: keptAwake(id),
-            click: () => setKeepAwake(runtime, !keptAwake(id)),
-          },
-          { label: 'Sleep now', enabled: runtime.status().kind !== 'asleep' && id !== state.activeServiceId, click: () => runtime.sleep() },
-        ];
     Menu.buildFromTemplate([
       { label: `Reload ${name}`, click: () => runtime.reload() },
       { label: muted ? 'Unmute notifications' : 'Mute notifications', click: () => setMuted(id, !muted) },
-      ...(website.length ? [{ type: 'separator' as const }, ...website] : []),
       { type: 'separator' },
       { label: `Sign out of ${name}…`, click: () => void confirmSignOut(runtime) },
     ]).popup(menuOptions(at));
   }
 
-  /** A menu opened from the bar keeps an auto-hidden bar out until it closes. */
+  /**
+   * `at` is in the dock page's coordinates, so the view's place is added. A dock menu keeps an
+   * auto-hiding dock shown until it closes.
+   */
   function menuOptions(at: MenuPoint | undefined): Electron.PopupOptions {
-    menuOpen = true;
-    return {
-      window: win,
-      ...(at && { x: at.x + chrome.getBounds().x, y: at.y }),
-      callback: () => {
-        menuOpen = false;
-        hideSoon();
-      },
-    };
+    const view = chrome.getBounds();
+    revealBy({ kind: 'menu', open: true });
+    return { window: win, ...(at && { x: at.x + view.x, y: at.y + view.y }), callback: () => revealBy({ kind: 'menu', open: false }) };
   }
 
-  function setBar(patch: { barSide?: SidePreference; barAutoHide?: boolean }): void {
-    updateState(patch, 0);
-    if (!state.barAutoHide) revealed = false;
-    render();
+  /** Kainos' own pages: the dock and the Texts page. Service pages keep their own colours. */
+  const themedPages = () => [dockContents, smsView()].filter((contents) => contents !== undefined);
+  function chooseTheme(theme: ThemeChoice): void {
+    updateState({ theme }, 0);
+    paintThemeBackground();
+    for (const contents of themedPages()) contents.send(Channel.theme, theme);
   }
 
   function openBarMenu(at: MenuPoint | undefined): void {
-    const side = (value: SidePreference, label: string): Electron.MenuItemConstructorOptions => ({
-      label,
-      type: 'radio',
-      checked: state.barSide === value,
-      click: () => setBar({ barSide: value }),
-    });
+    const choices: { id: ThemeChoice; name: string }[] = [{ id: 'system', name: 'Match system' }, ...THEMES];
     Menu.buildFromTemplate([
       {
-        label: 'Hide the bar until the pointer reaches it',
+        label: 'Always show the dock',
         type: 'checkbox',
-        checked: state.barAutoHide,
-        click: () => setBar({ barAutoHide: !state.barAutoHide }),
+        checked: state.dockAlwaysShown,
+        click: () => {
+          updateState({ dockAlwaysShown: !state.dockAlwaysShown }, 0);
+          render();
+        },
       },
-      { type: 'separator' },
-      side('auto', `Bar on the screen's outer edge (now ${screenSide()})`),
-      side('left', 'Bar always on the left'),
-      side('right', 'Bar always on the right'),
+      {
+        label: 'Theme',
+        submenu: choices.map(({ id, name }) => ({ label: name, type: 'radio', checked: state.theme === id, click: () => chooseTheme(id) })),
+      },
     ]).popup(menuOptions(at));
   }
 
-  /** F6: from a service page to its rail button, and from the sidebar back into the page. */
+  async function confirmForgetPhone(name: string): Promise<void> {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['Forget', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `Forget ${name}?`,
+      detail: 'Its texts leave this computer, and you will need to connect it again.',
+    });
+    if (response === 0) sms.forgetPhone();
+  }
+
+  /** The phone island: a menu once a phone is paired; before that it leads to the Texts page's setup. */
+  function openPhoneMenu(at: MenuPoint | undefined): void {
+    const inbox = runtimes.find((runtime) => runtime.service.localPage === 'inbox')!;
+    const phone = sms.state().phone;
+    if (!phone) {
+      activate(inbox.service.id);
+      return;
+    }
+    const name = phone.name.slice(0, PHONE_NAME_MAX);
+    Menu.buildFromTemplate([
+      { label: 'Open Texts', click: () => activate(inbox.service.id) },
+      { type: 'separator' },
+      { label: `Forget ${name}…`, click: () => void confirmForgetPhone(name) },
+    ]).popup(menuOptions(at));
+  }
+
+  /** F6: from a service page to its tab in the dock, and from the dock back into the page. */
   function switchPane(from: WebContents): void {
-    if (from !== sidebarContents) {
-      railFocused = true;
-      reveal();
-      sidebarContents.focus();
-      sidebarContents.send(Channel.focusRail);
+    if (from !== dockContents) {
+      // On screen before it takes focus; the dock page then confirms keyboard focus itself.
+      revealBy({ kind: 'keyboard', focused: true });
+      dockContents.focus();
+      dockContents.send(Channel.focusDock);
       return;
     }
     const runtime = runtimeById(state.activeServiceId);
     if (runtime?.status().kind === 'ready') runtime.view.webContents.focus();
   }
 
-  // Ctrl+1..9, Ctrl+Q and F6 work wherever focus is: the sidebar or any service page.
+  // Ctrl+1..9, Ctrl+Q and F6 work wherever focus is: the dock or any service page.
   const handleShortcuts = (contents: WebContents) =>
     contents.on('before-input-event', (event, input) => {
       const shortcut = shortcutFor(input, process.platform, runtimes.length);
@@ -495,54 +454,50 @@ async function start(): Promise<void> {
       else if (shortcut.kind === 'switch-pane') switchPane(contents);
       else activate(runtimes[shortcut.index]!.service.id);
     });
-  handleShortcuts(sidebarContents);
-  const hookPage = (runtime: ServiceRuntime) => {
-    const contents = runtime.view.webContents;
-    handleShortcuts(contents);
-    // Each page reports when the pointer reaches its side edges; the active one may bring the bar out.
-    contents.ipc.on(Channel.pointerEdge, (_event, raw: unknown) => {
-      const edge = parsePointerEdge(raw);
-      if (!edge || !state.barAutoHide || runtime.service.id !== state.activeServiceId) return;
-      if (edge === barSide()) reveal();
-      else hideSoon();
-    });
-  };
-  runtimes.forEach((runtime, index) => {
-    hookPage(runtime);
-    // A website that went to sleep has a new, empty view: it takes the old one's place.
-    runtime.onNewView((view, previous) => {
-      win.contentView.removeChildView(previous);
-      win.contentView.addChildView(view, index);
-      hookPage(runtime);
-    });
-  });
-  sidebarContents.on('focus', () => {
-    railFocused = true;
-  });
-  sidebarContents.on('blur', () => {
-    railFocused = false;
-    hideSoon();
-  });
+  handleShortcuts(dockContents);
+  for (const runtime of runtimes) handleShortcuts(runtime.view.webContents);
 
-  // Sidebar IPC. Only the sidebar page may call it, and only with known service ids.
-  const fromSidebar = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === sidebarContents;
-  ipcMain.handle(Channel.getSnapshot, (event) => (fromSidebar(event) ? snapshot() : undefined));
-  const onSidebar = (channel: string, act: (runtime: ServiceRuntime, extra: unknown) => void) =>
+  // Dock IPC. Only the dock page may call it, and only with known service ids.
+  const fromDock = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === dockContents;
+  ipcMain.handle(Channel.getSnapshot, (event) => (fromDock(event) ? snapshot() : undefined));
+  ipcMain.handle(Channel.getTheme, (event) => (themedPages().includes(event.sender) ? state.theme : undefined));
+  const onDock = (channel: string, act: (runtime: ServiceRuntime, extra: unknown) => void) =>
     ipcMain.on(channel, (event, id: unknown, extra: unknown) => {
-      const runtime = fromSidebar(event) && findService(id) ? runtimeById(id as string) : undefined;
+      const runtime = fromDock(event) && findService(id) ? runtimeById(id as string) : undefined;
       if (runtime) act(runtime, extra);
     });
-  onSidebar(Channel.activate, (runtime) => activate(runtime.service.id));
-  onSidebar(Channel.retry, (runtime) => runtime.restart());
-  onSidebar(Channel.openServiceMenu, (runtime, at) => openServiceMenu(runtime, parseMenuPoint(at)));
-  ipcMain.on(Channel.railPointer, (event, over: unknown) => {
-    if (!fromSidebar(event)) return;
-    pointerOnRail = over === true;
-    if (pointerOnRail) reveal();
-    else hideSoon();
-  });
+  onDock(Channel.activate, (runtime) => activate(runtime.service.id));
+  onDock(Channel.retry, (runtime) => runtime.restart());
+  onDock(Channel.openServiceMenu, (runtime, at) => openServiceMenu(runtime, parseMenuPoint(at)));
   ipcMain.on(Channel.openBarMenu, (event, at: unknown) => {
-    if (fromSidebar(event)) openBarMenu(parseMenuPoint(at));
+    if (fromDock(event)) openBarMenu(parseMenuPoint(at));
+  });
+  ipcMain.on(Channel.openPhoneMenu, (event, at: unknown) => {
+    if (fromDock(event)) openPhoneMenu(parseMenuPoint(at));
+  });
+  ipcMain.on(Channel.dockSize, (event, raw: unknown) => {
+    const size = fromDock(event) ? parseDockSize(raw) : undefined;
+    if (!size || (size.width === group?.width && size.height === group.height)) return;
+    group = size;
+    layout();
+  });
+  ipcMain.on(Channel.dockPointer, (event, over: unknown) => {
+    if (fromDock(event)) revealBy({ kind: 'dock-pointer', over: over === true });
+  });
+  ipcMain.on(Channel.dockKeyboard, (event, focused: unknown) => {
+    if (fromDock(event)) revealBy({ kind: 'keyboard', focused: focused === true });
+  });
+  ipcMain.on(Channel.dismissDock, (event) => {
+    if (!fromDock(event)) return;
+    revealBy({ kind: 'dismiss' });
+    switchPane(dockContents);
+  });
+  // Only the page on screen moves the dock; the others are hidden and see no pointer.
+  ipcMain.on(Channel.pagePointer, (event, raw: unknown) => {
+    const at = parsePagePointer(raw);
+    if (!at || !runtimes.some((runtime) => runtime.view.webContents === event.sender)) return;
+    pagePointers.set(event.sender, at);
+    if (event.sender === runtimeById(state.activeServiceId)?.view.webContents) revealBy({ kind: 'page', at });
   });
 
   const smsContents = smsView();
@@ -560,12 +515,8 @@ async function start(): Promise<void> {
   ipcMain.on(SmsChannel.forgetPhone, (event) => {
     if (fromSms(event)) sms.forgetPhone();
   });
-  ipcMain.on(SmsChannel.mailAction, (event, key: unknown, action: unknown) => {
-    if (fromSms(event) && typeof key === 'string' && (action === 'archive' || action === 'trash' || action === 'markRead')) sms.mailAction(key, action);
-  });
-  ipcMain.on(SmsChannel.openService, (event, id: unknown) => {
-    const service = fromSms(event) ? findService(id) : undefined;
-    if (service && !service.localPage) activate(service.id);
+  ipcMain.on(SmsChannel.copyCode, (event, code: unknown) => {
+    if (fromSms(event) && isCopyableCode(code)) clipboard.writeText(code);
   });
   ipcMain.on(SmsChannel.send, (event, to: unknown, text: unknown) => {
     if (fromSms(event) && typeof to === 'string' && typeof text === 'string' && text.length <= 5000) sms.send(to, text);
@@ -573,8 +524,7 @@ async function start(): Promise<void> {
 
   forwardNotifications({
     runtimeFor: (contents) => runtimes.find((runtime) => runtime.view.webContents === contents),
-    // While the phone is connected, the inbox notifies for these websites; their own would be doubles.
-    isMuted: (id) => state.mutedServiceIds.includes(id) || (mirrored() && isMirroredWebsite(id)),
+    isMuted: (id) => state.mutedServiceIds.includes(id),
     focusService: (id) => {
       showWindow();
       activate(id);
@@ -598,8 +548,9 @@ async function start(): Promise<void> {
   }
 
   win.on('closed', () => {
+    clearTimeout(revealTimer);
     for (const runtime of runtimes) if (!runtime.view.webContents.isDestroyed()) runtime.view.webContents.close();
-    if (!sidebarContents.isDestroyed()) sidebarContents.close();
+    if (!dockContents.isDestroyed()) dockContents.close();
   });
   win.on('resize', () => {
     layout();
@@ -618,9 +569,14 @@ async function start(): Promise<void> {
     const hasTray = process.platform === 'linux' ? trayHostPresent() : Promise.resolve(true);
     void hasTray.then((yes) => (yes ? win.hide() : app.quit()));
   });
-  sidebarContents.once('did-finish-load', () => {
+  dockContents.once('did-finish-load', () => {
     if (state.maximized) win.maximize();
     win.show();
+  });
+  // A fresh dock page has missed the frames sent while it loaded.
+  dockContents.on('did-finish-load', () => {
+    sentFrame = '';
+    layout();
   });
 
   app.on('second-instance', showWindow);
@@ -630,6 +586,6 @@ async function start(): Promise<void> {
     updateState({}, 0);
   });
 
-  sidebarContents.loadFile(join(__dirname, 'renderer', 'index.html')).catch((error: unknown) => console.error(error));
+  dockContents.loadFile(join(__dirname, 'renderer', 'index.html')).catch((error: unknown) => console.error(error));
   render();
 }

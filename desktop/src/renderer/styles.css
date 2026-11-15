@@ -1,311 +1,372 @@
 @import './tokens.css';
 
-/* Switchboard: the rail is a panel of sockets, the active one is plugged into the page. */
+/* The dock page. Main places it one of three ways (body[data-frame]): floating, only as big as
+   the centred islands and their shadow, over the page's bottom edge; the always-shown strip
+   along the bottom of the window; or, while the active service loads or fails, the whole
+   window, the stage above the strip. */
 * {
   box-sizing: border-box;
 }
-
 html,
 body {
   height: 100%;
   margin: 0;
 }
-
-/* The page is a transparent view laid over the service: the bar on its side, and the stage
-   (filling the rest) only while the service is loading or failed. */
 body {
   display: grid;
-  grid-template-columns: var(--rail-width) 1fr;
-  grid-template-areas: 'rail stage';
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) var(--dock-h);
   overflow: hidden;
-  background: transparent;
+  background: none;
   color: var(--ink);
   font: 400 15px/1.45 'Atkinson Hyperlegible', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
   user-select: none;
 }
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+h1,
+p,
+dl,
+dd,
+ul {
+  margin: 0;
+}
+ul {
+  padding: 0;
+  list-style: none;
+}
 
-/* Rail */
+/* ---------- Dock: the services and the phone link, together in the middle ---------- */
 
-.rail {
-  grid-area: rail;
+.dock {
+  grid-row: 2;
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 18px;
-  padding-top: 16px;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  background: var(--strip);
+  box-shadow: inset 0 1px var(--rail-edge);
+}
+/* Its natural width, so main.ts can measure it whatever the view's width; main.ts caps it. */
+.group {
+  display: flex;
+  flex: none;
+  gap: 12px;
+  align-items: center;
+  width: max-content;
+}
+.island {
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: 50px;
+  padding: 0 5px;
+  border: 1px solid var(--rail-edge);
+  border-radius: 16px;
   background: var(--rail);
-  box-shadow: inset -1px 0 var(--rail-edge);
+  box-shadow: var(--shadow-island);
+}
+.services {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .mark-button {
   display: grid;
   place-items: center;
-  align-self: center;
-  width: 40px;
+  flex: none;
+  width: 42px;
   height: 40px;
-  margin: 0;
   padding: 0;
   border: 0;
-  border-radius: 12px;
-  background: transparent;
-  cursor: pointer;
+  border-radius: 11px;
+  background: none;
 }
 .mark-button:hover {
-  background: var(--rail-edge);
-}
-.mark-button:focus-visible {
-  outline: 2px solid var(--teal);
-  outline-offset: 1px;
+  background: var(--well);
 }
 .mark {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
 }
-.mark rect {
-  fill: var(--teal);
+.divider {
+  flex: none;
+  width: 1px;
+  height: 26px;
+  margin: 0 6px 0 4px;
+  background: var(--rail-edge);
 }
-.mark-ring {
-  fill: none;
-  stroke: var(--rail);
-  stroke-width: 2.6;
-}
-.mark-dot {
-  fill: var(--rail);
-}
-
-.sockets {
+.tabs {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-
-.socket {
-  --behind: var(--rail);
+.tabs > li {
+  flex: none;
+}
+.tab {
   position: relative;
-  display: grid;
-  place-items: center;
-  height: 56px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px 0 5px;
+  border: 0;
+  border-radius: 11px;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 16px;
+  white-space: nowrap;
 }
-
-/* The active socket shares the page's colour and curves into it. */
-.socket-tab {
-  position: absolute;
-  inset: 0 0 0 7px;
-  border-radius: 18px 0 0 18px;
-  background: var(--surface);
-  opacity: 0;
-}
-.socket-tab::before,
-.socket-tab::after {
+/* The hit area reaches the window's bottom edge, which is the screen edge in a tiled window. */
+.tab::after {
   content: '';
   position: absolute;
-  right: 0;
-  width: 16px;
-  height: 16px;
+  inset: -5px -1px -12px;
 }
-.socket-tab::before {
-  top: -16px;
-  background: radial-gradient(circle at 0 0, transparent 15.5px, var(--surface) 16px);
+.tab:hover {
+  color: var(--ink);
 }
-.socket-tab::after {
-  bottom: -16px;
-  background: radial-gradient(circle at 0 100%, transparent 15.5px, var(--surface) 16px);
+.tab[aria-current='page'] {
+  background: var(--well);
+  color: var(--ink);
+  font-weight: 700;
 }
-.socket[data-active] {
-  --behind: var(--surface);
-}
-.socket[data-active] .socket-tab {
-  opacity: 1;
-}
-.socket[data-active]::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 16px;
-  bottom: 16px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--teal);
-}
-
 .tile {
   position: relative;
   display: grid;
+  flex: none;
   place-items: center;
-  width: var(--tile);
-  height: var(--tile);
-  margin: 0 0 0 4px;
-  padding: 0;
-  border: 0;
-  border-radius: 14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
   background: var(--brand);
   color: #fff;
-  cursor: pointer;
-  transition: border-radius 160ms ease, transform 160ms ease;
-}
-.tile:hover,
-.socket[data-active] .tile {
-  border-radius: 12px;
-}
-.tile:active {
-  transform: scale(0.95);
-}
-.tile:focus-visible,
-.socket[data-status='loading'] .tile:focus-visible {
-  outline: 2px solid var(--teal);
-  outline-offset: 3px;
 }
 .tile > svg {
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
+}
+.glyph-stroke {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-
-/* Loading: a dashed patch line around the tile, not yet seated. The glyph keeps full contrast.
-   A focus ring replaces it (same outline), and the button's label still says "loading". */
-.socket[data-status='loading'] .tile {
-  outline: 2px dashed var(--teal);
-  outline-offset: 2px;
-}
-
-/* Asleep: the website is unloaded to save memory. The tile goes quiet; its lamp still shows
-   what the phone's inbox has unread for it. */
-.socket[data-status='asleep'] .tile {
-  filter: saturate(0.3);
-  opacity: 0.7;
-}
-.socket[data-status='asleep'] .tile:hover,
-.socket[data-status='asleep'] .tile:focus-visible {
-  filter: none;
-  opacity: 1;
-}
-
-/* Unread lamp */
-.badge {
-  position: absolute;
-  top: -6px;
-  right: -8px;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 5px;
-  border: 2px solid var(--behind);
-  border-radius: 10px;
-  background: var(--lamp);
-  color: var(--lamp-ink);
-  font: 700 11px/16px 'Atkinson Hyperlegible', system-ui, sans-serif;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-.badge[data-marker] {
-  top: -3px;
-  right: -3px;
-  min-width: 14px;
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  font-size: 0;
-}
-.badge:empty {
-  display: none;
-}
-
-/* Muted and failed marks share the bottom-right corner; failed wins. */
-.flag {
-  position: absolute;
-  right: -7px;
-  bottom: -7px;
-  display: none;
-  place-items: center;
+.tile > .glyph-stroke {
   width: 20px;
   height: 20px;
-  border: 2px solid var(--behind);
-  border-radius: 50%;
-  background: var(--ink);
-  color: var(--rail);
+  stroke-width: 2;
 }
-.flag > svg {
-  width: 12px;
-  height: 12px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
+.glyph-fill {
+  fill: currentColor;
 }
-.socket[data-muted] .flag-muted,
-.socket[data-status='failed'] .flag-failed {
+.tab[data-status='loading'] .tile {
+  outline: 1.5px dashed var(--accent);
+  outline-offset: 2px;
+}
+.state {
   display: grid;
+  place-items: center;
+  color: var(--ink-soft);
 }
-.socket[data-status='failed'] .flag-muted {
+.state:empty {
   display: none;
 }
-.flag-failed {
+.state svg.ic {
+  width: 19px;
+  height: 19px;
+}
+.state[data-kind='failed'],
+.state[data-kind='offline'] {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
   background: var(--alert);
-  color: var(--surface);
+  color: var(--alert-ink);
+}
+.state[data-kind='failed'] svg.ic,
+.state[data-kind='offline'] svg.ic {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.4;
+}
+/* When the names do not fit, only the active service keeps its name. */
+.dock[data-icons] .tab,
+.dock[data-compact] .tab:not([aria-current='page']) {
+  padding-right: 5px;
+}
+.dock[data-icons] .tab .name,
+.dock[data-compact] .tab:not([aria-current='page']) .name {
+  display: none;
 }
 
-/* Stage: what shows while the active service is not on screen. */
+.link {
+  min-width: 0;
+  max-width: 340px;
+  gap: 10px;
+  padding: 0 14px 0 12px;
+  color: var(--ink-soft);
+  font-size: 16px;
+  white-space: nowrap;
+}
+.link:hover {
+  background: var(--well);
+}
+.link svg.ic {
+  width: 22px;
+  height: 22px;
+}
+.link > span {
+  flex: none;
+}
+.link b {
+  min-width: 0;
+  overflow: hidden;
+  max-width: 24ch;
+  color: var(--ink);
+  font-weight: 400;
+  text-overflow: ellipsis;
+}
+.dock .count {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 24px;
+}
+.dock .dot {
+  width: 9px;
+  height: 9px;
+}
+.link .dot {
+  background: var(--accent);
+}
+.link[data-off] .dot {
+  background: var(--alert);
+}
+.link[data-off] span {
+  color: var(--alert);
+}
 
-/* Empty while the service is on screen, when the page is only the bar's strip. */
+/* ---------- Floating: the islands alone over the page, sliding up from the window's edge ---------- */
+
+body[data-frame='float'] {
+  display: block;
+}
+body[data-frame='float'] .dock {
+  height: 100%;
+  align-items: flex-end;
+  padding: var(--float-margin) var(--float-margin) var(--float-bottom);
+  background: none;
+  box-shadow: none;
+}
+/* Lowered: below the window's edge (the view clips it) and faded. Leaving accelerates away. */
+body[data-frame='float'] .group {
+  opacity: 0;
+  transform: translateY(calc(100% + var(--float-bottom)));
+  transition:
+    transform 170ms cubic-bezier(0.4, 0, 1, 1),
+    opacity 140ms linear 30ms;
+}
+body[data-frame='float'][data-raised] .group {
+  opacity: 1;
+  transform: none;
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 110ms linear;
+}
+body[data-frame='float'] .island {
+  box-shadow: var(--shadow-float);
+}
+body[data-frame='float'] .tab::after {
+  bottom: calc(-5px - var(--float-bottom));
+}
+
+/* ---------- Stage: the active service loading or failed, over the whole window ---------- */
+
+.stage {
+  grid-row: 1;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
 .stage:empty {
   display: none;
 }
-.stage {
-  grid-area: stage;
-  display: grid;
-  min-width: 0;
-  overflow: hidden;
-  background: var(--surface);
-  place-items: center;
-  padding: 32px;
-}
-
 .notice {
   display: grid;
-  justify-items: start;
-  gap: 6px;
-  width: min(100%, 26rem);
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 0 28px;
+  align-items: start;
+  width: min(100% - 64px, 38rem);
+  margin-bottom: 5vh;
 }
 .notice .tile {
-  width: 56px;
-  height: 56px;
-  margin: 0 0 14px;
-  border-radius: 16px;
-  cursor: default;
+  width: 88px;
+  height: 88px;
+  border-radius: 24px;
 }
 .notice .tile > svg {
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
+}
+.notice[data-state='loading'] .tile {
+  outline: 2px dashed var(--accent);
+  outline-offset: 5px;
 }
 .notice h1 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: -0.005em;
+  font-size: 30px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
 }
 .notice p {
-  margin: 0;
-  max-width: 36ch;
+  max-width: 40ch;
+  margin-top: 6px;
   color: var(--ink-soft);
 }
-.notice .host {
-  font-size: 13px;
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--rail);
+  font-size: 14px;
+  user-select: text;
 }
-
+.facts dt {
+  color: var(--ink-soft);
+}
+.facts dd {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
 .signal {
   position: relative;
-  width: 180px;
-  height: 2px;
+  width: 300px;
+  max-width: 100%;
+  height: 3px;
   margin-top: 18px;
   overflow: hidden;
-  border-radius: 1px;
+  border-radius: 2px;
   background: var(--rail-edge);
 }
 .signal::after {
@@ -313,92 +374,28 @@ body {
   position: absolute;
   inset: 0 auto 0 0;
   width: 48px;
-  border-radius: 1px;
-  background: var(--teal);
+  border-radius: 2px;
+  background: var(--accent);
   animation: travel 1.4s ease-in-out infinite alternate;
 }
-
-.retry {
-  margin-top: 18px;
-  padding: 9px 18px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--teal);
-  color: var(--surface);
-  font: 700 15px/1.2 'Atkinson Hyperlegible', system-ui, sans-serif;
-  cursor: pointer;
+.actions {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 16px;
 }
-.retry:hover {
-  filter: brightness(1.08);
-}
-.retry:focus-visible {
-  outline: 2px solid var(--teal);
-  outline-offset: 3px;
-}
-
-/* Bar on the right: everything that touches the page side is mirrored. */
-body[data-side='right'] {
-  grid-template-columns: 1fr var(--rail-width);
-  grid-template-areas: 'stage rail';
-}
-body[data-side='right'] .rail {
-  box-shadow: inset 1px 0 var(--rail-edge);
-}
-body[data-side='right'] .socket-tab {
-  inset: 0 7px 0 0;
-  border-radius: 0 18px 18px 0;
-}
-body[data-side='right'] .socket-tab::before,
-body[data-side='right'] .socket-tab::after {
-  right: auto;
-  left: 0;
-}
-body[data-side='right'] .socket-tab::before {
-  background: radial-gradient(circle at 100% 0, transparent 15.5px, var(--surface) 16px);
-}
-body[data-side='right'] .socket-tab::after {
-  background: radial-gradient(circle at 100% 100%, transparent 15.5px, var(--surface) 16px);
-}
-body[data-side='right'] .socket[data-active]::before {
-  left: auto;
-  right: 0;
-  border-radius: 3px 0 0 3px;
-}
-body[data-side='right'] .rail .tile {
-  margin: 0 4px 0 0;
-}
-
-/* Auto-hidden bar: it comes out over the page, so the active socket cannot curve into it.
-   A teal patch line marks the edge it slid out of the page from. */
-body[data-auto-hide] .socket-tab {
-  display: none;
-}
-body[data-auto-hide] .socket[data-active] {
-  --behind: var(--rail);
-}
-body[data-auto-hide] .socket[data-active] .tile {
-  outline: 2px solid var(--teal);
-  outline-offset: 3px;
-}
-body[data-auto-hide] .rail {
-  box-shadow: inset -2px 0 var(--teal);
-}
-body[data-auto-hide][data-side='right'] .rail {
-  box-shadow: inset 2px 0 var(--teal);
+.actions span {
+  color: var(--ink-soft);
+  font-size: 14px;
 }
 
 @keyframes travel {
   to {
-    transform: translateX(132px);
+    transform: translateX(252px);
   }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  .tile {
-    transition: none;
-  }
   .signal::after {
-    animation: none;
     width: 100%;
     opacity: 0.45;
   }

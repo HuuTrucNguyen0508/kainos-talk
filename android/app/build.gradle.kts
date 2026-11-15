@@ -64,7 +64,7 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
-// Screenshots of every product screen, light, dark and 200% font, recorded by
+// Screenshots of setup and Connect to PC, light, dark and 200% font, recorded by
 // `./gradlew :app:recordRoborazziDebug` and checked by `:app:verifyRoborazziDebug`.
 roborazzi {
     outputDir.set(file("src/test/screenshots"))
@@ -78,7 +78,6 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
-    implementation(libs.compose.material.icons.core)
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)

@@ -6,17 +6,12 @@ import java.security.MessageDigest
 private val BIDI_CONTROLS = Regex("[\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]")
 private val WHITESPACE = Regex("\\s+")
 
-/** Trailing message counter that WhatsApp adds to group titles, such as "Family (3 messages)". */
-private val TITLE_COUNTER = Regex("\\s*\\(\\d+\\s+[^\\d()]+\\)\\s*$")
-
 fun cleanText(value: String?): String? = value?.replace(BIDI_CONTROLS, "")?.trim()?.takeIf { it.isNotEmpty() }
-
-fun stripTitleCounter(title: String): String = title.replace(TITLE_COUNTER, "").trim()
 
 fun normalizeForMatch(text: String): String = text.replace(BIDI_CONTROLS, "").replace(WHITESPACE, " ").trim()
 
 /**
- * Drops what no source should turn into a message: ongoing and foreground-service
+ * Drops what should never turn into a message: ongoing and foreground-service
  * notifications and group summaries. Returns the reason, or null to continue.
  */
 fun commonIgnoreReason(snapshot: NotificationSnapshot): String? = when {
@@ -41,7 +36,7 @@ private val MEDIA_PREFIXES = listOf(
 
 /**
  * Guesses the media type from the emoji label a chat app puts in front of the text, or from
- * the message's data MIME type. The emoji labels are unverified guesses for current WhatsApp.
+ * the message's data MIME type. The emoji labels are unverified guesses at what chat apps use.
  */
 fun mediaKindOf(text: String?, mimeType: String?): MediaKind? {
     val trimmed = text?.trimStart().orEmpty()
@@ -85,7 +80,6 @@ private fun SnapshotAction.ref() = ActionRef(index, fromWearable, title)
 private fun SnapshotAction.titleMatches(regex: Regex) = title?.let { regex.containsMatchIn(it) } == true
 
 private val REPLY_TITLE = Regex("reply", RegexOption.IGNORE_CASE)
-private val MARK_READ_TITLE = Regex("mark\\s+(as\\s+)?read", RegexOption.IGNORE_CASE)
 
 /**
  * The inline-reply action: a declared reply action with a free-form input first, then any
@@ -98,15 +92,6 @@ fun pickReplyAction(snapshot: NotificationSnapshot): ActionRef? {
         candidates.firstOrNull { it.semanticAction == SemanticAction.REPLY }
             ?: candidates.firstOrNull { it.titleMatches(REPLY_TITLE) }
             ?: candidates.firstOrNull()
-        )?.ref()
-}
-
-/** A "mark as read" action that needs no input and opens no UI. */
-fun pickMarkReadAction(snapshot: NotificationSnapshot): ActionRef? {
-    val candidates = (snapshot.actions + snapshot.wearableActions).filter { it.remoteInputs.isEmpty() }
-    return (
-        candidates.firstOrNull { it.semanticAction == SemanticAction.MARK_AS_READ }
-            ?: candidates.firstOrNull { it.titleMatches(MARK_READ_TITLE) && !it.showsUserInterface }
         )?.ref()
 }
 
@@ -127,5 +112,5 @@ fun messageDedupKey(conversationKey: String, message: ParsedMessage): String {
     return digest.joinToString("") { "%02x".format(it) }
 }
 
-/** Joins identity parts into a conversation or mail key. */
+/** Joins identity parts into a conversation key. */
 fun stableKey(vararg parts: Any?): String = parts.joinToString("|") { it?.toString().orEmpty() }

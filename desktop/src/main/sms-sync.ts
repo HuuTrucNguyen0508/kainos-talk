@@ -15,9 +15,7 @@ import {
   parsePhoneFrame,
   type PcFrame,
   type PhoneFrame,
-  type MailAction,
   type SyncConversation,
-  type SyncMail,
   type SyncMessage,
 } from '../shared/sync-protocol.ts';
 import type { SmsState } from '../shared/sms.ts';
@@ -31,8 +29,6 @@ export interface SmsSyncOptions {
   readonly onChange: () => void;
   /** A message arrived that the user has not seen. */
   readonly onIncoming: (conversation: SyncConversation, message: SyncMessage) => void;
-  /** A mail arrived that the user has not seen. */
-  readonly onMail?: (mail: SyncMail) => void;
 }
 
 export interface SmsSync {
@@ -40,8 +36,6 @@ export interface SmsSync {
   /** Sends a reply through the phone; false when no phone is connected. */
   reply(key: string, text: string): boolean;
   markRead(key: string): void;
-  /** Asks the phone to archive, trash or mark a mail read through the mail app; false when offline. */
-  mailAction(key: string, action: MailAction): boolean;
   answerPairing(accept: boolean): void;
   forgetPhone(): void;
   /** Sends a new text to a number through the phone; false when no phone is connected. */
@@ -73,7 +67,7 @@ const IMAGE_TIMEOUT_MS = 20_000;
 const IMAGE_CACHE_BYTES = 24 * 1024 * 1024;
 /** Under the phone's 90 s read timeout; each ping wakes the phone's Wi-Fi, so no more often. */
 const PING_EVERY_MS = 60_000;
-/** The phone answers a ping at once; none within this long and it is gone (the PC mutes the sites' own notifications while it is thought connected). */
+/** The phone answers a ping at once; none within this long and it is gone. */
 const PONG_GRACE_MS = 20_000;
 /** A connection that is not a connected phone (pairing, or one that never said hello) and went quiet. */
 const DEAD_AFTER_MS = 150_000;
@@ -168,17 +162,15 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
     writeJson(phoneFile, phone);
     connection?.socket.destroy();
     conversations.clear();
-    mails.clear();
     hashes.clear();
     line.send({ t: 'paired', deviceId: phone.id });
     line.socket.end();
     endPairing();
   }
   const conversations = new Map<string, SyncConversation>();
-  const mails = new Map<string, SyncMail>();
   /**
-   * The `frameHash` of the frame each conversation and mail came in, by `conv:` or `mail:` and
-   * its key. One changed here (marked read) has none, so the phone sends it again.
+   * The `frameHash` of the frame each conversation came in, by its key. One changed here (marked
+   * read) has none, so the phone sends it again.
    */
   const hashes = new Map<string, string>();
   const seen = new Set<string>();
@@ -208,10 +200,11 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
   }
 
   function receive(frame: PhoneFrame, line: string): void {
+    if (frame.t === 'ignored') return;
     if (frame.t === 'conversation') {
       const { conversation } = frame;
       conversations.set(conversation.key, conversation);
-      hashes.set(`conv:${conversation.key}`, frameHash(line));
+      hashes.set(conversation.key, frameHash(line));
       for (const message of conversation.messages) {
         if (seen.has(message.id)) continue;
         seen.add(message.id);
@@ -234,18 +227,9 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       for (const done of imageWaiters.get(frame.id) ?? []) done(picture);
       imageWaiters.delete(frame.id);
       return;
-    } else if (frame.t === 'mail') {
-      const { mail } = frame;
-      const fresh = !mails.has(mail.key) && !mail.read && mail.timeMs >= connectedAt - 30_000;
-      mails.set(mail.key, mail);
-      hashes.set(`mail:${mail.key}`, frameHash(line));
-      if (fresh) options.onMail?.(mail);
-    } else if (frame.t === 'mailRemoved') {
-      mails.delete(frame.key);
-      hashes.delete(`mail:${frame.key}`);
     } else if (frame.t === 'removed') {
       conversations.delete(frame.key);
-      hashes.delete(`conv:${frame.key}`);
+      hashes.delete(frame.key);
     } else if (frame.t === 'replyResult') {
       const pending = replies.get(frame.id);
       if (!pending) return;
@@ -317,8 +301,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
           connection?.socket.destroy();
           connection = line;
           connectedAt = Date.now();
-          const held = (kind: string, keys: Iterable<string>) => Object.fromEntries([...keys].map((key) => [key, hashes.get(`${kind}:${key}`) ?? '']));
-          line.send({ t: 'welcome', name: hostname(), conversations: held('conv', conversations.keys()), mails: held('mail', mails.keys()) });
+          const held = Object.fromEntries([...conversations.keys()].map((key) => [key, hashes.get(key) ?? '']));
+          line.send({ t: 'welcome', name: hostname(), conversations: held });
           changed();
           return;
         }
@@ -390,7 +374,6 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
         phone: phone ? { name: phone.name, connected: connection !== undefined } : null,
         pairing: pairing ? { device: pairing.device, code: pairing.code, pcAccepted: pairing.pcAccepted, phoneConfirmed: pairing.phoneConfirmed } : null,
         conversations: [...conversations.values()].sort((a, b) => b.lastActivityMs - a.lastActivityMs),
-        mails: [...mails.values()].sort((a, b) => b.timeMs - a.timeMs),
         sending: [...new Set([...replies.values()].map((pending) => pending.key))],
         failures: Object.fromEntries([...failures].filter(([key]) => key !== NEW_TEXT)),
         newText: { sending: [...replies.values()].some((pending) => pending.key === NEW_TEXT), failure: failures.get(NEW_TEXT) ?? null },
@@ -447,35 +430,11 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
     },
     markRead(key) {
       const conversation = conversations.get(key);
-      const mail = mails.get(key);
-      if (conversation && conversation.unread > 0) {
-        conversations.set(key, { ...conversation, unread: 0 });
-        hashes.delete(`conv:${key}`);
-      } else if (mail && !mail.read) {
-        mails.set(key, { ...mail, read: true });
-        hashes.delete(`mail:${key}`);
-      } else return;
+      if (!conversation || conversation.unread === 0) return;
+      conversations.set(key, { ...conversation, unread: 0 });
+      hashes.delete(key);
       connection?.send({ t: 'read', key });
       changed();
-    },
-    mailAction(key, action) {
-      const mail = mails.get(key);
-      if (!connection || !mail || !mail.actions.includes(action)) return false;
-      const id = randomUUID();
-      failures.delete(key);
-      replies.set(id, {
-        key,
-        timer: setTimeout(() => {
-          replies.delete(id);
-          failures.set(key, 'no answer from the phone');
-          changed();
-        }, REPLY_TIMEOUT_MS),
-      });
-      mails.set(key, { ...mail, requested: action, read: mail.read || action === 'markRead' });
-      hashes.delete(`mail:${key}`);
-      connection.send({ t: 'mailAction', id, key, action });
-      changed();
-      return true;
     },
     answerPairing(accept) {
       if (!pairing) return;
@@ -493,7 +452,6 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       connection?.socket.destroy();
       connection = undefined;
       conversations.clear();
-      mails.clear();
       hashes.clear();
       changed();
     },

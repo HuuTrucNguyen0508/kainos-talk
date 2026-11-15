@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { connect, type TLSSocket } from 'node:tls';
 import { X509Certificate } from 'node:crypto';
 import { generate } from 'selfsigned';
-import { SYNC_VERSION, certFingerprint, pairingCode, type PcFrame, type SourceId, type SyncConversation, type SyncMail } from '../src/shared/sync-protocol.ts';
+import { SYNC_VERSION, certFingerprint, pairingCode, type PcFrame, type SyncConversation } from '../src/shared/sync-protocol.ts';
 
 /** A phone's own key and self-signed certificate, as the Android app keeps in its key store. */
 export interface PhoneIdentity {
@@ -105,14 +105,12 @@ export async function connectPaired(port: number, deviceId: string, identity: Ph
   return phone;
 }
 
-export function conversation(key: string, title: string, texts: { id: string; text: string; timeMs: number; outgoing?: boolean }[], unread = 1, source: SourceId = 'sms'): SyncConversation {
-  const labels: Record<SourceId, string> = { whatsapp: 'WhatsApp', 'whatsapp-business': 'WhatsApp Business', discord: 'Discord', messenger: 'Messenger', sms: 'SMS', protonmail: 'Proton Mail' };
+export function conversation(key: string, title: string, texts: { id: string; text: string; timeMs: number; outgoing?: boolean }[], unread = 1): SyncConversation {
   return {
-    source,
-    sourceLabel: labels[source],
     key,
     title,
     isGroup: false,
+    sender: 'person',
     unread,
     lastActivityMs: Math.max(...texts.map((t) => t.timeMs)),
     canReply: true,
@@ -127,8 +125,4 @@ export function conversation(key: string, title: string, texts: { id: string; te
       image: null,
     })),
   };
-}
-
-export function mail(key: string, sender: string | null, subject: string, timeMs = Date.now()): SyncMail {
-  return { key, source: 'protonmail', sourceLabel: 'Proton Mail', sender, subject, account: 'me@proton.me', timeMs, read: false, actions: ['archive', 'trash', 'markRead'], requested: null };
 }

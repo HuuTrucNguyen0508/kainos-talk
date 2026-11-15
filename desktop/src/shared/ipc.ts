@@ -12,51 +12,99 @@ export const Channel = {
   notificationClick: 'kainos:notification-click',
   /** Service preload to main: what the page's own unread counter says. */
   unreadCounter: 'kainos:unread-counter',
-  /** Main to sidebar: put keyboard focus on the active service's rail button. */
-  focusRail: 'kainos:focus-rail',
-  /** Sidebar to main: the pointer entered (true) or left (false) the bar. */
-  railPointer: 'kainos:rail-pointer',
-  /** Sidebar to main: open the bar options menu. */
+  /** Main to the dock: put keyboard focus on the active service's tab. */
+  focusDock: 'kainos:focus-dock',
+  /** Dock to main: open the dock options menu. */
   openBarMenu: 'kainos:open-bar-menu',
-  /** Service preload to main: the pointer reached a side edge of the page, or moved back inside. */
-  pointerEdge: 'kainos:pointer-edge',
+  /** Dock to main: open the phone island's menu (Open Texts, Forget this phone). */
+  openPhoneMenu: 'kainos:open-phone-menu',
+  /** Main to the dock: how the dock page is placed (DockFrame). */
+  dockFrame: 'kainos:dock-frame',
+  /** Dock to main: the size of the centred group of islands (DockSize). */
+  dockSize: 'kainos:dock-size',
+  /** Dock to main: the pointer came onto the dock page (true) or left it (false). */
+  dockPointer: 'kainos:dock-pointer',
+  /** Dock to main: keyboard focus came into the dock (true) or left it (false). */
+  dockKeyboard: 'kainos:dock-keyboard',
+  /** Dock to main: Escape in the dock; back to the page. */
+  dismissDock: 'kainos:dismiss-dock',
+  /** Service and inbox pages to main: where the pointer is against the bottom edge (PagePointer). */
+  pagePointer: 'kainos:page-pointer',
+  /** Main to an activated page: forget deduplication so its next trusted movement reports again. */
+  resetPagePointer: 'kainos:reset-page-pointer',
+  /** Kainos' own pages (dock, Texts) to main: the theme choice now (ThemeChoice). */
+  getTheme: 'kainos:get-theme',
+  /** Main to Kainos' own pages: the theme choice changed (ThemeChoice). */
+  theme: 'kainos:theme',
 } as const;
 
-export const RAIL_WIDTH = 68;
+/** The dock's reserved strip along the bottom of the window, in pixels, when it is always shown. */
+export const DOCK_HEIGHT = 64;
+
+/**
+ * The auto-hiding dock floats over the page. Its view is the centred group plus this much
+ * transparent room: `margin` on the sides and above for the islands' shadow, `bottom` below.
+ */
+export const DOCK_FLOAT = { margin: 16, bottom: 8 } as const;
+
+/**
+ * How main places the dock page. `cover`: the whole window, a notice above the strip (the
+ * active service is loading or failed). `strip`: the always-shown strip. `float`: the group
+ * alone over the page, `raised` while shown and sliding away otherwise. `room` is the
+ * window's width, which the group may not exceed.
+ */
+export interface DockFrame {
+  readonly kind: 'cover' | 'strip' | 'float';
+  readonly raised: boolean;
+  readonly room: number;
+}
+
+export interface DockSize {
+  readonly width: number;
+  readonly height: number;
+}
+
+/** The dock page's measured group is untrusted input: a sane positive size, rounded up. */
+export function parseDockSize(raw: unknown): DockSize | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { width, height } = raw as Record<string, unknown>;
+  const ok = (n: unknown, max: number): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= max;
+  return ok(width, 100_000) && ok(height, DOCK_HEIGHT * 4) ? { width: Math.ceil(width), height: Math.ceil(height) } : undefined;
+}
 
 export type ServiceStatus =
-  /** Not loaded: never opened yet, or put to sleep to free its memory. Opening it wakes it. */
-  | { readonly kind: 'asleep' }
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready' }
   | { readonly kind: 'failed'; readonly reason: string; readonly host: string };
 
-/** Everything the sidebar needs to draw one service. */
+/** Everything the dock needs to draw one service. */
 export interface ServiceSnapshot {
   readonly id: string;
   readonly name: string;
   readonly color: string;
   readonly glyph: string;
+  readonly paint: 'stroke' | 'fill';
+  /** The website's host, for the loading screen; empty for Kainos' own pages. */
+  readonly host: string;
   readonly status: ServiceStatus;
   readonly unread: Unread;
   readonly muted: boolean;
 }
 
-export type BarSide = 'left' | 'right';
-
-/** How the bar is drawn: on which side, and whether it hides until the pointer reaches it. */
-export interface BarSnapshot {
-  readonly side: BarSide;
-  readonly autoHide: boolean;
+/** The paired phone as the dock shows it: its name and whether it is connected, nothing else. */
+export interface PhoneLink {
+  readonly name: string;
+  readonly connected: boolean;
 }
 
 export interface Snapshot {
   readonly activeId: string;
   readonly services: readonly ServiceSnapshot[];
-  readonly bar: BarSnapshot;
+  /** Null until a phone is paired. */
+  readonly phone: PhoneLink | null;
 }
 
-/** The only API the sidebar page gets, exposed as window.kainos. */
+/** The only API the dock page gets, exposed as window.kainos. */
 export interface KainosApi {
   getSnapshot(): Promise<Snapshot>;
   onSnapshot(listener: (snapshot: Snapshot) => void): () => void;
@@ -64,11 +112,16 @@ export interface KainosApi {
   retry(serviceId: string): void;
   /** `at` places the menu (window coordinates); without it the menu opens at the pointer. */
   openServiceMenu(serviceId: string, at?: MenuPoint): void;
-  onFocusRail(listener: () => void): void;
-  /** The pointer entered (true) or left (false) the bar. */
-  railPointer(over: boolean): void;
-  /** Auto-hide and side options. `at` as for openServiceMenu. */
+  onFocusDock(listener: () => void): void;
+  /** Dock options (Always show the dock). `at` as for openServiceMenu. */
   openBarMenu(at?: MenuPoint): void;
+  /** The phone island: its menu once a phone is paired, else the Texts page. `at` as above. */
+  openPhoneMenu(at?: MenuPoint): void;
+  onFrame(listener: (frame: DockFrame) => void): void;
+  reportSize(size: DockSize): void;
+  reportPointer(over: boolean): void;
+  reportKeyboard(focused: boolean): void;
+  dismiss(): void;
 }
 
 export interface MenuPoint {
@@ -76,7 +129,7 @@ export interface MenuPoint {
   readonly y: number;
 }
 
-/** The sidebar's menu position is untrusted input: two sane, non-negative numbers. */
+/** The dock's menu position is untrusted input: two sane, non-negative numbers. */
 export function parseMenuPoint(raw: unknown): MenuPoint | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const { x, y } = raw as Record<string, unknown>;

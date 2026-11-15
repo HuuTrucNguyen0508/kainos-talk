@@ -1,71 +1,68 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { layoutBar, outerSide, parsePointerEdge, resolveSide } from './bar.ts';
+import { layoutBar } from './bar.ts';
 
-// The two screens this was built for: a 3440×1440 screen with a portrait 1440×2560 one on its right.
-const wide = { x: 0, y: 0, width: 3440, height: 1440 };
-const portrait = { x: 3440, y: -560, width: 1440, height: 2560 };
+const group = { width: 820, height: 40 };
+const base = { width: 1000, height: 700, activeReady: true, activeFullscreen: false, pinned: false, onScreen: false, group };
 
-test('the bar goes on the outer edge of each screen', () => {
-  assert.equal(outerSide(wide, [wide, portrait]), 'left');
-  assert.equal(outerSide(portrait, [wide, portrait]), 'right');
+test('auto-hide: the page fills the window and the hidden dock has no view', () => {
+  assert.deepEqual(layoutBar(base), { chrome: undefined, service: { x: 0, y: 0, width: 1000, height: 700 }, frame: 'float' });
 });
 
-test('a lone screen, a middle screen and stacked screens keep the left edge', () => {
-  assert.equal(outerSide(wide, [wide]), 'left');
-  const left = { x: -1920, y: 0, width: 1920, height: 1080 };
-  const right = { x: 3440, y: 0, width: 1920, height: 1080 };
-  assert.equal(outerSide(wide, [left, wide, right]), 'left');
-  const above = { x: 0, y: -1080, width: 1920, height: 1080 };
-  assert.equal(outerSide(wide, [wide, above]), 'left');
-});
-
-test('a screen only to the left puts the bar on the right', () => {
-  const left = { x: -1920, y: 200, width: 1920, height: 1080 };
-  assert.equal(outerSide(wide, [left, wide]), 'right');
-});
-
-test('a fixed side wins over the screen', () => {
-  assert.equal(resolveSide('auto', 'right'), 'right');
-  assert.equal(resolveSide('left', 'right'), 'left');
-  assert.equal(resolveSide('right', 'left'), 'right');
-});
-
-const base = { width: 1000, height: 700, side: 'left' as const, autoHide: false, revealed: false, activeReady: true, activeFullscreen: false };
-
-test('a docked bar takes a strip from the page on its side', () => {
-  assert.deepEqual(layoutBar(base), {
-    chrome: { x: 0, y: 0, width: 68, height: 700 },
-    service: { x: 68, y: 0, width: 932, height: 700 },
-  });
-  assert.deepEqual(layoutBar({ ...base, side: 'right' }), {
-    chrome: { x: 932, y: 0, width: 68, height: 700 },
-    service: { x: 0, y: 0, width: 932, height: 700 },
+test('auto-hide: on screen, the dock view is the centred group with room for its shadow, over the full page', () => {
+  assert.deepEqual(layoutBar({ ...base, onScreen: true }), {
+    chrome: { x: 74, y: 636, width: 852, height: 64 },
+    service: { x: 0, y: 0, width: 1000, height: 700 },
+    frame: 'float',
   });
 });
 
-test('an auto-hidden bar leaves the page whole and covers its edge only while revealed', () => {
+test('auto-hide: a group wider than the window is held to the window', () => {
+  assert.deepEqual(layoutBar({ ...base, onScreen: true, group: { width: 1400, height: 40 } }).chrome, { x: 0, y: 636, width: 1000, height: 64 });
+});
+
+test('auto-hide: before the dock page measures its group, the view spans the window', () => {
+  assert.deepEqual(layoutBar({ ...base, onScreen: true, group: undefined }).chrome, { x: 0, y: 636, width: 1000, height: 64 });
+});
+
+test('always shown: the dock keeps a 64px strip along the bottom and the page ends above it', () => {
+  const pinned = { ...base, pinned: true };
+  const expected = { chrome: { x: 0, y: 636, width: 1000, height: 64 }, service: { x: 0, y: 0, width: 1000, height: 636 }, frame: 'strip' };
+  assert.deepEqual(layoutBar(pinned), expected);
+  assert.deepEqual(layoutBar({ ...pinned, onScreen: true }), expected, 'the reveal state does not matter');
+});
+
+test('a loading or failed service shows the dock page over the whole window, in both modes', () => {
   const full = { x: 0, y: 0, width: 1000, height: 700 };
-  assert.deepEqual(layoutBar({ ...base, autoHide: true }), { chrome: undefined, service: full });
-  assert.deepEqual(layoutBar({ ...base, autoHide: true, revealed: true, side: 'right' }), {
-    chrome: { x: 932, y: 0, width: 68, height: 700 },
-    service: full,
-  });
+  assert.deepEqual(layoutBar({ ...base, activeReady: false }), { chrome: full, service: full, frame: 'cover' });
+  assert.deepEqual(layoutBar({ ...base, activeReady: false, pinned: true }), { chrome: full, service: full, frame: 'cover' });
 });
 
-test('a loading or failed service shows the sidebar page over the whole window', () => {
+test('a page in fullscreen covers the dock, in both modes', () => {
   const full = { x: 0, y: 0, width: 1000, height: 700 };
-  assert.deepEqual(layoutBar({ ...base, activeReady: false }).chrome, full);
-  assert.deepEqual(layoutBar({ ...base, activeReady: false, autoHide: true }).chrome, full);
+  assert.deepEqual(layoutBar({ ...base, onScreen: true, activeFullscreen: true }), { chrome: undefined, service: full, frame: 'float' });
+  assert.deepEqual(layoutBar({ ...base, pinned: true, activeFullscreen: true }), { chrome: undefined, service: full, frame: 'strip' });
 });
 
-test('a page in fullscreen covers the bar', () => {
-  assert.deepEqual(layoutBar({ ...base, activeFullscreen: true }), { chrome: undefined, service: { x: 0, y: 0, width: 1000, height: 700 } });
-});
-
-test('pointer edges from a page are checked', () => {
-  assert.equal(parsePointerEdge('left'), 'left');
-  assert.equal(parsePointerEdge('inside'), 'inside');
-  assert.equal(parsePointerEdge('top'), undefined);
-  assert.equal(parsePointerEdge(3), undefined);
-});
+for (const [width, height] of [[3440, 1440], [1720, 1440], [1418, 2488], [709, 2488], [640, 480]] as const) {
+  test(`${width}×${height}: the floating dock is centred over the full page, and the strip leaves the page above it`, () => {
+    const full = { x: 0, y: 0, width, height };
+    const fits = { width: Math.min(820, width - 32), height: 40 };
+    const shown = layoutBar({ ...base, width, height, group: fits, onScreen: true });
+    assert.deepEqual(shown.service, full);
+    const chrome = shown.chrome!;
+    assert.equal(chrome.width, fits.width + 32);
+    assert.equal(chrome.height, 64);
+    assert.equal(chrome.y + chrome.height, height, 'down to the window bottom');
+    assert.ok(Math.abs(chrome.x + chrome.width / 2 - width / 2) <= 0.5, 'centred');
+    assert.ok(chrome.x >= 0 && chrome.x + chrome.width <= width, 'inside the window');
+    assert.deepEqual(layoutBar({ ...base, width, height }), { chrome: undefined, service: full, frame: 'float' });
+    assert.deepEqual(layoutBar({ ...base, width, height, pinned: true }), {
+      chrome: { x: 0, y: height - 64, width, height: 64 },
+      service: { x: 0, y: 0, width, height: height - 64 },
+      frame: 'strip',
+    });
+    assert.deepEqual(layoutBar({ ...base, width, height, activeReady: false }), { chrome: full, service: full, frame: 'cover' });
+    assert.deepEqual(layoutBar({ ...base, width, height, activeFullscreen: true, onScreen: true }).chrome, undefined);
+  });
+}

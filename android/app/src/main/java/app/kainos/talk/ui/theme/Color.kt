@@ -15,37 +15,26 @@ import androidx.compose.ui.graphics.Color
 data class SwitchboardColors(
     /** The list and screen background. */
     val surface: Color,
-    /** The sage panel at the bottom of every screen, avatar tiles, the origin card. */
+    /** The sage panel at the bottom of a screen, warning strips, the list of computers. */
     val board: Color,
-    /** Hairlines: row dividers, avatar rims, the board's top edge. */
+    /** Hairlines: the board's top edge, setup rules and the step rail. */
     val edge: Color,
-    /** Incoming bubbles. */
+    /** A step above the surface; Material's surface variant and container. */
     val raised: Color,
     /** Body text. */
     val ink: Color,
     /** Secondary text: previews, times, captions. */
     val soft: Color,
-    /** The accent: buttons, links, the active socket. */
+    /** The accent: buttons, links, the connected lamp. */
     val teal: Color,
     val onTeal: Color,
-    /** Outgoing bubbles. */
-    val out: Color,
-    val onOut: Color,
     /** The amber unread lamp. */
     val lamp: Color,
     val lampInk: Color,
     val lampEdge: Color,
     val alert: Color,
-    /** Field borders, the muted lamp ring, dashed media placeholders. */
+    /** The unlit lamp ring and the not-connected dot. */
     val outline: Color,
-    /** Line colours for the source jacks. Shape and letter carry the source; hue only helps. */
-    val wa: Color,
-    val dc: Color,
-    /** Messenger. */
-    val fm: Color,
-    val sms: Color,
-    val pm: Color,
-    val onLine: Color,
 )
 
 val LightSwitchboard = SwitchboardColors(
@@ -57,19 +46,11 @@ val LightSwitchboard = SwitchboardColors(
     soft = Color(0xFF4B5C5F),
     teal = Color(0xFF0E6B66),
     onTeal = Color(0xFFF6F8F7),
-    out = Color(0xFF0E6B66),
-    onOut = Color(0xFFF6F8F7),
     lamp = Color(0xFFE6A11A),
     lampInk = Color(0xFF1C2A2D),
     lampEdge = Color(0xFF8A5A00),
     alert = Color(0xFFB3261E),
     outline = Color(0xFF6C807D),
-    wa = Color(0xFF2E6B4F),
-    dc = Color(0xFF4A5591),
-    fm = Color(0xFF1F5FAD),
-    sms = Color(0xFF96395B),
-    pm = Color(0xFF73478A),
-    onLine = Color(0xFFFFFFFF),
 )
 
 val DarkSwitchboard = SwitchboardColors(
@@ -81,19 +62,11 @@ val DarkSwitchboard = SwitchboardColors(
     soft = Color(0xFF93A6A6),
     teal = Color(0xFF4CBCB1),
     onTeal = Color(0xFF0E1619),
-    out = Color(0xFF1A4F4B),
-    onOut = Color(0xFFE3EEEB),
     lamp = Color(0xFFF0B42E),
     lampInk = Color(0xFF162024),
     lampEdge = Color(0xFFF0B42E),
     alert = Color(0xFFF2A59F),
     outline = Color(0xFF6F8585),
-    wa = Color(0xFF8FD0AE),
-    dc = Color(0xFFAAB4EC),
-    fm = Color(0xFF9CC6F2),
-    sms = Color(0xFFEFA7C0),
-    pm = Color(0xFFD3A8E6),
-    onLine = Color(0xFF0E1619),
 )
 
 /** Material roles mapped onto the switchboard tokens, so stock components (menus, snackbars) match. */

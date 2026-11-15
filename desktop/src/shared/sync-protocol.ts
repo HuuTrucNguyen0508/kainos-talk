@@ -8,8 +8,10 @@ import { isIP } from 'node:net';
  */
 /**
  * 2: each side proves itself with its own certificate (mutual TLS); no shared secret.
- * 3: every source the phone reads (chats and mail), not only texts.
+ * 3: every source the phone reads (chats and mail), not only texts. Since then the PC keeps
+ *    texts only and ignores the rest, so the number stays: a phone on 3 or 4 still connects.
  * 4: the welcome lists what the PC still holds, so a reconnect sends only what changed.
+ *    A conversation's `sender` is additive: an older phone leaves it out and it parses as `person`.
  */
 export const SYNC_VERSION = 4;
 export const SYNC_PORT = 48090;
@@ -33,7 +35,7 @@ export function certFingerprint(der: Uint8Array): string {
 }
 
 /**
- * What the PC holds of a conversation or mail: the first 8 bytes of the SHA-256 of the frame
+ * What the PC holds of a conversation: the first 8 bytes of the SHA-256 of the frame
  * line it came in (UTF-8, no newline), in lower-case hex. The phone hashes the line it would
  * send; a different hash only means the phone sends it again.
  */
@@ -69,36 +71,18 @@ export interface SyncMessage {
   readonly image: string | null;
 }
 
-/** Sources the phone reads, as its hub names them. */
-export const SOURCES = ['whatsapp', 'whatsapp-business', 'discord', 'messenger', 'sms', 'protonmail'] as const;
-export type SourceId = (typeof SOURCES)[number];
+/**
+ * Who a conversation is with. `service` is an automated sender: an alphanumeric sender ID or a
+ * short code that is not a saved contact. Everything else, groups included, is `person`.
+ */
+export type SenderKind = 'person' | 'service';
 
-export type MailAction = 'archive' | 'trash' | 'markRead';
-
-/** A mail the phone was notified of (Proton Mail): there is no body, only these. */
-export interface SyncMail {
-  readonly key: string;
-  readonly source: SourceId;
-  readonly sourceLabel: string;
-  /** Null when the mail app hid it (Proton's "Extended notifications" off). */
-  readonly sender: string | null;
-  readonly subject: string;
-  /** The address it went to. */
-  readonly account: string | null;
-  readonly timeMs: number;
-  readonly read: boolean;
-  /** What the phone can still do through the mail app's notification. */
-  readonly actions: readonly MailAction[];
-  /** The last action asked for (the mail app does not confirm). */
-  readonly requested: MailAction | null;
-}
-
+/** A text conversation (SMS or RCS) from the phone's messages app. */
 export interface SyncConversation {
-  readonly source: SourceId;
-  readonly sourceLabel: string;
   readonly key: string;
   readonly title: string;
   readonly isGroup: boolean;
+  readonly sender: SenderKind;
   readonly unread: number;
   readonly lastActivityMs: number;
   /** The phone still has this conversation's notification, so a reply can go out. */
@@ -115,8 +99,11 @@ export type PhoneFrame =
   | { readonly t: 'pairConfirm' }
   | { readonly t: 'conversation'; readonly conversation: SyncConversation }
   | { readonly t: 'removed'; readonly key: string }
-  | { readonly t: 'mail'; readonly mail: SyncMail }
-  | { readonly t: 'mailRemoved'; readonly key: string }
+  /**
+   * A frame an older phone sends that the PC no longer keeps (mail, or a chat from another app).
+   * It is read and dropped; closing the connection on it would cut off a phone that is only out of date.
+   */
+  | { readonly t: 'ignored' }
   | { readonly t: 'replyResult'; readonly id: string; readonly ok: boolean; readonly error: string | null }
   | { readonly t: 'pong' }
   /** A picture the PC asked for: JPEG in base64, or why it is missing. */
@@ -128,14 +115,13 @@ export type PcFrame =
   | { t: 'paired'; deviceId: string }
   | { t: 'pairRefused' }
   /**
-   * Every conversation and mail key the PC holds, with the `frameHash` of the frame it came in.
+   * Every conversation key the PC holds, with the `frameHash` of the frame it came in.
    * An empty hash means the PC changed it since (marked it read, say), so it is sent again.
    */
-  | { t: 'welcome'; name: string; conversations: Record<string, string>; mails: Record<string, string> }
+  | { t: 'welcome'; name: string; conversations: Record<string, string> }
   | { t: 'denied'; reason: string }
   | { t: 'reply'; id: string; key: string; text: string }
   | { t: 'read'; key: string }
-  | { t: 'mailAction'; id: string; key: string; action: MailAction }
   /** A new text to a number, sent by the phone itself (needs SMS access on the phone). */
   | { t: 'send'; id: string; to: string; text: string }
   | { t: 'ping' }
@@ -162,38 +148,8 @@ function parseConversation(raw: unknown): SyncConversation | undefined {
   if (!Array.isArray(messages) || messages.length > 200) return undefined;
   const parsed = messages.map(parseMessage);
   if (parsed.some((message) => message === undefined)) return undefined;
-  const source = sourceOf(raw.source);
-  const sourceLabel = str(raw.sourceLabel, 100) ? raw.sourceLabel : 'SMS';
-  return { source, sourceLabel, key, title, isGroup, unread: Math.max(0, Math.floor(unread)), lastActivityMs, canReply, messages: parsed as SyncMessage[] };
-}
-
-/** An unknown or missing source counts as SMS, which every older phone sent. */
-function sourceOf(raw: unknown): SourceId {
-  return SOURCES.find((s) => s === raw) ?? 'sms';
-}
-
-const MAIL_ACTIONS: readonly MailAction[] = ['archive', 'trash', 'markRead'];
-const mailActionOf = (raw: unknown): MailAction | undefined => MAIL_ACTIONS.find((a) => a === raw);
-
-function parseMail(raw: unknown): SyncMail | undefined {
-  if (!record(raw)) return undefined;
-  const { key, sender, subject, account, timeMs, read, actions, requested } = raw;
-  if (!str(key, 500) || !(sender === null || str(sender, 500)) || !str(subject, 2000) || !(account === null || str(account, 500))) return undefined;
-  if (!num(timeMs) || !bool(read) || !Array.isArray(actions) || !(requested === null || mailActionOf(requested))) return undefined;
-  const parsedActions = actions.map(mailActionOf);
-  if (parsedActions.some((a) => a === undefined)) return undefined;
-  return {
-    key,
-    source: sourceOf(raw.source),
-    sourceLabel: str(raw.sourceLabel, 100) ? raw.sourceLabel : 'Mail',
-    sender,
-    subject,
-    account,
-    timeMs,
-    read,
-    actions: parsedActions as MailAction[],
-    requested: (requested as MailAction | null) ?? null,
-  };
+  // Missing (an older phone) or unknown: treat it as a person, who gets a reply box.
+  return { key, title, isGroup, sender: raw.sender === 'service' ? 'service' : 'person', unread: Math.max(0, Math.floor(unread)), lastActivityMs, canReply, messages: parsed as SyncMessage[] };
 }
 
 /** One line from the phone: untrusted input, checked field by field. */
@@ -213,15 +169,14 @@ export function parsePhoneFrame(line: string): PhoneFrame | undefined {
     case 'pairConfirm':
       return { t: 'pairConfirm' };
     case 'conversation': {
+      // A missing source is a phone from before chats of other apps travelled; those say 'sms'.
+      if (record(raw.conversation) && raw.conversation.source !== undefined && raw.conversation.source !== 'sms') return { t: 'ignored' };
       const conversation = parseConversation(raw.conversation);
       return conversation ? { t: 'conversation', conversation } : undefined;
     }
-    case 'mail': {
-      const mail = parseMail(raw.mail);
-      return mail ? { t: 'mail', mail } : undefined;
-    }
+    case 'mail':
     case 'mailRemoved':
-      return str(raw.key, 500) ? { t: 'mailRemoved', key: raw.key } : undefined;
+      return { t: 'ignored' };
     case 'removed':
       return str(raw.key, 500) ? { t: 'removed', key: raw.key } : undefined;
     case 'replyResult':

@@ -7,7 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import app.kainos.talk.fake.FakeSenderReceiver
 import app.kainos.talk.listener.KainosNotificationListener
 
-/** Drives the fake chat app (the test APK's receiver) and the listener grant from a test. */
+/** Drives the fake SMS app (the test APK's receiver) and the listener grant from a test. */
 class FakeSender(private val app: KainosTalkApp) {
     private val listener = ComponentName(app, KainosNotificationListener::class.java).flattenToString()
 

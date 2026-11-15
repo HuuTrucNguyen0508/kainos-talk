@@ -5,7 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Upsert
-import app.kainos.talk.core.MailAction
+import app.kainos.talk.core.SMS_SOURCE
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -16,14 +16,13 @@ interface TalkDao {
         SELECT c.*,
           (SELECT COUNT(*) FROM messages m WHERE m.conversationKey = c.`key` AND m.read = 0 AND m.outgoing = 0) AS unreadCount,
           (SELECT m.text FROM messages m WHERE m.conversationKey = c.`key` ORDER BY m.timeMs DESC, m.id DESC LIMIT 1) AS lastText,
-          (SELECT m.senderName FROM messages m WHERE m.conversationKey = c.`key` ORDER BY m.timeMs DESC, m.id DESC LIMIT 1) AS lastSender,
-          (SELECT m.outgoing FROM messages m WHERE m.conversationKey = c.`key` ORDER BY m.timeMs DESC, m.id DESC LIMIT 1) AS lastOutgoing,
-          (SELECT m.media FROM messages m WHERE m.conversationKey = c.`key` ORDER BY m.timeMs DESC, m.id DESC LIMIT 1) AS lastMedia
+          (SELECT m.senderName FROM messages m WHERE m.conversationKey = c.`key` ORDER BY m.timeMs DESC, m.id DESC LIMIT 1) AS lastSender
         FROM conversations c
+        WHERE c.sourceId = :sourceId
         ORDER BY c.lastActivityMs DESC
         """,
     )
-    fun observeConversationRows(): Flow<List<ConversationRow>>
+    fun observeConversationRows(sourceId: String = SMS_SOURCE): Flow<List<ConversationRow>>
 
     @Query("SELECT * FROM conversations WHERE `key` = :key")
     fun observeConversation(key: String): Flow<ConversationEntity?>
@@ -68,37 +67,4 @@ interface TalkDao {
 
     @Query("UPDATE messages SET read = 1 WHERE conversationKey = :key AND read = 0")
     suspend fun markConversationRead(key: String): Int
-
-    @Query("UPDATE conversations SET muted = :muted WHERE `key` = :key")
-    suspend fun setMuted(key: String, muted: Boolean)
-
-    @Query("UPDATE conversations SET lastRemovalReason = :reason WHERE `key` = :key")
-    suspend fun setConversationRemoval(key: String, reason: Int)
-
-    @Query("SELECT MAX(timeMs) FROM messages WHERE outgoing = 0")
-    fun observeLastIncomingMessageMs(): Flow<Long?>
-
-    @Query("SELECT * FROM mail ORDER BY receivedAtMs DESC")
-    fun observeMail(): Flow<List<MailEntity>>
-
-    @Query("SELECT * FROM mail WHERE `key` = :key")
-    fun observeMailItem(key: String): Flow<MailEntity?>
-
-    @Query("SELECT * FROM mail WHERE `key` = :key")
-    suspend fun mail(key: String): MailEntity?
-
-    @Upsert
-    suspend fun upsertMail(mail: MailEntity)
-
-    @Query("UPDATE mail SET read = 1 WHERE `key` = :key")
-    suspend fun markMailRead(key: String)
-
-    @Query("UPDATE mail SET requestedAction = :action WHERE `key` = :key")
-    suspend fun setMailRequestedAction(key: String, action: MailAction)
-
-    @Query("UPDATE mail SET lastRemovalReason = :reason WHERE `key` = :key")
-    suspend fun setMailRemoval(key: String, reason: Int)
-
-    @Query("SELECT MAX(receivedAtMs) FROM mail")
-    fun observeLastMailMs(): Flow<Long?>
 }

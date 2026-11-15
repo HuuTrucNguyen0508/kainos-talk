@@ -1,35 +1,276 @@
 @import '@fontsource/atkinson-hyperlegible/latin-400.css';
 @import '@fontsource/atkinson-hyperlegible/latin-700.css';
 
-/* Switchboard tokens, shared by the sidebar and the SMS view. */
+/* The themes of the dock and the Texts page, one block each, picked by data-theme on the root
+   (shared/theme.ts lists them; each --surface there must match). Without data-theme the pages
+   match the system: Daylight when it is light, Bakelite when it is dark. Every scheme was
+   checked against WCAG at exactly these values, so change them together with the contrast
+   tables and src/renderer/tokens.test.ts. */
 :root {
-  --rail: #dde4e1;
-  --rail-edge: #c5d0cc;
-  --surface: #f6f8f7;
-  --ink: #1c2a2d;
-  --ink-soft: #4b5c5f;
-  --teal: #0e6b66;
-  /* Deep amber: the lamp sits in a ring of --behind, so it needs 3:1 against the rail and surface. */
-  --lamp: #9a6200;
-  --lamp-ink: #ffffff;
-  --alert: #b3261e;
-  --rail-width: 68px;
-  --tile: 44px;
-  color-scheme: light;
+  --dock-h: 64px;
 }
 
+/* Daylight: a white page, mist-grey panes and the deep teal of the Texts tile. */
+:root,
+:root[data-theme='daylight'] {
+  color-scheme: light;
+  --surface: #ffffff; /* the page: the conversation's ground */
+  --rail: #eef3f1; /* panes and the dock islands */
+  --strip: #dde6e3; /* the dock strip */
+  --raised: #e8eeec; /* received bubble, reply box, fields */
+  --well: #d6e1de; /* active dock tab, avatars, selected segment */
+  --rail-edge: #cdd8d5; /* hairlines */
+  --outline: #6c817f; /* field and control borders */
+  --ink: #13211f;
+  --ink-soft: #465a5b;
+  --accent: #0b6660; /* actions, selection bar, Copy, focus ring */
+  --accent-ink: #ffffff;
+  --sent: #0e6b66;
+  --sent-ink: #ffffff;
+  --sent-meta: #cdeae6;
+  --unread: #0e6b66;
+  --unread-ink: #ffffff;
+  --chip: #ffffff;
+  --chip-ink: #13211f;
+  --chip-edge: #6c817f;
+  --alert: #a8221b;
+  --alert-ink: #ffffff;
+  --alert-wash: #fbe7e4; /* the phone-disconnected bar */
+  --mark: #0e6b66;
+  --mark-cut: #ffffff;
+  --shadow-island: 0 2px 8px rgba(19, 33, 31, 0.12);
+  /* The floating dock over a page: deeper, to lift it off whatever the page shows. */
+  --shadow-float: 0 6px 16px rgba(19, 33, 31, 0.2), 0 1px 3px rgba(19, 33, 31, 0.14);
+  /* Behind an opened photo, whatever the theme: photos read best on near-black. */
+  --scrim: rgb(8 6 5 / 0.86);
+}
+
+/* Match system, when the system is dark: the same values as Bakelite below. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --rail: #162024;
-    --rail-edge: #24343a;
-    --surface: #0e1619;
-    --ink: #d6e2df;
-    --ink-soft: #93a6a6;
-    --teal: #4cbcb1;
-    --lamp: #f0b42e;
-    --lamp-ink: #162024;
-    --alert: #f2a59f;
+  :root:not([data-theme]) {
     color-scheme: dark;
+    --surface: #15100d;
+    --rail: #1f1814;
+    --strip: #0e0a08;
+    --raised: #2a201a;
+    --well: #3a2c23;
+    --rail-edge: #33271f;
+    --outline: #917c6b;
+    --ink: #f0e5d4;
+    --ink-soft: #b5a492;
+    --accent: #e3b55a;
+    --accent-ink: #1f1406;
+    --sent: #75492a;
+    --sent-ink: #fbf1e2;
+    --sent-meta: #e3ccb0;
+    --unread: #e3b55a;
+    --unread-ink: #1f1406;
+    --chip: #15100d;
+    --chip-ink: #f0e5d4;
+    --chip-edge: #917c6b;
+    --alert: #ff9f92;
+    --alert-ink: #2b0d08;
+    --alert-wash: #421b17;
+    --mark: #e3b55a;
+    --mark-cut: #1f1814;
+    --shadow-island: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --shadow-float: 0 6px 16px rgba(0, 0, 0, 0.6), 0 1px 3px rgba(0, 0, 0, 0.5);
+    --scrim: rgb(8 6 5 / 0.86);
   }
 }
 
+/* Bakelite: warm dark, brown-black like an old handset, ivory text, cognac sent bubbles, brass. */
+:root[data-theme='bakelite'] {
+  color-scheme: dark;
+  --surface: #15100d;
+  --rail: #1f1814;
+  --strip: #0e0a08;
+  --raised: #2a201a;
+  --well: #3a2c23;
+  --rail-edge: #33271f;
+  --outline: #917c6b;
+  --ink: #f0e5d4;
+  --ink-soft: #b5a492;
+  --accent: #e3b55a;
+  --accent-ink: #1f1406;
+  --sent: #75492a;
+  --sent-ink: #fbf1e2;
+  --sent-meta: #e3ccb0;
+  --unread: #e3b55a;
+  --unread-ink: #1f1406;
+  --chip: #15100d;
+  --chip-ink: #f0e5d4;
+  --chip-edge: #917c6b;
+  --alert: #ff9f92;
+  --alert-ink: #2b0d08;
+  --alert-wash: #421b17;
+  --mark: #e3b55a;
+  --mark-cut: #1f1814;
+  --shadow-island: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-float: 0 6px 16px rgba(0, 0, 0, 0.6), 0 1px 3px rgba(0, 0, 0, 0.5);
+  --scrim: rgb(8 6 5 / 0.86);
+}
+
+/* Switchboard: teal and ink, sent bubbles in a quiet deep teal, bright teal for unread and actions. */
+:root[data-theme='switchboard'] {
+  color-scheme: dark;
+  --surface: #0b1316;
+  --rail: #141e22;
+  --strip: #070d0f;
+  --raised: #1a272c;
+  --well: #25363c;
+  --rail-edge: #22323a;
+  --outline: #6f8787;
+  --ink: #dde8e5;
+  --ink-soft: #94a8a8;
+  --accent: #5fd0c3;
+  --accent-ink: #06201d;
+  --sent: #145953;
+  --sent-ink: #eaf7f4;
+  --sent-meta: #b9dcd6;
+  --unread: #5fd0c3;
+  --unread-ink: #06201d;
+  --chip: #0b1316;
+  --chip-ink: #dde8e5;
+  --chip-edge: #6f8787;
+  --alert: #f5a39c;
+  --alert-ink: #2a0b08;
+  --alert-wash: #2e1c1b;
+  --mark: #5fd0c3;
+  --mark-cut: #141e22;
+  --shadow-island: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-float: 0 6px 16px rgba(0, 0, 0, 0.55), 0 1px 3px rgba(0, 0, 0, 0.45);
+  --scrim: rgb(4 8 9 / 0.86);
+}
+
+/* Carbon: black, white and greys only, so the services' own logos are the only colour. */
+:root[data-theme='carbon'] {
+  color-scheme: dark;
+  --surface: #000000;
+  --rail: #131313;
+  --strip: #000000;
+  --raised: #1e1e1e;
+  --well: #2f2f2f;
+  --rail-edge: #2c2c2c;
+  --outline: #858585;
+  --ink: #f4f4f4;
+  --ink-soft: #b0b0b0;
+  --accent: #ffffff;
+  --accent-ink: #000000;
+  --sent: #ededed;
+  --sent-ink: #0a0a0a;
+  --sent-meta: #4a4a4a;
+  --unread: #ffffff;
+  --unread-ink: #000000;
+  --chip: #000000;
+  --chip-ink: #f4f4f4;
+  --chip-edge: #858585;
+  --alert: #ff8a80;
+  --alert-ink: #2a0906;
+  --alert-wash: #2d1412;
+  --mark: #ffffff;
+  --mark-cut: #131313;
+  --shadow-island: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-float: 0 6px 16px rgba(0, 0, 0, 0.7), 0 1px 3px rgba(0, 0, 0, 0.6);
+  --scrim: rgb(0 0 0 / 0.86);
+}
+
+/* Aubergine: a deep coloured dark, plum grounds, orchid sent bubbles, rose for attention. */
+:root[data-theme='aubergine'] {
+  color-scheme: dark;
+  --surface: #21152b;
+  --rail: #2b1c37;
+  --strip: #170e1f;
+  --raised: #382746;
+  --well: #4a3560;
+  --rail-edge: #402d50;
+  --outline: #9a86ac;
+  --ink: #f2e9f7;
+  --ink-soft: #bca9c9;
+  --accent: #f6a9cd;
+  --accent-ink: #2b0a1c;
+  --sent: #6b4594;
+  --sent-ink: #fbf6ff;
+  --sent-meta: #e0d0f0;
+  --unread: #f6a9cd;
+  --unread-ink: #2b0a1c;
+  --chip: #21152b;
+  --chip-ink: #f2e9f7;
+  --chip-edge: #9a86ac;
+  --alert: #ff8166;
+  --alert-ink: #2e0a05;
+  --alert-wash: #4b1a1d;
+  --mark: #f6a9cd;
+  --mark-cut: #2b1c37;
+  --shadow-island: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-float: 0 6px 16px rgba(0, 0, 0, 0.55), 0 1px 3px rgba(0, 0, 0, 0.45);
+  --scrim: rgb(12 7 17 / 0.86);
+}
+
+/* Line icons on the 24 grid, and the Kainos mark, drawn the same in both pages. */
+svg.ic {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.mark rect {
+  fill: var(--mark);
+}
+.mark-ring {
+  fill: none;
+  stroke: var(--mark-cut);
+  stroke-width: 2.6;
+}
+.mark-dot {
+  fill: var(--mark-cut);
+}
+.count {
+  display: inline-block;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--unread);
+  color: var(--unread-ink);
+  font: 700 12px/20px 'Atkinson Hyperlegible', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--unread);
+}
+.primary {
+  display: inline-flex;
+  flex: none;
+  gap: 8px;
+  align-items: center;
+  height: 46px;
+  padding: 0 22px 0 18px;
+  border: 0;
+  border-radius: 13px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  cursor: pointer;
+}
+.primary:disabled {
+  background: var(--raised);
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

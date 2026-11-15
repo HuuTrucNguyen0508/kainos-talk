@@ -1,5 +1,5 @@
 {
-  "about": "Shared by desktop/src/shared/sync-protocol.test.ts and the Android SyncProtocolTest.",
+  "about": "Shared by desktop/src/shared/sync-protocol.test.ts and the Android SyncProtocolTest. senderKind pins the phone's classifier; conversationFrames pins how the PC parses a frame's sender.",
   "pairing": [
     {
       "pcFingerprint": "9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
@@ -57,6 +57,96 @@
     {
       "frame": "{\"t\":\"conversation\",\"conversation\":{\"source\":\"sms\",\"sourceLabel\":\"SMS\",\"key\":\"sms|0|s:mum\",\"title\":\"Maman ❤️\",\"isGroup\":false,\"unread\":1,\"lastActivityMs\":1000,\"canReply\":true,\"messages\":[{\"id\":\"1\",\"sender\":\"Maman ❤️\",\"text\":\"Dîner dimanche ? 🍲\",\"timeMs\":1000,\"outgoing\":false,\"status\":\"incoming\",\"media\":null,\"image\":null}]}}",
       "hash": "b6dd71f0d853d309"
+    }
+  ],
+  "senderKind": [
+    {
+      "address": "36679",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "service"
+    },
+    {
+      "address": "36 679",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "service"
+    },
+    {
+      "address": "+33 6 12 34 56 78",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "person"
+    },
+    {
+      "address": "0612345678",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "person"
+    },
+    {
+      "address": "06 12 34 56 78",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "person"
+    },
+    {
+      "address": "",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "person"
+    },
+    {
+      "address": "36679",
+      "isContact": true,
+      "isGroup": false,
+      "sender": "person"
+    },
+    {
+      "address": "StripeLink",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "service"
+    },
+    {
+      "address": "AUTHMSG",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "service"
+    },
+    {
+      "address": "Leboncoin",
+      "isContact": false,
+      "isGroup": false,
+      "sender": "service"
+    },
+    {
+      "address": "StripeLink",
+      "isContact": false,
+      "isGroup": true,
+      "sender": "person"
+    }
+  ],
+  "conversationFrames": [
+    {
+      "frame": "{\"t\":\"conversation\",\"conversation\":{\"key\":\"k\",\"title\":\"T\",\"isGroup\":false,\"sender\":\"service\",\"unread\":1,\"lastActivityMs\":1,\"canReply\":true,\"messages\":[]}}",
+      "sender": "service"
+    },
+    {
+      "frame": "{\"t\":\"conversation\",\"conversation\":{\"key\":\"k\",\"title\":\"T\",\"isGroup\":false,\"sender\":\"person\",\"unread\":1,\"lastActivityMs\":1,\"canReply\":true,\"messages\":[]}}",
+      "sender": "person"
+    },
+    {
+      "frame": "{\"t\":\"conversation\",\"conversation\":{\"key\":\"k\",\"title\":\"T\",\"isGroup\":false,\"unread\":1,\"lastActivityMs\":1,\"canReply\":true,\"messages\":[]}}",
+      "sender": "person"
+    },
+    {
+      "frame": "{\"t\":\"conversation\",\"conversation\":{\"key\":\"k\",\"title\":\"T\",\"isGroup\":false,\"sender\":\"robot\",\"unread\":1,\"lastActivityMs\":1,\"canReply\":true,\"messages\":[]}}",
+      "sender": "person"
+    },
+    {
+      "frame": "{\"t\":\"conversation\",\"conversation\":{\"key\":\"k\",\"title\":\"T\",\"isGroup\":false,\"sender\":null,\"unread\":1,\"lastActivityMs\":1,\"canReply\":true,\"messages\":[]}}",
+      "sender": "person"
     }
   ]
 }

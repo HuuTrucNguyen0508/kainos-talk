@@ -16,9 +16,8 @@ test('round-trips through the state file', () => {
       maximized: true,
       activeServiceId: 'whatsapp',
       mutedServiceIds: ['discord'],
-      barSide: 'right',
-      barAutoHide: true,
-      keepAwakeServiceIds: ['whatsapp'],
+      dockAlwaysShown: true,
+      theme: 'carbon',
     };
     saveAppState(file, state);
     assert.deepEqual(loadAppState(file, ids), state);
@@ -36,9 +35,8 @@ test('a missing or broken file gives defaults', () => {
       maximized: false,
       activeServiceId: 'proton-mail',
       mutedServiceIds: [],
-      barSide: 'auto',
-      barAutoHide: false,
-      keepAwakeServiceIds: [],
+      dockAlwaysShown: false,
+      theme: 'system',
     });
     writeFileSync(file, '{ not json');
     assert.equal(loadAppState(file, ids).activeServiceId, 'proton-mail');
@@ -54,8 +52,8 @@ test('drops unknown services and bad fields one by one', () => {
       bounds: { x: 0, y: 0, width: 'wide', height: 700 },
       activeServiceId: 'myspace',
       mutedServiceIds: ['discord', 'icq', 'discord', 4],
-      barSide: 'top',
-      barAutoHide: 'yes',
+      dockAlwaysShown: 'yes',
+      theme: 'solarized',
     },
     ids,
   );
@@ -64,9 +62,8 @@ test('drops unknown services and bad fields one by one', () => {
     maximized: false,
     activeServiceId: 'proton-mail',
     mutedServiceIds: ['discord'],
-    barSide: 'auto',
-    barAutoHide: false,
-    keepAwakeServiceIds: [],
+    dockAlwaysShown: false,
+    theme: 'system',
   });
   assert.equal(parseAppState({ bounds: { x: 0, y: 0, width: 100, height: 100 } }, ids).bounds, undefined, 'too small');
 });
@@ -87,4 +84,34 @@ test('picks the display the window mostly covers', () => {
   const right = { x: 1920, y: 0, width: 2560, height: 1440 };
   const bounds = { x: 2000, y: 100, width: 1200, height: 800 };
   assert.deepEqual(fitToDisplays(bounds, [left, right]), bounds);
+});
+
+test('a state file from before the websites stayed awake still loads, and drops the old field', () => {
+  const state = parseAppState({ activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], keepAwakeServiceIds: ['discord'] }, ids);
+  assert.equal(state.activeServiceId, 'discord');
+  assert.deepEqual(state.mutedServiceIds, ['whatsapp']);
+  assert.equal('keepAwakeServiceIds' in state, false);
+});
+
+test('a state file from the side bar still loads bounds, active service and muting, and drops the side and auto-hide', () => {
+  const bounds = { x: 40, y: 30, width: 1100, height: 700 };
+  const state = parseAppState({ bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true }, ids);
+  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system' });
+});
+
+test('a state file from the aligned dock still loads bounds, active service and muting, drops the alignment and hides the dock', () => {
+  const bounds = { x: 40, y: 30, width: 1100, height: 700 };
+  const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlign: 'end' }, ids);
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system' });
+});
+
+test('a state file from before themes still loads everything else and matches the system', () => {
+  const bounds = { x: 40, y: 30, width: 1100, height: 700 };
+  const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true }, ids);
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system' });
+});
+
+test('keeps each named theme, and anything else matches the system', () => {
+  for (const theme of ['switchboard', 'daylight', 'bakelite', 'carbon', 'aubergine']) assert.equal(parseAppState({ theme }, ids).theme, theme);
+  for (const theme of ['system', 'Carbon', 'dark', '', 3, null, { id: 'carbon' }]) assert.equal(parseAppState({ theme }, ids).theme, 'system');
 });

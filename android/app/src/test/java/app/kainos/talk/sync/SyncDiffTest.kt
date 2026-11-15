@@ -1,11 +1,8 @@
 package app.kainos.talk.sync
 
 import androidx.test.core.app.ApplicationProvider
-import app.kainos.talk.core.Shape
-import app.kainos.talk.core.Source
-import app.kainos.talk.hub.ChatCapabilities
 import app.kainos.talk.hub.ChatThread
-import app.kainos.talk.hub.InboxItem
+import app.kainos.talk.hub.InboxChat
 import app.kainos.talk.hub.TalkHub
 import app.kainos.talk.hub.ThreadMessage
 import app.kainos.talk.store.MessageStatus
@@ -42,16 +39,13 @@ class SyncDiffTest {
     fun tearDown() = scope.cancel()
 
     private val mum = "sms|0|s:mum"
-    private val wa = "whatsapp|0|s:allot"
+    private val wa = "sms|0|s:allot"
     private val reply = ThreadMessage(1, null, "Yes, at 7", 800L, outgoing = true, status = MessageStatus.SENDING, media = null, read = true)
     private val question = ThreadMessage(2, "Mum", "Dinner on Sunday?", 1_000L, outgoing = false, status = MessageStatus.INCOMING, media = null, read = false)
 
-    private fun thread(key: String, messages: List<ThreadMessage>) = ChatThread(
-        key, Source.SMS, key, isGroup = false, muted = false, shape = Shape.MESSAGING_STYLE, messages = messages,
-        capabilities = ChatCapabilities(canReply = true, replyBlocked = null, canMarkReadInApp = false), notificationRemovedReason = null,
-    )
+    private fun thread(key: String, messages: List<ThreadMessage>) = ChatThread(key, key, isGroup = false, messages = messages, canReply = true)
 
-    private fun chat(key: String, timeMs: Long) = InboxItem.Chat(key, Source.SMS, key, false, timeMs, 1, false, "…", null, false, null, notificationLive = true)
+    private fun chat(key: String, timeMs: Long) = InboxChat(key, key, false, timeMs, 1, "…", null)
 
     @Test
     fun sendsOnlyWhatChangedAndResubscribesOnlyForNewConversations() = runBlocking {
@@ -117,7 +111,7 @@ class SyncDiffTest {
         }
         val first = session(PcFrame.Welcome("PC"), 2).associateBy { JSONObject(it).getJSONObject("conversation").getString("key") }
 
-        // While the phone was away, a message came in on WhatsApp; the PC still holds a chat the phone dropped.
+        // While the phone was away, a message came in over RCS; the PC still holds a chat the phone dropped.
         hub.threads.update { it + (wa to thread(wa, listOf(question.copy(id = 7, timeMs = 900L), question.copy(id = 8, text = "Found it", timeMs = 950L)))) }
         val held = mapOf(mum to SyncProtocol.frameHash(first.getValue(mum)), wa to SyncProtocol.frameHash(first.getValue(wa)), "sms|0|s:gone" to "0011223344556677")
         val second = session(PcFrame.Welcome("PC", held), 2).map(::JSONObject)

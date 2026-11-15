@@ -8,7 +8,6 @@ import app.kainos.talk.core.NotificationSnapshot
 import app.kainos.talk.core.ParseResult
 import app.kainos.talk.core.ParsedMessage
 import app.kainos.talk.core.Shape
-import app.kainos.talk.core.Source
 import app.kainos.talk.core.incoming
 import app.kainos.talk.core.markReadAction
 import app.kainos.talk.core.own
@@ -19,30 +18,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatAppAdapterTest {
-    private val messenger = ChatAppAdapter(Source.MESSENGER)
-    private val sms = ChatAppAdapter(Source.SMS)
+    private val messages = "com.google.android.apps.messaging"
 
-    private fun chat(adapter: ChatAppAdapter, s: NotificationSnapshot): ChatUpdate {
-        val result = adapter.parse(s)
+    private fun chat(s: NotificationSnapshot): ChatUpdate {
+        val result = ChatAppAdapter.parse(s)
         check(result is ParseResult.Chat) { "expected a chat, got $result" }
         return result.update
     }
 
     @Test
-    fun messengerConversationIsKeyedByShortcutAndKeepsReplyAndMarkRead() {
+    fun anRcsConversationIsKeyedByShortcutAndKeepsItsReplyAction() {
         val update = chat(
-            messenger,
             snapshot(
-                packageName = MESSENGER_PACKAGE,
-                shortcutId = "100012345678901",
+                packageName = messages,
+                shortcutId = "conversation_42",
                 template = MESSAGING_STYLE,
                 title = "Mira Okafor",
                 messages = listOf(incoming("Still up for climbing?", 1_000, "Mira Okafor"), own("Yes!", 2_000)),
                 actions = listOf(replyAction, markReadAction),
             ),
         )
-        assertEquals("messenger|0|s:100012345678901", update.conversationKey)
-        assertEquals(Source.MESSENGER, update.source)
+        assertEquals("sms|0|s:conversation_42", update.conversationKey)
         assertEquals("Mira Okafor", update.title)
         assertEquals(Shape.MESSAGING_STYLE, update.shape)
         assertEquals(
@@ -53,15 +49,13 @@ class ChatAppAdapterTest {
             update.messages,
         )
         assertEquals(ActionRef(0, false, "Reply"), update.replyAction)
-        assertEquals(ActionRef(1, false, "Mark as read"), update.markReadAction)
     }
 
     @Test
     fun groupChatTakesTheConversationTitle() {
         val update = chat(
-            messenger,
             snapshot(
-                packageName = MESSENGER_PACKAGE,
+                packageName = messages,
                 template = MESSAGING_STYLE,
                 title = "Odile",
                 conversationTitle = "Climbing Saturdays",
@@ -71,15 +65,14 @@ class ChatAppAdapterTest {
         )
         assertEquals("Climbing Saturdays", update.title)
         assertTrue(update.isGroup)
-        assertEquals("messenger|0|t:Climbing Saturdays", update.conversationKey)
+        assertEquals("sms|0|t:Climbing Saturdays", update.conversationKey)
     }
 
     @Test
     fun smsWithoutMessagingStyleBecomesOneMessageFromTheTitle() {
         val update = chat(
-            sms,
             snapshot(
-                packageName = "com.google.android.apps.messaging",
+                packageName = messages,
                 title = "Garage Delaunay",
                 text = "Your car is ready.",
                 whenMs = 5_000,
@@ -92,12 +85,12 @@ class ChatAppAdapterTest {
 
     @Test
     fun callsProgressAndSummariesAreSkipped() {
-        val call = sms.parse(snapshot(packageName = "com.google.android.apps.messaging", category = "call", title = "Mum", text = "Incoming call"))
+        val call = ChatAppAdapter.parse(snapshot(packageName = messages, category = "call", title = "Mum", text = "Incoming call"))
         assertEquals(ParseResult.Ignored("category call"), call)
-        val progress = messenger.parse(snapshot(packageName = MESSENGER_PACKAGE, category = "progress", title = "Sending photo", text = "1 of 2"))
+        val progress = ChatAppAdapter.parse(snapshot(packageName = messages, category = "progress", title = "Sending photo", text = "1 of 2"))
         assertEquals(ParseResult.Ignored("category progress"), progress)
-        val summary = sms.parse(
-            snapshot(packageName = "com.google.android.apps.messaging", flags = NotificationFlags.GROUP_SUMMARY, title = "2 new messages", text = "x"),
+        val summary = ChatAppAdapter.parse(
+            snapshot(packageName = messages, flags = NotificationFlags.GROUP_SUMMARY, title = "2 new messages", text = "x"),
         )
         assertTrue(summary is ParseResult.Ignored)
     }

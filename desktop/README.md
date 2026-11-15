@@ -1,8 +1,9 @@
 # Kainos Talk desktop
 
-Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger and SMS (Google Messages for
-web) in one window. A narrow bar on the left or right switches between them; each service runs in
-its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
+Electron shell that hosts Proton Mail, Discord, WhatsApp and Messenger in one window, plus a Texts
+page for the phone's SMS and RCS. A dock that slides up from the bottom of the window switches between them; each
+service runs in its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
+All four websites load at startup and stay loaded, so they keep notifying.
 
 ## Commands
 
@@ -38,11 +39,13 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 |---|---|
 | `src/shared/services.ts` | The service registry. Add a service by adding one entry. |
 | `src/shared/unread.ts` | Unread parsing from page titles, totals, badge and window-title labels. |
-| `src/main/index.ts` | Window, tray, menus, shortcuts, saved state, sidebar IPC, bar auto-hide. |
-| `src/main/bar.ts` | Bar side and layout rules: outer screen edge, docked strip or overlay. |
-| `src/main/screen-side.ts` | Watches which screen the window is on (Hyprland socket, else Electron's bounds). |
-| `src/main/hyprland.ts` | Reads Hyprland's `clients` and `monitors` JSON. |
-| `src/renderer/inbox.ts` | The Inbox page: every conversation and mail from the phone, the source board, threads, mail actions. |
+| `src/main/index.ts` | Window, tray, menus, shortcuts, saved state, dock IPC. |
+| `src/main/bar.ts` | Layout: the page under the floating dock, or above the always-shown dock's strip. |
+| `src/main/dock-reveal.ts` | When the auto-hiding dock shows: a small state machine fed by the pointer, keyboard and menus. |
+| `src/shared/theme.ts` | The colour themes: ids, menu names, and each one's page colour, which main paints behind the pages. |
+| `src/preload/theme.ts` | Keeps `data-theme` on the dock and Texts pages' root on the picked theme. |
+| `src/preload/bottom-edge.ts` | Reports the pointer at a page's bottom edge, or leaving the window through it, for the dock. |
+| `src/renderer/inbox.ts` | The Texts page (service id `inbox`): the phone's SMS and RCS conversations, threads, replies, new texts. |
 | `src/main/sms-sync.ts` | SMS sync server: TLS, pairing, the phone's texts, replies. Protocol in `src/shared/sync-protocol.ts`. |
 | `src/main/mdns.ts` | Announces the sync server: Avahi over D-Bus, or an in-app responder; LAN interfaces only. |
 | `test/fake-phone.ts` | A protocol-speaking stand-in for the phone, used by the unit and smoke tests. |
@@ -50,10 +53,10 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `src/main/navigation.ts` | Which links stay in a service, open as a popup, or go to the system browser. |
 | `src/main/permissions.ts` | Notifications and mic/camera for the service's own origin; everything else denied. |
 | `src/main/notifications.ts` | Turns page notifications into native ones; mute and click-to-focus. |
-| `src/preload/app.ts` | The sidebar's only API, `window.kainos`. |
+| `src/preload/app.ts` | The dock page's only API, `window.kainos`. |
 | `src/preload/service.ts` | Routes each page's `Notification` calls through the app (see below). |
 | `src/main/vencord.ts` | Downloads, updates and loads the Vencord extension into Discord's session. |
-| `src/renderer/` | The sidebar page (bar plus the loading and failed notices), a transparent view above the services: plain TypeScript and CSS, no framework. |
+| `src/renderer/` | The dock page (the floating islands or the strip, plus the loading and failed notices over the whole window) and the Texts page: plain TypeScript and CSS, no framework. `tokens.css` holds the five colour themes, one block each (`src/shared/theme.ts` lists them for main). |
 
 ## Behaviour notes
 
@@ -78,30 +81,40 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   stylesheets from `raw.githubusercontent.com` are served as CSS, so themes can load from any
   host. Vencord keeps its settings in Discord's site storage, so **Sign out of Discord also
   resets Vencord**.
-- **Inbox and sleeping websites** (`docs/pc-inbox-plan.md`). The Inbox, first in the bar, shows
-  everything the paired phone gathers (texts, WhatsApp, Discord, Messenger, Proton Mail) and
-  raises the desktop notifications for all of them. The websites load only when opened (except
-  the one open at quit) and sleep 15 minutes after they leave the screen, which frees their
-  memory (an asleep page is about:blank). Right-click a website for "Keep running in the
-  background" or "Sleep now". While asleep, its badge shows what the Inbox has unread for it.
-  While the phone is connected, the websites' own notifications are dropped, since the Inbox
-  already sends them, and the window title counts the Inbox only.
-- **The bar.** Click the Kainos mark at the top of the bar (or right-click the bar's empty space)
-  for its options:
-  - **Hide the bar until the pointer reaches it.** The page then takes the whole window. Push the
-    pointer against the bar's edge of the window (or leave the window across that edge) and the
-    bar slides out over the page without resizing it; it hides again once the pointer leaves it.
-    F6 brings it out too, with focus on the active service. A teal line marks its inner edge.
-  - **Side.** "Outer edge" (the default) puts the bar on the edge of the screen that has no other
-    screen beside it, so the pointer stops there: left on a screen with a neighbour to its right,
-    right on a screen with a neighbour to its left, left on a lone screen. It follows the window
-    when it moves to another screen. "Always left" and "Always right" fix it.
-  - Wayland never tells a window where it is. On Hyprland the app asks Hyprland's own socket
-    which monitor the window is on; on other Wayland compositors "Outer edge" stays on the left,
-    so pick a side by hand there. X11, Windows and macOS use the window's bounds.
+- **Texts and the websites.** Texts, first in the dock, shows the SMS and RCS conversations the paired
+  phone sends, lets you reply or start a new text, and raises a desktop notification for each new
+  text (mute it from its menu like any service). Its id stays `inbox`, because that names its
+  login partition and the saved state. The four websites load at startup, never sleep, and raise
+  their own notifications. The window title and the tray lamp count every service. The phone app
+  only syncs texts; `docs/pc-inbox-plan.md` records the earlier plan that mirrored every app and
+  slept the websites, which was dropped.
+- **The dock** hides until it is wanted, then slides up over the bottom of the page; the page never
+  resizes. It comes up when the pointer rests against the window's bottom edge for a moment
+  (160ms, so passing by on the way to a message box does not flash it), or leaves the window
+  through that edge, which is where the pointer ends in a tiled window with gaps (Hyprland). It
+  stays while the pointer is on it or in the strip-high band along the bottom, while keyboard
+  focus is in it (F6) and while one of its menus is open, and slides away 400ms after the pointer
+  goes up into the page, when focus leaves it, or at once on Escape. While shown it covers the
+  page's message box. Its view is only as big as the islands and their shadow, so the rest of the
+  page keeps its clicks. The two islands sit together in the middle of the window. **Always show
+  the dock**, in the Kainos mark's menu (or a right-click on the dock's empty space), keeps it in a
+  64px strip of its own instead, with the page ending above it. **Theme**, in the same menu, colours
+  the dock and the Texts page: **Match system** (the default: Daylight when the system is light,
+  Bakelite when it is dark), or one of Switchboard (teal and ink), Daylight (light), Bakelite (warm
+  dark), Carbon (black, white and greys; the services' logos are the only colour) and Aubergine
+  (plum). It applies at once and is kept with the window state. The websites keep their own
+  colours. The left island holds the Kainos mark and
+  one tab per service (logo, name, then its unread count, a dot for new activity, a bell for muted,
+  a red mark when it failed to load or, on Texts, when the phone is not connected). When the names
+  no longer fit, every tab but the active one drops its name, then the active name hides too.
+  If needed, the service tabs scroll horizontally; the mark and phone stay reachable. The right island shows the paired
+  phone and whether it is connected; click it for Open Texts and **Forget this phone**.
+  Long device names truncate with the full name in a tooltip. While a service loads or fails, the
+  dock page covers the whole window to say why, with the dock in its strip; a page in fullscreen
+  covers the dock, which does not come up until it leaves fullscreen.
 - **Messenger** opens `www.messenger.com`. Sign-in and security checks may pass through
   `www.facebook.com`, which stays inside the view.
-- **SMS** is not a website. Google refuses its sign-in inside Kainos ("This browser or app may not
+- **Texts** is not a website. Google refuses its sign-in inside Kainos ("This browser or app may not
   be secure") and Google Messages for web no longer pairs by QR code, so the phone's texts come
   from the Kainos phone app instead (`src/main/sms-sync.ts`, plan in `docs/sms-sync-plan.md`):
   - The PC listens on TCP port 48090 (TLS 1.3, a self-signed certificate made on first run) and
@@ -116,20 +129,28 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
     `sudo ufw allow from 192.168.0.0/16 to any port 48090 proto tcp` and
     `sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp` (mDNS is how the phone finds
     the PC, so this one is required too).
-  - Pairing: the phone shows a 6-digit code, the SMS tab shows the same one, and it completes
+  - Pairing: the phone shows a 6-digit code, the Texts page shows the same one, and it completes
     only when the user confirms on both (Codes match on the phone, Connect on the PC). The code
     covers both devices' certificates, so a device in the middle shows a different code.
   - Trust is mutual TLS with pinned certificates, as in Kainos Player: the phone has its own key
     in Android's key store, and each side accepts only the certificate it paired with. No shared
     secret exists. The PC keeps the phone's certificate fingerprint (`sms-sync/phone.json`).
     Protocol 2; a phone paired under protocol 1 (a secret) pairs again once.
+  - The protocol is still version 4. An older phone build also sends mail and chats of other apps
+    (`mail`, `mailRemoved`, and a `conversation` whose `source` is not `sms`); the PC reads and
+    drops them without closing the connection. Only a conversation with no `source`, or `sms`,
+    is kept.
   - Pictures (MMS from the SMS inbox, and pictures from chat notifications such as RCS) are
     fetched one at a time when the thread shows them (`getImage`) and cached in memory.
-  - Texts are held in memory only; the phone sends them again on each connection. Replies go
-    back to the phone, which sends them through the SMS app's notification, so a reply works
-    only while that notification is still on the phone.
-  - The SMS view (`src/renderer/sms.ts`) is a local page with its own preload; its title carries
-    the unread count to the sidebar like the websites' titles do.
+  - Texts are held in memory only. On each connection the PC's welcome lists a hash of every
+    conversation it still holds, and the phone sends only the conversations that changed or
+    are missing.
+  - Replies go back to the phone. With the texts permission, a reply in an SMS conversation is
+    sent as an SMS by the phone itself. An RCS chat that exists only as a notification is
+    answered through that notification while it is still on the phone, and as an SMS to the
+    chat's number once it is gone.
+  - The Texts page (`src/renderer/inbox.ts`) is a local page with its own preload; its title
+    carries the unread count to the dock like the websites' titles do.
 - **Unread counts** come from the page title ("(3) …", "(99+) …", "• …"). Proton's title only
   counts the open folder, so for Proton the preload reads the Inbox counter in the page's
   sidebar and falls back to the title when that element is missing. The selector comes from
@@ -146,20 +167,38 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   storage and cache, then reloads it. A page's "leave site?" prompt never blocks Reload or
   Sign out.
 - **Saved state** lives in `kainos-state.json` in Electron's userData folder: window bounds,
-  maximised, last active service, muted services, bar side and auto-hide.
+  maximised, last active service, muted services and whether the dock is always shown.
 - **Close** hides the window to the tray when a tray is running. On Linux that means a
   StatusNotifierItem host such as a panel or waybar; with none (common on Wayland compositors),
   closing quits.
-- **Shortcuts** work from the sidebar or inside a page:
+- **Shortcuts** work from the dock or inside a page:
   - Ctrl+1..5 (Cmd on macOS) switch service. The digit is the physical key, so it works on
     AZERTY without Shift.
   - Ctrl+Q (Cmd+Q) quits.
-  - F6 moves keyboard focus from the page to its button in the sidebar, and back.
-  - On a sidebar button, the Menu key or Shift+F10 opens the service menu (Reload, Mute,
-    Sign out) beside the button.
+  - F6 moves keyboard focus from the page to its tab in the dock (bringing a hidden dock up), and
+    back. Left and right arrows move between the tabs; Escape goes back to the page.
+  - On a dock tab, the Menu key or Shift+F10 opens the service menu (Reload, Mute, Sign out)
+    at the tab.
 
 ## After you sign in
 
 - **Discord:** if Discord messages raise no notifications, open Discord's User Settings >
   Notifications and turn on **Enable Desktop Notifications**. Discord's web client may leave
   it off in an app like this one.
+
+### Additional Texts contrast checks
+
+`pnpm test` checks every theme's token pairs against WCAG 2 (`src/renderer/tokens.test.ts`),
+including these, which no rendered page shows at rest. Hover uses a 50% sRGB mix of surface and
+rail. The lightbox backdrop is each theme's `--scrim`; its fallback text is white. The backdrop
+result uses a white underlay, the worst case even with arbitrary image content. Close has its own
+opaque surface background. `pnpm smoke` then measures every visible text and icon on the dock and
+the Texts page in each theme and fails under 4.5:1 for text, 3:1 for large text and icons.
+
+| Text/background | Switchboard | Daylight | Bakelite | Carbon | Aubergine |
+|---|---:|---:|---:|---:|---:|
+| Primary text / hovered row or notice | 14.28:1 | 15.69:1 | 14.64:1 | 18.05:1 | 14.09:1 |
+| Secondary text / hovered row or notice | 7.18:1 | 6.90:1 | 7.54:1 | 9.16:1 | 7.65:1 |
+| Disabled Send / raised (WCAG exempt) | 6.15:1 | 6.22:1 | 6.58:1 | 7.69:1 | 6.24:1 |
+| Lightbox fallback text / scrim (worst case) | 14.37:1 | 14.51:1 | 14.51:1 | 15.58:1 | 14.09:1 |
+| Lightbox Close / surface | 14.97:1 | 16.60:1 | 15.17:1 | 19.09:1 | 14.73:1 |

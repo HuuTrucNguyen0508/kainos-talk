@@ -79,7 +79,6 @@ class SmsInbox(private val context: Context, scope: CoroutineScope) : SmsStore {
             .shareIn(scope, SharingStarted.WhileSubscribed(5_000), replay = 1)
 
     private val prefs = context.getSharedPreferences("sms-read-on-pc", Context.MODE_PRIVATE)
-    private val names = HashMap<String, String>()
 
     /**
      * Addresses and parts survive SMS-only changes. MMS notifications invalidate these entries.
@@ -134,6 +133,7 @@ class SmsInbox(private val context: Context, scope: CoroutineScope) : SmsStore {
         val rows = smsRows() + mmsRows()
         val recipients = threadRecipients()
         val canSend = canSend()
+        val contacts = Contacts()
         return rows.groupBy { it.thread }
             .values
             .map { messages -> messages.sortedByDescending { it.date } }
@@ -146,21 +146,24 @@ class SmsInbox(private val context: Context, scope: CoroutineScope) : SmsStore {
                 // since an incoming MMS also lists this phone's own number.
                 val people = recipients[thread]?.takeIf { it.isNotEmpty() }
                     ?: newestFirst.flatMap { it.participants }.filter { it.isNotBlank() }.distinctBy { PhoneNumbers.key(it) ?: it }
-                val title = people.joinToString(", ") { nameFor(it) }.ifBlank { "Unknown sender" }
+                val title = people.joinToString(", ") { contacts.displayName(it) }.ifBlank { "Unknown sender" }
                 val readUpTo = prefs.getLong(thread.toString(), 0L)
+                val isGroup = people.size > 1
+                val address = people.singleOrNull().orEmpty()
                 SyncConversation(
                     key = keyFor(thread),
                     title = title,
-                    isGroup = people.size > 1,
+                    isGroup = isGroup,
                     unread = newestFirst.count { it.incoming && !it.read && it.date > readUpTo },
                     lastActivityMs = newestFirst.first().date,
                     // Group MMS replies would need MMS sending; Kainos Talk sends SMS only.
                     canReply = canSend && people.size == 1,
                     numbers = people,
+                    sender = senderKind(address, isContact = contacts.name(address) != null, isGroup = isGroup),
                     messages = newestFirst.reversed().map { row ->
                         SyncMessage(
                             id = row.id,
-                            sender = if (row.incoming) row.from?.let(::nameFor) else null,
+                            sender = if (row.incoming) row.from?.let(contacts::displayName) else null,
                             text = row.body,
                             timeMs = row.date,
                             outgoing = !row.incoming,
@@ -328,16 +331,28 @@ class SmsInbox(private val context: Context, scope: CoroutineScope) : SmsStore {
         }
     }
 
-    private fun nameFor(address: String): String {
-        if (!granted(Manifest.permission.READ_CONTACTS) || address.isBlank()) return address
-        return names.getOrPut(address) {
+    /**
+     * Saved-contact lookups for one read pass. A contact added or renamed shows on the next pass
+     * (any SMS change) instead of being remembered for the life of the process.
+     */
+    private inner class Contacts {
+        private val found = HashMap<String, String?>()
+
+        /** The saved contact's name, or null: not saved, no READ_CONTACTS, or the lookup failed. */
+        fun name(address: String): String? {
+            if (!granted(Manifest.permission.READ_CONTACTS) || address.isBlank()) return null
+            if (address in found) return found[address]
             val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(address))
-            runCatching {
+            val name = runCatching {
                 context.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { c ->
                     if (c.moveToFirst()) c.getString(0) else null
                 }
-            }.getOrNull() ?: address
+            }.getOrNull()
+            found[address] = name
+            return name
         }
+
+        fun displayName(address: String): String = name(address) ?: address
     }
 
     private class MmsContent(val addresses: Pair<String?, List<String>>, val parts: Pair<String, String?>)

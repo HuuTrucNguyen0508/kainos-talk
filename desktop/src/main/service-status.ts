@@ -23,8 +23,6 @@ function hostOf(url: string): string {
 
 /** The load status after `event`. Returns `status` itself when nothing changed. */
 export function nextStatus(status: ServiceStatus, event: PageEvent): ServiceStatus {
-  // An asleep page shows about:blank; only a restart (waking it) changes that.
-  if (status.kind === 'asleep' && event.kind !== 'restart') return status;
   const to = (next: ServiceStatus) => (next.kind === status.kind && next.kind !== 'failed' ? status : next);
   switch (event.kind) {
     case 'restart':

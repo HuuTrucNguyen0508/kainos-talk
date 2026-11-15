@@ -5,8 +5,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.retryWhen
 import app.kainos.talk.core.MediaKind
-import app.kainos.talk.core.Shape
-import app.kainos.talk.core.Source
 import app.kainos.talk.store.MessageStatus
 import app.kainos.talk.sync.PhoneNumbers
 import app.kainos.talk.sync.SmsInbox
@@ -27,7 +25,7 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
- * One view of texts for every screen and for the PC, one conversation per contact.
+ * One view of texts for the PC, one conversation per contact.
  *
  * With SMS access, SMS conversations come from Android's SMS inbox and replies go out as texts
  * from this phone, so a reply sent from the phone, the PC or the SMS app shows everywhere.
@@ -40,15 +38,14 @@ import kotlin.math.abs
 class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: CoroutineScope) : TalkHub by base {
 
     /** A conversation from notifications, with the phone number it belongs to when one is known. */
-    private data class Notified(val chat: InboxItem.Chat, val thread: ChatThread?, val number: String?)
+    private data class Notified(val chat: InboxChat, val thread: ChatThread?, val number: String?)
 
     /**
      * Shared, so the inbox and every SMS conversation read the notified chats once per change, not
      * once each. Nothing is replayed once no one listens, so a later [first] is never stale.
      */
     private val notified: Flow<List<Notified>> =
-        base.inbox(setOf(Source.SMS.id))
-            .map { inbox -> inbox.items.filterIsInstance<InboxItem.Chat>() }
+        base.inbox()
             .flatMapLatest { chats ->
                 if (chats.isEmpty()) flowOf(emptyList()) else combine(chats.map { base.thread(it.key) }) { threads ->
                     chats.zip(threads.toList()).map { (chat, thread) -> Notified(chat, thread, numberOf(chat, thread)) }
@@ -84,15 +81,11 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
             owner?.let { n.chat.key to it.key }
         }.toMap()
 
-    override fun inbox(sourceIds: Set<String>?): Flow<Inbox> =
-        combine(base.inbox(sourceIds), snapshot) { inbox, snapshot ->
-            val (texts, notifiedChats, owners) = snapshot
-            if (sourceIds != null && Source.SMS.id !in sourceIds) return@combine inbox
-            if (texts.isEmpty() && notifiedChats.none { canFallBack(it) }) return@combine inbox
-            val byKey = notifiedChats.associateBy { it.chat.key }
-            val kept = inbox.items
-                .filterNot { it is InboxItem.Chat && it.key in owners }
-                .map { item -> if (item is InboxItem.Chat && byKey[item.key]?.let(::canFallBack) == true) item.copy(notificationLive = true) else item }
+    override fun inbox(): Flow<List<InboxChat>> =
+        snapshot.map { (texts, notifiedChats, owners) ->
+            val chats = notifiedChats.map { it.chat }
+            if (texts.isEmpty()) return@map chats
+            val kept = chats.filterNot { it.key in owners }
             val merged = texts.map { c ->
                 val folded = notifiedChats.filter { owners[it.chat.key] == c.key }.map { it.chat }
                 val newest = folded.maxByOrNull { it.timeMs }
@@ -106,18 +99,11 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
                         timeMs = newest.timeMs,
                         lastText = newest.lastText,
                         lastSender = newest.lastSender,
-                        lastOutgoing = newest.lastOutgoing,
-                        lastMedia = newest.lastMedia,
                         unreadCount = chat.unreadCount + extraUnread,
                     )
                 }
             }
-            val items = (kept + merged).sortedByDescending { it.timeMs }
-            val unread = items
-                .filterNot { it is InboxItem.Chat && it.muted }
-                .groupBy { it.source.id }
-                .mapValues { (_, list) -> list.sumOf { it.unreadCount } }
-            Inbox(items, unread)
+            (kept + merged).sortedByDescending { it.timeMs }
         }
 
     override fun thread(conversationKey: String, limit: Int): Flow<ChatThread?> =
@@ -125,7 +111,7 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
             combine(base.thread(conversationKey, limit), notified) { thread, notifiedChats ->
                 val n = notifiedChats.firstOrNull { it.chat.key == conversationKey }
                 if (thread != null && n != null && canFallBack(n)) {
-                    thread.copy(capabilities = thread.capabilities.copy(canReply = true, replyBlocked = null))
+                    thread.copy(canReply = true)
                 } else {
                     thread
                 }
@@ -153,7 +139,7 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
         if (SmsInbox.threadOf(conversationKey) == null) {
             val n = notified.first().firstOrNull { it.chat.key == conversationKey }
             // Through the notification while it can (this keeps an RCS chat in RCS)...
-            if (n == null || n.thread?.capabilities?.canReply == true || !canFallBack(n)) return base.sendReply(conversationKey, text)
+            if (n == null || n.thread?.canReply == true || !canFallBack(n)) return base.sendReply(conversationKey, text)
             // ...and as an SMS to the contact once it is gone.
             return sendSms(n.number!!, text)
         }
@@ -178,7 +164,7 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
     /** A one-to-one notified conversation with a known number can still be answered by SMS. */
     private fun canFallBack(n: Notified) = !n.chat.isGroup && n.number != null && sms.canSend()
 
-    private fun numberOf(chat: InboxItem.Chat, thread: ChatThread?): String? {
+    private fun numberOf(chat: InboxChat, thread: ChatThread?): String? {
         if (chat.isGroup) return null
         val incoming = thread?.messages?.filterNot { it.outgoing }.orEmpty()
         val candidates = incoming.flatMap { listOf(it.senderKey?.removePrefix("tel:"), it.senderName) } + chat.title + chat.lastSender
@@ -186,36 +172,20 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
     }
 
     /** The notified conversation's latest message is also in the inbox conversation: same text, close in time. */
-    private fun sharesText(chat: InboxItem.Chat, c: SyncConversation): Boolean {
+    private fun sharesText(chat: InboxChat, c: SyncConversation): Boolean {
         val text = chat.lastText?.trim()?.takeIf { it.isNotEmpty() } ?: return false
         return c.messages.any { it.text.trim() == text && abs(it.timeMs - chat.timeMs) < MATCH_WINDOW_MS }
     }
 
-    private fun chatOf(c: SyncConversation): InboxItem.Chat {
+    private fun chatOf(c: SyncConversation): InboxChat {
         val last = c.messages.lastOrNull()
-        return InboxItem.Chat(
-            key = c.key,
-            source = Source.SMS,
-            title = c.title,
-            isGroup = c.isGroup,
-            timeMs = c.lastActivityMs,
-            unreadCount = c.unread,
-            muted = false,
-            lastText = last?.text,
-            lastSender = last?.sender,
-            lastOutgoing = last?.outgoing ?: false,
-            lastMedia = if (last?.image != null) MediaKind.IMAGE else null,
-            notificationLive = c.canReply,
-        )
+        return InboxChat(c.key, c.title, c.isGroup, c.lastActivityMs, c.unread, last?.text, last?.sender, c.sender)
     }
 
     private fun threadOf(c: SyncConversation, limit: Int) = ChatThread(
         key = c.key,
-        source = Source.SMS,
         title = c.title,
         isGroup = c.isGroup,
-        muted = false,
-        shape = Shape.MESSAGING_STYLE,
         messages = c.messages.takeLast(limit).map { m ->
             ThreadMessage(
                 id = m.id.substringAfter(':').toLongOrNull() ?: 0L,
@@ -234,12 +204,7 @@ class SmsAwareHub(private val base: TalkHub, private val sms: SmsStore, scope: C
                 imageId = m.image,
             )
         },
-        capabilities = ChatCapabilities(
-            canReply = c.canReply,
-            replyBlocked = if (c.canReply) null else ReplyFailure.NOT_SUPPORTED,
-            canMarkReadInApp = false,
-        ),
-        notificationRemovedReason = null,
+        canReply = c.canReply,
         unread = c.unread,
     )
 

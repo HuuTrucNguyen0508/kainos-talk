@@ -39,8 +39,9 @@ import app.kainos.talk.ui.theme.spacing
 import app.kainos.talk.ui.theme.switchboard
 
 /**
- * First run: what Kainos Talk reads and keeps, then the two Android steps. Sideloaded installs
- * must allow restricted settings before Android lets them have notification access.
+ * First run: why Kainos Talk needs notification access, what it reads and keeps, then the two
+ * Android steps. Sideloaded installs must allow restricted settings before Android lets them
+ * have notification access.
  */
 @Composable
 fun SetupScreen(hub: TalkHub) {
@@ -93,21 +94,21 @@ fun SetupScreen(hub: TalkHub) {
                 Text("Kainos Talk", style = MaterialTheme.typography.titleMedium, color = c.ink)
             }
             Text(
-                "One inbox, made from your notifications",
+                "Answer your texts from your computer",
                 style = MaterialTheme.typography.displaySmall,
                 color = c.ink,
                 modifier = Modifier.padding(top = sp.xxl + sp.hair).semantics { heading() },
             )
             Text(
-                "Kainos Talk never signs in to your accounts. It reads the notifications your chat, text and mail apps already post on this phone and lists them in one place.",
+                "Kainos Talk passes this phone's texts to your computer and sends the replies you type there. It needs notification access for two reasons: chat messages (RCS) in your texting app arrive only as notifications, and with that access Android keeps Kainos Talk running in the background.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = c.ink,
                 modifier = Modifier.padding(top = sp.md),
             )
             Column(Modifier.padding(top = sp.xl)) {
-                Fact("Reads", "Notifications from WhatsApp, Discord, Messenger, your SMS app and Proton Mail: who it's from, the text and the time.")
+                Fact("Reads", "Notifications from your texting app: who a text is from, what it says and when.")
                 Fact("Ignores", "Notifications from every other app.")
-                Fact("Keeps", "Everything on this phone. Nothing is uploaded and there is no account.")
+                Fact("Keeps", "Your texts on this phone and the computer you pair. Nothing goes through the internet and there is no account.")
             }
             Text(
                 "Android needs two things from you",
@@ -128,7 +129,7 @@ fun SetupScreen(hub: TalkHub) {
                     how = "Android asks this for apps installed outside the Play Store. In App info, tap the three dots, then Allow restricted settings.",
                     last = false,
                 ) {
-                    if (step == 1) LinkButton("Already allowed? Skip this step", { step = 2 }, icon = null)
+                    if (step == 1) LinkButton("Already allowed? Skip this step", { step = 2 })
                 }
                 Step(
                     number = 2,

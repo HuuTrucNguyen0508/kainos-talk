@@ -8,7 +8,7 @@ import app.kainos.talk.talkGraph
 import app.kainos.talk.ui.talk.TalkApp
 import app.kainos.talk.ui.theme.KainosTheme
 
-/** Hosts the Pocket Switchboard UI. Diagnostics is reachable from the inbox menu. */
+/** Hosts setup and Connect to PC; after pairing nothing here needs opening again. */
 class MainActivity : ComponentActivity() {
     private val hub by lazy { talkGraph().hub }
     private val sync by lazy { talkGraph().sync }
@@ -18,7 +18,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             KainosTheme {
-                TalkApp(hub, sync = sync)
+                TalkApp(hub, sync)
             }
         }
     }
@@ -29,6 +29,6 @@ class MainActivity : ComponentActivity() {
         hub.refreshAccess()
         talkGraph().ensureListenerBound()
         // A sync that stopped (the PC refused this phone) gets another go when the app is opened.
-        talkGraph().sync.start()
+        sync.start()
     }
 }

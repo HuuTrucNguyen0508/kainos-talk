@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 /** A Connect to PC backend for UI tests: pairing shows [code] and then waits for [answer]. */
 class FakeSync(
     status: SyncStatus = SyncStatus.NotPaired,
-    found: List<FoundPc> = listOf(FoundPc("theaden-desktop", listOf("192.168.1.128"), "AB".repeat(32))),
+    found: List<FoundPc> = listOf(FoundPc("studio-desktop", listOf("192.168.1.20"), "AB".repeat(32))),
     private val code: String = "482193",
 ) : SyncControl {
     override val status = MutableStateFlow(status)

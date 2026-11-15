@@ -6,15 +6,12 @@ import android.content.ComponentName
 import android.content.Context
 import android.service.notification.NotificationListenerService
 import android.provider.Telephony
-import app.kainos.talk.core.WatchedApp
-import app.kainos.talk.core.WatchedApps
-import app.kainos.talk.core.adapters.defaultWatchedApps
+import app.kainos.talk.core.adapters.smsPackages
 import app.kainos.talk.hub.DefaultTalkHub
 import app.kainos.talk.hub.TalkHub
 import app.kainos.talk.listener.ConnectionTracker
 import app.kainos.talk.listener.KainosNotificationListener
 import app.kainos.talk.listener.LiveNotifications
-import app.kainos.talk.listener.NotificationDumpLog
 import app.kainos.talk.listener.NotificationImages
 import app.kainos.talk.listener.NotificationIngest
 import app.kainos.talk.store.MessageStore
@@ -27,14 +24,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
 open class KainosTalkApp : Application() {
-    val graph: AppGraph by lazy { AppGraph(this, WatchedApps(watchedApps())) }
+    val graph: AppGraph by lazy { AppGraph(this, watchedPackages()) }
 
-    /** The packages the hub reads and their adapters. The instrumented test overrides this. */
-    protected open fun watchedApps(): List<WatchedApp> = defaultWatchedApps(Telephony.Sms.getDefaultSmsPackage(this))
+    /** The SMS apps whose notifications are read. The instrumented test adds its fake sender. */
+    protected open fun watchedPackages(): Set<String> = smsPackages(Telephony.Sms.getDefaultSmsPackage(this))
 }
 
 /** Wires the hub together by hand; there are few enough parts that a DI framework would cost more. */
-class AppGraph(context: Context, val watched: WatchedApps) {
+class AppGraph(context: Context, watched: Set<String>) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -44,18 +41,17 @@ class AppGraph(context: Context, val watched: WatchedApps) {
     val database: TalkDatabase = TalkDatabase.open(appContext)
     val store = MessageStore(database)
     val live = LiveNotifications()
-    val dump = NotificationDumpLog()
     val connection = ConnectionTracker()
 
-    /** Pictures from chat notifications, copied while the source app still lets them be read. */
+    /** Pictures from text notifications (RCS), copied while the SMS app still lets them be read. */
     val images = NotificationImages(appContext)
 
-    val ingest = NotificationIngest(appContext.packageName, watched, store, live, dump, connection, scope, writer, images)
+    val ingest = NotificationIngest(appContext.packageName, watched, store, live, connection, scope, writer, images)
 
     /** Android's SMS inbox, when the user allowed it: history, and sending without a notification. */
     val sms = SmsInbox(appContext, scope)
 
-    val hub: TalkHub = SmsAwareHub(DefaultTalkHub(appContext, watched, database.dao(), store, live, dump, connection, writer, images), sms, scope)
+    val hub: TalkHub = SmsAwareHub(DefaultTalkHub(appContext, database.dao(), store, live, connection, writer, images), sms, scope)
 
     /**
      * Asks Android to bind the notification listener when access is granted but it is not
@@ -66,7 +62,7 @@ class AppGraph(context: Context, val watched: WatchedApps) {
     fun ensureListenerBound() {
         val component = ComponentName(appContext, KainosNotificationListener::class.java)
         val granted = appContext.getSystemService(NotificationManager::class.java).isNotificationListenerAccessGranted(component)
-        if (granted && !connection.connection.value.connected) NotificationListenerService.requestRebind(component)
+        if (granted && !connection.connected.value) NotificationListenerService.requestRebind(component)
     }
 
     /** SMS sync with the paired PC; it runs whenever the app's process does. */

@@ -15,22 +15,19 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
-    <!-- Needed to open the real apps when their notification is gone. -->
     <queries>
-        <package android:name="com.whatsapp" />
-        <package android:name="com.whatsapp.w4b" />
-        <package android:name="com.discord" />
-        <package android:name="ch.protonmail.android" />
-        <package android:name="com.facebook.orca" />
+        <!-- SMS apps stay visible: their notifications point at pictures (RCS photos) in their own
+             content providers, which listener/NotificationImages copies. -->
         <package android:name="com.google.android.apps.messaging" />
         <package android:name="com.samsung.android.messaging" />
         <package android:name="com.android.messaging" />
-        <package android:name="com.miui.securitycenter" />
         <!-- Any other app that can be the default SMS app. -->
         <intent>
             <action android:name="android.intent.action.SENDTO" />
             <data android:scheme="smsto" />
         </intent>
+        <!-- To check that Xiaomi's autostart screen exists before linking to it. -->
+        <package android:name="com.miui.securitycenter" />
     </queries>
 
     <application

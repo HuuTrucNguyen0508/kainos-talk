@@ -2,8 +2,7 @@ package app.kainos.talk.store
 
 import androidx.room.withTransaction
 import app.kainos.talk.core.ChatUpdate
-import app.kainos.talk.core.MailAction
-import app.kainos.talk.core.MailUpdate
+import app.kainos.talk.core.SMS_SOURCE
 import app.kainos.talk.core.messageDedupKey
 import app.kainos.talk.core.normalizeForMatch
 import kotlin.math.abs
@@ -11,7 +10,7 @@ import kotlin.math.abs
 /**
  * Applies parsed notification events to the database. Every apply is idempotent: posting the
  * same snapshot twice, or a later snapshot that repeats earlier messages, changes nothing.
- * Nothing here deletes a message; a removed notification only records why it went away.
+ * Nothing here deletes a message.
  */
 class MessageStore(private val db: TalkDatabase) {
     private val dao = db.dao()
@@ -23,7 +22,7 @@ class MessageStore(private val db: TalkDatabase) {
         val newestMessage = update.messages.maxOfOrNull { it.timeMs } ?: 0L
         val proposed = ConversationEntity(
             key = update.conversationKey,
-            sourceId = update.source.id,
+            sourceId = SMS_SOURCE,
             title = update.title,
             isGroup = update.isGroup,
             lastActivityMs = maxOf(existing?.lastActivityMs ?: 0L, newestMessage),
@@ -71,27 +70,6 @@ class MessageStore(private val db: TalkDatabase) {
         ChatApplied(inserted, confirmed)
     }
 
-    /** Returns true when the mail item is new. A re-post keeps read state and requested action. */
-    suspend fun applyMail(update: MailUpdate): Boolean = db.withTransaction {
-        val existing = dao.mail(update.mailKey)
-        val proposed = MailEntity(
-            key = update.mailKey,
-            sourceId = update.source.id,
-            accountKey = update.accountKey,
-            accountLabel = update.accountLabel,
-            sender = update.sender,
-            senderHidden = update.senderHidden,
-            subject = update.subject,
-            receivedAtMs = existing?.receivedAtMs ?: update.receivedAtMs,
-            read = existing?.read ?: false,
-            requestedAction = existing?.requestedAction,
-            shape = update.shape,
-            lastRemovalReason = null,
-        )
-        if (proposed != existing) dao.upsertMail(proposed)
-        existing == null
-    }
-
     /** Stores a reply typed in the hub before it is handed to the source app. */
     suspend fun addLocalReply(conversationKey: String, text: String, nowMs: Long): Long {
         val local = MessageEntity(
@@ -112,20 +90,7 @@ class MessageStore(private val db: TalkDatabase) {
     suspend fun finishReply(id: Long, sent: Boolean) =
         dao.finishSending(id, if (sent) MessageStatus.SENT else MessageStatus.FAILED)
 
-    suspend fun conversationRemoved(key: String, reason: Int) = dao.setConversationRemoval(key, reason)
-
-    suspend fun mailRemoved(key: String, reason: Int) = dao.setMailRemoval(key, reason)
-
     suspend fun markConversationRead(key: String) = dao.markConversationRead(key)
-
-    suspend fun setMuted(key: String, muted: Boolean) = dao.setMuted(key, muted)
-
-    suspend fun markMailRead(key: String) = dao.markMailRead(key)
-
-    suspend fun setMailRequestedAction(key: String, action: MailAction) {
-        dao.setMailRequestedAction(key, action)
-        if (action == MailAction.MARK_READ) dao.markMailRead(key)
-    }
 
     companion object {
         /** How far apart the hub's send time and the app's echo time may be. */

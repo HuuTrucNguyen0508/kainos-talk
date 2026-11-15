@@ -1,5 +1,13 @@
 # Plan: the PC mirrors the phone's inbox; web apps open on demand
 
+Superseded on 2026-11-15. The phone app now syncs only texts (SMS and RCS from the messages
+app), and the PC's Inbox became the Texts page. The four websites load at startup and never
+sleep, the source board, mail actions, "Keep running" and "Sleep now" are gone, and the PC no
+longer drops a website's own notifications while the phone is connected. The reason: the user found the phone
+app less appealing than the PC app and wanted to keep only the ability to answer texts from the
+PC. Protocol 3's mail and other-app frames are ignored by the PC. The text below is the plan as
+it was chosen on 2026-11-14.
+
 Status: chosen on 2026-11-14 ("go with A"); steps 1 to 4 built the same day.
 
 ## Why

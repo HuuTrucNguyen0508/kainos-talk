@@ -2,6 +2,7 @@ package app.kainos.talk.sync
 
 import org.json.JSONArray
 import org.json.JSONObject
+import app.kainos.talk.core.SMS_SOURCE
 import java.security.MessageDigest
 
 /**
@@ -12,7 +13,8 @@ import java.security.MessageDigest
 object SyncProtocol {
     /**
      * 2: each side proves itself with its own certificate (mutual TLS); no shared secret.
-     * 3: every source the phone reads (chats and mail), not only texts.
+     * 3: every source the phone reads (chats and mail), not only texts. The phone now sends
+     *    texts only, still as `conversation` frames with source "sms"; nothing changed on the wire.
      * 4: the welcome lists what the PC still holds, so a reconnect sends only what changed.
      */
     const val VERSION = 4
@@ -37,7 +39,7 @@ object SyncProtocol {
     }
 
     /**
-     * What the PC holds of a conversation or mail: the first 8 bytes of the SHA-256 of the frame
+     * What the PC holds of a conversation: the first 8 bytes of the SHA-256 of the frame
      * line it came in (UTF-8, no newline), in lower-case hex. Equal hashes mean the PC already has
      * this exact frame; a different one only means it is sent again.
      */
@@ -87,11 +89,12 @@ object SyncProtocol {
         put(
             "conversation",
             JSONObject()
-                .put("source", c.source)
-                .put("sourceLabel", c.sourceLabel)
+                .put("source", SMS_SOURCE)
+                .put("sourceLabel", "SMS")
                 .put("key", c.key)
                 .put("title", c.title.take(500))
                 .put("isGroup", c.isGroup)
+                .put("sender", c.sender.wire)
                 .put("unread", c.unread)
                 .put("lastActivityMs", c.lastActivityMs)
                 .put("canReply", c.canReply)
@@ -117,25 +120,6 @@ object SyncProtocol {
     }
 
     fun removed(key: String): String = frame("removed") { put("key", key) }
-
-    fun mail(m: SyncMail): String = frame("mail") {
-        put(
-            "mail",
-            JSONObject()
-                .put("key", m.key)
-                .put("source", m.source)
-                .put("sourceLabel", m.sourceLabel)
-                .put("sender", m.sender?.take(500) ?: JSONObject.NULL)
-                .put("subject", m.subject.take(2000))
-                .put("account", m.account ?: JSONObject.NULL)
-                .put("timeMs", m.timeMs)
-                .put("read", m.read)
-                .put("actions", JSONArray(m.actions))
-                .put("requested", m.requested ?: JSONObject.NULL),
-        )
-    }
-
-    fun mailRemoved(key: String): String = frame("mailRemoved") { put("key", key) }
 
     fun replyResult(id: String, error: String?): String = frame("replyResult") {
         put("id", id)
@@ -168,7 +152,7 @@ object SyncProtocol {
             "pairCode" -> text("nonce", 100)?.let { PcFrame.PairCode(it) }
             "paired" -> text("deviceId", 100)?.let { PcFrame.Paired(it) }
             "pairRefused" -> PcFrame.PairRefused
-            "welcome" -> PcFrame.Welcome(text("name", 200) ?: "", held(o.optJSONObject("conversations")), held(o.optJSONObject("mails")))
+            "welcome" -> PcFrame.Welcome(text("name", 200) ?: "", held(o.optJSONObject("conversations")))
             "denied" -> PcFrame.Denied(text("reason", 200) ?: "")
             "reply" -> {
                 val id = text("id", 100)
@@ -185,12 +169,6 @@ object SyncProtocol {
             }
             "ping" -> PcFrame.Ping
             "getImage" -> text("id", 100)?.let { PcFrame.GetImage(it) }
-            "mailAction" -> {
-                val id = text("id", 100)
-                val key = text("key", 500)
-                val action = text("action", 20)?.takeIf { it in setOf("archive", "trash", "markRead") }
-                if (id != null && key != null && action != null) PcFrame.MailAction(id, key, action) else null
-            }
             else -> null
         }
     }
@@ -219,21 +197,6 @@ data class SyncMessage(
     val image: String? = null,
 )
 
-/** A mail the phone was notified of (Proton Mail): no body, only these. */
-data class SyncMail(
-    val key: String,
-    val source: String,
-    val sourceLabel: String,
-    val sender: String?,
-    val subject: String,
-    val account: String?,
-    val timeMs: Long,
-    val read: Boolean,
-    /** "archive", "trash", "markRead": what the mail app's notification still offers. */
-    val actions: List<String>,
-    val requested: String?,
-)
-
 data class SyncConversation(
     val key: String,
     val title: String,
@@ -242,11 +205,10 @@ data class SyncConversation(
     val lastActivityMs: Long,
     val canReply: Boolean,
     val messages: List<SyncMessage>,
-    /** The hub's source id ("whatsapp", "sms"…) and its name. */
-    val source: String = "sms",
-    val sourceLabel: String = "SMS",
     /** The other people's phone numbers (inbox conversations). Kept on the phone; not sent. */
     val numbers: List<String> = emptyList(),
+    /** Whether the PC files this under people or notices; conversations without an SMS address are people. */
+    val sender: SenderKind = SenderKind.PERSON,
 )
 
 /** Matching phone numbers written differently ("+33 6 12…", "06 12…"): their last nine digits. */
@@ -267,10 +229,10 @@ sealed interface PcFrame {
     data class Paired(val deviceId: String) : PcFrame
     data object PairRefused : PcFrame
     /**
-     * The PC accepted this phone. [conversations] and [mails] are what it still holds from an
-     * earlier connection: each key with the [SyncProtocol.frameHash] of the frame it holds.
+     * The PC accepted this phone. [conversations] is what it still holds from an earlier
+     * connection: each key with the [SyncProtocol.frameHash] of the frame it holds.
      */
-    data class Welcome(val name: String, val conversations: Map<String, String> = emptyMap(), val mails: Map<String, String> = emptyMap()) : PcFrame
+    data class Welcome(val name: String, val conversations: Map<String, String> = emptyMap()) : PcFrame
     data class Denied(val reason: String) : PcFrame
     data class Reply(val id: String, val key: String, val text: String) : PcFrame
     data class Read(val key: String) : PcFrame
@@ -278,9 +240,6 @@ sealed interface PcFrame {
     /** A new text to a number, typed on the PC. */
     data class Send(val id: String, val to: String, val text: String) : PcFrame
     data object Ping : PcFrame
-
-    /** The PC asks for archive, trash or markRead on a mail, through the mail app's notification. */
-    data class MailAction(val id: String, val key: String, val action: String) : PcFrame
 
     /** The PC wants a picture from a message to show it. */
     data class GetImage(val id: String) : PcFrame

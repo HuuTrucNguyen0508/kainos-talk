@@ -5,7 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import app.kainos.talk.core.ParseResult
-import app.kainos.talk.core.WatchedApps
+import app.kainos.talk.core.adapters.ChatAppAdapter
 import app.kainos.talk.store.MessageStore
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -14,16 +14,16 @@ import kotlinx.coroutines.launch
 /**
  * The path from a listener callback to the store. Callbacks arrive on the main thread: the
  * snapshot and live handles are taken there, while the sbn is valid, and database writes go to
- * one sequential [writer] so a removal never overtakes the post before it.
+ * one sequential [writer] so they keep callback order.
  *
- * Logs carry package names and outcomes only, never titles, text, senders or subjects.
+ * Logs carry package names and outcomes only, never titles, text or senders.
  */
 class NotificationIngest(
     private val ownPackage: String,
-    private val watched: WatchedApps,
+    /** The SMS apps whose notifications are read. */
+    private val packages: Set<String>,
     private val store: MessageStore,
     private val live: LiveNotifications,
-    private val dump: NotificationDumpLog,
     private val connection: ConnectionTracker,
     private val scope: CoroutineScope,
     private val writer: CoroutineDispatcher,
@@ -42,27 +42,20 @@ class NotificationIngest(
     }
 
     fun onPosted(sbn: StatusBarNotification) {
-        if (sbn.packageName == ownPackage) return
-        val app = watched[sbn.packageName] ?: return
-        connection.notificationSeen()
+        if (sbn.packageName == ownPackage || sbn.packageName !in packages) return
         val snapshot = SnapshotReader.read(sbn)
-        val result = runCatching { app.adapter.parse(snapshot) }
+        val result = runCatching { ChatAppAdapter.parse(snapshot) }
             .getOrElse { ParseResult.Ignored("adapter error: ${it.javaClass.simpleName}") }
         val outcome = when (result) {
             is ParseResult.Chat -> "chat (${result.update.shape.name.lowercase()}, ${result.update.messages.size} message(s))"
-            is ParseResult.Mail -> "mail (${result.update.shape.name.lowercase()}, ${result.update.actions.size} action(s))"
             is ParseResult.Ignored -> "ignored: ${result.reason}"
         }
-        dump.record(snapshot, outcome)
         Log.d(TAG, "${sbn.packageName}: $outcome")
 
         when (result) {
             is ParseResult.Chat -> {
                 val update = result.update
-                live.put(
-                    update.conversationKey,
-                    LiveEntry(TargetKind.CHAT, LiveNotification.from(sbn), update.replyAction, update.markReadAction),
-                )
+                live.put(update.conversationKey, LiveEntry(LiveNotification.from(sbn), update.replyAction))
                 scope.launch(writer) { store.applyChat(update) }
                 // Copy pictures now: the source app's URI stops working once the notification goes.
                 val pictures = update.messages.filter { it.dataUri != null }
@@ -72,28 +65,13 @@ class NotificationIngest(
                     }
                 }
             }
-            is ParseResult.Mail -> {
-                val update = result.update
-                live.put(update.mailKey, LiveEntry(TargetKind.MAIL, LiveNotification.from(sbn), mailActions = update.actions))
-                scope.launch(writer) { store.applyMail(update) }
-            }
             is ParseResult.Ignored -> Unit
         }
     }
 
-    fun onRemoved(sbn: StatusBarNotification, reason: Int) {
-        if (sbn.packageName == ownPackage || watched[sbn.packageName] == null) return
-        dump.removed(sbn.key, reason)
-        val gone = live.removeBySbnKey(sbn.key)
-        if (gone.isEmpty()) return
-        scope.launch(writer) {
-            gone.forEach { (key, entry) ->
-                when (entry.kind) {
-                    TargetKind.CHAT -> store.conversationRemoved(key, reason)
-                    TargetKind.MAIL -> store.mailRemoved(key, reason)
-                }
-            }
-        }
+    fun onRemoved(sbn: StatusBarNotification) {
+        if (sbn.packageName == ownPackage || sbn.packageName !in packages) return
+        live.removeBySbnKey(sbn.key)
     }
 
     private companion object {

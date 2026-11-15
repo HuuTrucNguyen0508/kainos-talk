@@ -5,7 +5,6 @@ import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
-import app.kainos.talk.core.MailAction
 import app.kainos.talk.core.MediaKind
 import app.kainos.talk.core.Shape
 
@@ -58,6 +57,11 @@ data class MessageEntity(
     val read: Boolean,
 )
 
+/**
+ * Mail that older versions read from Proton Mail's notifications. Nothing reads or writes it now;
+ * the table stays so the schema, and every installed database, stays at version 1.
+ * [requestedAction] and [shape] hold enum names, as Room stored them.
+ */
 @Entity(tableName = "mail", indices = [Index(value = ["receivedAtMs"])])
 data class MailEntity(
     @PrimaryKey val key: String,
@@ -69,9 +73,8 @@ data class MailEntity(
     val subject: String,
     val receivedAtMs: Long,
     val read: Boolean = false,
-    /** The last action the user asked the source app to perform; the app does not report back. */
-    val requestedAction: MailAction? = null,
-    val shape: Shape,
+    val requestedAction: String? = null,
+    val shape: String,
     val lastRemovalReason: Int? = null,
 )
 
@@ -81,6 +84,4 @@ data class ConversationRow(
     @ColumnInfo(name = "unreadCount") val unreadCount: Int,
     @ColumnInfo(name = "lastText") val lastText: String?,
     @ColumnInfo(name = "lastSender") val lastSender: String?,
-    @ColumnInfo(name = "lastOutgoing") val lastOutgoing: Boolean?,
-    @ColumnInfo(name = "lastMedia") val lastMedia: MediaKind?,
 )

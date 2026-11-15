@@ -27,6 +27,6 @@ class KainosNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: RankingMap?, reason: Int) {
-        ingest.onRemoved(sbn, reason)
+        ingest.onRemoved(sbn)
     }
 }

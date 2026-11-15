@@ -1,7 +1,6 @@
 package app.kainos.talk.sync
 
-import app.kainos.talk.core.Source
-import app.kainos.talk.hub.InboxItem
+import app.kainos.talk.hub.InboxChat
 import app.kainos.talk.hub.ReplyResult
 import app.kainos.talk.hub.SmsAwareHub
 import app.kainos.talk.store.MessageStatus
@@ -15,7 +14,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.runBlocking
-import app.kainos.talk.hub.Inbox
 import app.kainos.talk.hub.TalkHub
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -43,14 +41,13 @@ class SmsMergeTest {
         numbers = listOf(number),
     )
 
-    private fun notified(key: String, at: Long, text: String, title: String = "Garage", live: Boolean = true) =
-        InboxItem.Chat(key, Source.SMS, title, false, at, 1, false, text, title, false, null, notificationLive = live)
+    private fun notified(key: String, at: Long, text: String, title: String = "Garage") =
+        InboxChat(key, title, false, at, 1, text, title)
 
     private fun thread(key: String, title: String, text: String, at: Long, canReply: Boolean) = app.kainos.talk.hub.ChatThread(
-        key, Source.SMS, title, isGroup = false, muted = false, shape = app.kainos.talk.core.Shape.MESSAGING_STYLE,
+        key, title, isGroup = false,
         messages = listOf(app.kainos.talk.hub.ThreadMessage(1, title, text, at, outgoing = false, status = MessageStatus.INCOMING, media = null, read = false)),
-        capabilities = app.kainos.talk.hub.ChatCapabilities(canReply, if (canReply) null else app.kainos.talk.hub.ReplyFailure.NOTIFICATION_GONE, false),
-        notificationRemovedReason = if (canReply) null else 8,
+        canReply = canReply,
     )
 
     @Test
@@ -64,8 +61,7 @@ class SmsMergeTest {
         }
         val reads = AtomicInteger()
         val base = object : TalkHub by fake {
-            override fun inbox(sourceIds: Set<String>?): Flow<Inbox> =
-                fake.inbox(sourceIds).onStart { if (sourceIds == setOf(Source.SMS.id)) reads.incrementAndGet() }
+            override fun inbox(): Flow<List<InboxChat>> = fake.inbox().onStart { reads.incrementAndGet() }
         }
         val texts = (1L..5L).map { inboxConversation(it, 100_000 - it, "Text $it" to false, number = "+3361234567$it") }
         val hub = SmsAwareHub(base, FakeSmsStore(texts), scope)
@@ -73,7 +69,7 @@ class SmsMergeTest {
         val (inbox, all) = combine(hub.inbox(), threads) { inbox, all -> inbox to all }.first()
         assertEquals(listOf("Text 1", "Text 2", "Text 3", "Text 4", "Text 5"), all.take(5).map { it!!.messages.single().text })
         assertEquals("Sent over RCS", all.last()!!.messages.single().text)
-        assertEquals(7, inbox.items.size)
+        assertEquals(7, inbox.size)
         assertEquals("the inbox and six conversations read the notified chats once", 1, reads.get())
     }
 
@@ -81,16 +77,16 @@ class SmsMergeTest {
     fun aTextInTheInboxAndInANotificationIsShownOnceFromTheInbox() = runBlocking {
         val base = FakeTalkHub().apply { chats.value = listOf(notified("sms|0|s:168", 100_500, "Car ready")) }
         val hub = SmsAwareHub(base, FakeSmsStore(listOf(inboxConversation(2, 100_000, "Car ready" to false))), scope)
-        val items = hub.inbox().first().items
+        val items = hub.inbox().first()
         assertEquals(listOf("sms|t:2"), items.map { it.key })
-        assertEquals(1, hub.inbox().first().unreadBySource[Source.SMS.id])
+        assertEquals(1, items.single().unreadCount)
     }
 
     @Test
     fun aChatOutsideTheSmsTableSuchAsRcsIsKept() = runBlocking {
         val base = FakeTalkHub().apply { chats.value = listOf(notified("sms|0|s:mum", 200_000, "Sent over RCS")) }
         val hub = SmsAwareHub(base, FakeSmsStore(listOf(inboxConversation(2, 100_000, "Car ready" to false))), scope)
-        assertEquals(listOf("sms|0|s:mum", "sms|t:2"), hub.inbox().first().items.map { it.key })
+        assertEquals(listOf("sms|0|s:mum", "sms|t:2"), hub.inbox().first().map { it.key })
     }
 
     @Test
@@ -109,7 +105,7 @@ class SmsMergeTest {
         val thread = hub.thread("sms|t:2").first()!!
         assertEquals(listOf("Car ready", "On my way"), thread.messages.map { it.text })
         assertEquals(MessageStatus.CONFIRMED, thread.messages.last().status)
-        assertTrue(thread.capabilities.canReply)
+        assertTrue(thread.canReply)
     }
 
     @Test
@@ -122,20 +118,20 @@ class SmsMergeTest {
         assertTrue(base.sentReplies.isEmpty())
         hub.markRead("sms|t:2")
         assertEquals(listOf("sms|t:2"), store.read)
-        assertEquals(0, hub.inbox().first().unreadBySource[Source.SMS.id])
+        assertEquals(listOf(0), hub.inbox().first().map { it.unreadCount })
     }
 
     @Test
     fun anRcsChatIsFoldedIntoTheSameContactsSmsThreadByNumber() = runBlocking {
         val base = FakeTalkHub().apply {
-            chats.value = listOf(notified("sms|0|s:rcs", 300_000, "Sent over RCS", title = "Sam, +33 6 39 98 01 23", live = false))
+            chats.value = listOf(notified("sms|0|s:rcs", 300_000, "Sent over RCS", title = "Sam, +33 6 39 98 01 23"))
             threads.value = mapOf("sms|0|s:rcs" to thread("sms|0|s:rcs", "Sam, +33 6 39 98 01 23", "Sent over RCS", 300_000, canReply = false))
         }
         val store = FakeSmsStore(listOf(inboxConversation(9, 100_000, "Old SMS" to false, number = "0639980123")), canSend = true)
         val hub = SmsAwareHub(base, store, scope)
         val inbox = hub.inbox().first()
-        assertEquals("one conversation for the contact", listOf("sms|t:9"), inbox.items.map { it.key })
-        assertEquals("Sent over RCS", (inbox.items.single() as InboxItem.Chat).lastText)
+        assertEquals("one conversation for the contact", listOf("sms|t:9"), inbox.map { it.key })
+        assertEquals("Sent over RCS", inbox.single().lastText)
         assertEquals(listOf("Old SMS", "Sent over RCS"), hub.thread("sms|t:9").first()!!.messages.map { it.text })
         assertEquals(ReplyResult.Sent, hub.sendReply("sms|t:9", "Got it"))
         assertEquals(listOf("0639980123" to "Got it"), store.sent)
@@ -144,12 +140,12 @@ class SmsMergeTest {
     @Test
     fun aChatWhoseNotificationIsGoneIsAnsweredBySms() = runBlocking {
         val base = FakeTalkHub().apply {
-            chats.value = listOf(notified("sms|0|s:rcs", 300_000, "Hi", title = "Sam, +33639980123", live = false))
+            chats.value = listOf(notified("sms|0|s:rcs", 300_000, "Hi", title = "Sam, +33639980123"))
             threads.value = mapOf("sms|0|s:rcs" to thread("sms|0|s:rcs", "Sam, +33639980123", "Hi", 300_000, canReply = false))
         }
         val store = FakeSmsStore(listOf(inboxConversation(2, 100_000, "Car ready" to false)), canSend = true)
         val hub = SmsAwareHub(base, store, scope)
-        assertTrue("it can be answered", hub.thread("sms|0|s:rcs").first()!!.capabilities.canReply)
+        assertTrue("it can be answered", hub.thread("sms|0|s:rcs").first()!!.canReply)
         assertEquals(ReplyResult.Sent, hub.sendReply("sms|0|s:rcs", "On my way"))
         assertEquals(listOf("+33639980123" to "On my way"), store.sent)
         assertTrue("not through the dead notification", base.sentReplies.isEmpty())

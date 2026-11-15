@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, mock, test } from 'node:test';
-import { connectPaired, conversation, link, mail, newIdentity, phoneIdentity, startPairing } from '../../test/fake-phone.ts';
+import { connectPaired, conversation, link, newIdentity, phoneIdentity, startPairing } from '../../test/fake-phone.ts';
 import { startSmsSync, type SmsSync } from './sms-sync.ts';
 import { SYNC_VERSION, frameHash, type SyncConversation, type SyncMessage } from '../shared/sync-protocol.ts';
 
@@ -123,20 +123,35 @@ test('texts flow from the phone, replies and reads go back', async () => {
   assert.ok(await until(() => server.state().newText.failure === 'no permission to send texts'));
   assert.equal(server.send('call me', 'x'), false, 'not a phone number');
 
-  // Protocol 3: chats from other apps and mail come too, and mail actions go back.
-  phone.send({ t: 'conversation', conversation: conversation('whatsapp|0|s:allot', 'Allotment crew', [{ id: 'w1', text: 'Shed key?', timeMs: Date.now() }], 1, 'whatsapp') });
-  phone.send({ t: 'mail', mail: mail('protonmail|0|halden', 'Halden Housing', 'Minutes from Tuesday') });
-  assert.ok(await until(() => server.state().mails.length === 1 && server.state().conversations.some((c) => c.source === 'whatsapp')));
-  assert.equal(server.mailAction('protonmail|0|halden', 'archive'), true);
-  const action = await phone.next('mailAction');
-  assert.deepEqual({ key: action.key, action: action.action }, { key: 'protonmail|0|halden', action: 'archive' });
-  assert.equal(server.state().mails[0]!.requested, 'archive');
-  assert.equal(server.mailAction('protonmail|0|halden', 'delete' as never), false, 'only actions the mail app offers');
-  phone.send({ t: 'mailRemoved', key: 'protonmail|0|halden' });
-  assert.ok(await until(() => server.state().mails.length === 0));
-
   phone.send({ t: 'removed', key: 'sms|0|s:garage' });
   assert.ok(await until(() => !server.state().conversations.some((c) => c.key === 'sms|0|s:garage')));
+  phone.close();
+  assert.ok(await until(() => server.state().phone?.connected === false));
+});
+
+test('mail and chats from other apps, as an older phone still sends them, are dropped without closing the connection', async () => {
+  const server = await sync;
+  const phone = await connectPaired(port, deviceId);
+  assert.ok(await until(() => server.state().phone?.connected === true));
+  const incomingBefore = incoming.length;
+  const other = { ...conversation('whatsapp|0|s:allot', 'Allotment crew', [{ id: 'w1', text: 'Shed key?', timeMs: Date.now() }]), source: 'whatsapp', sourceLabel: 'WhatsApp' };
+  phone.sendAll([
+    { t: 'conversation', conversation: other },
+    { t: 'conversation', conversation: { ...other, key: 'sms|0|s:says-sms', source: 'sms', sourceLabel: 'SMS', title: 'Says SMS' } },
+    { t: 'mail', mail: { key: 'protonmail|0|halden', source: 'protonmail', sender: 'Halden Housing', subject: 'Minutes', timeMs: Date.now(), read: false, actions: ['archive'], requested: null } },
+    { t: 'mailRemoved', key: 'protonmail|0|halden' },
+    { t: 'conversation', conversation: conversation('sms|0|s:no-source', 'No source', [{ id: 'n1', text: 'From an old phone', timeMs: Date.now() }]) },
+  ]);
+  assert.ok(await until(() => server.state().conversations.some((c) => c.key === 'sms|0|s:no-source')));
+  assert.deepEqual(
+    server.state().conversations.map((c) => c.key).filter((key) => key.includes('allot') || key.includes('says-sms') || key.includes('no-source')).sort(),
+    ['sms|0|s:no-source', 'sms|0|s:says-sms'],
+    'the WhatsApp chat is not stored; one that says sms, or says nothing, is',
+  );
+  assert.equal(incoming.length - incomingBefore, 2, 'only the two texts notify');
+  assert.equal(server.state().phone?.connected, true, 'nothing here is a reason to disconnect');
+  phone.sendAll([{ t: 'removed', key: 'sms|0|s:says-sms' }, { t: 'removed', key: 'sms|0|s:no-source' }]);
+  assert.ok(await until(() => !server.state().conversations.some((c) => c.key.includes('no-source'))));
   phone.close();
   assert.ok(await until(() => server.state().phone?.connected === false));
 });
@@ -161,9 +176,8 @@ test('a reconnect is welcomed with the hash of every frame the PC still holds', 
   const first = await connectPaired(port, deviceId);
   const chat = { t: 'conversation', conversation: conversation('sms|0|s:held', 'Held', [{ id: 'h1', text: 'Still here', timeMs: 1 }]) };
   const read = { t: 'conversation', conversation: conversation('sms|0|s:readhere', 'Read here', [{ id: 'h2', text: 'Seen on the PC', timeMs: 1 }]) };
-  const letter = { t: 'mail', mail: mail('protonmail|0|held', 'Halden', 'Kept', 1) };
-  first.sendAll([chat, read, letter]);
-  assert.ok(await until(() => server.state().mails.some((m) => m.key === 'protonmail|0|held') && server.state().conversations.some((c) => c.key === 'sms|0|s:readhere')));
+  first.sendAll([chat, read]);
+  assert.ok(await until(() => server.state().conversations.some((c) => c.key === 'sms|0|s:readhere')));
   server.markRead('sms|0|s:readhere');
   await first.next('read');
   first.close();
@@ -174,10 +188,10 @@ test('a reconnect is welcomed with the hash of every frame the PC still holds', 
   const welcome = await again.next('welcome');
   assert.equal(welcome.conversations['sms|0|s:held'], frameHash(JSON.stringify(chat)), 'the hash of the line as it came in');
   assert.equal(welcome.conversations['sms|0|s:readhere'], '', 'changed on the PC since: the phone sends it again');
-  assert.equal(welcome.mails['protonmail|0|held'], frameHash(JSON.stringify(letter)));
+  assert.equal('mails' in welcome, false, 'the PC holds no mail, so it lists none');
   assert.deepEqual(Object.keys(welcome.conversations).sort(), server.state().conversations.map((c) => c.key).sort(), 'every key the PC holds');
 
-  again.sendAll([{ t: 'removed', key: 'sms|0|s:held' }, { t: 'mailRemoved', key: 'protonmail|0|held' }]);
+  again.sendAll([{ t: 'removed', key: 'sms|0|s:held' }]);
   assert.ok(await until(() => !server.state().conversations.some((c) => c.key === 'sms|0|s:held')));
   again.close();
   assert.ok(await until(() => server.state().phone?.connected === false));

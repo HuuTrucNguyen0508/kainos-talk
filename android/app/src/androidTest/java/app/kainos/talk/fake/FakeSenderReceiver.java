@@ -18,13 +18,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A fake chat app for the end-to-end test. It runs in the test APK's own process and uid, so
+ * A fake SMS app for the end-to-end test. It runs in the test APK's own process and uid, so
  * the hub sees its notifications as coming from another app. It is written in Java against
  * platform APIs only: that process has neither the Kotlin runtime nor AndroidX.
  *
  * Commands arrive as explicit broadcasts: POST a MessagingStyle conversation with a reply
  * action, CANCEL it. When the hub fires the reply action, REPLY re-posts the conversation with
- * the reply added as the user's own message, the way WhatsApp echoes a reply.
+ * the reply added as the user's own message, as a messaging app shows a sent reply.
  */
 public class FakeSenderReceiver extends BroadcastReceiver {
     public static final String ACTION_POST = "app.kainos.talk.fake.POST";

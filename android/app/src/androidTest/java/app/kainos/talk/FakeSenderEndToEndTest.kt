@@ -1,10 +1,8 @@
 package app.kainos.talk
 
-import android.service.notification.NotificationListenerService
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.kainos.talk.hub.ChatThread
-import app.kainos.talk.hub.InboxItem
 import app.kainos.talk.hub.ReplyFailure
 import app.kainos.talk.hub.ReplyResult
 import app.kainos.talk.store.MessageStatus
@@ -21,10 +19,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * The hub, end to end, against a fake chat app (the test APK, in its own process):
- * a posted MessagingStyle conversation is ingested, a repeated snapshot is de-duplicated, a
- * reply goes out through the notification's RemoteInput and comes back as the app's echo, and
- * a reply after the notification is cancelled fails with NOTIFICATION_GONE.
+ * The hub, end to end, against a fake SMS app (the test APK, in its own process) posting the way
+ * Google Messages posts an RCS chat: a MessagingStyle conversation is ingested, a repeated
+ * snapshot is de-duplicated, a reply goes out through the notification's RemoteInput and comes
+ * back as the app's echo, and a reply after the notification is cancelled fails with
+ * NOTIFICATION_GONE (the contact has no number, so it cannot fall back to an SMS).
  */
 @RunWith(AndroidJUnit4::class)
 class FakeSenderEndToEndTest {
@@ -38,7 +37,7 @@ class FakeSenderEndToEndTest {
         fake.grantAccess()
         runBlocking {
             withContext(Dispatchers.IO) { app.graph.database.clearAllTables() }
-            withTimeout(TIMEOUT_MS) { hub.health.first { it.connected } }
+            withTimeout(TIMEOUT_MS) { hub.listenerConnected.first { it } }
         }
     }
 
@@ -54,10 +53,8 @@ class FakeSenderEndToEndTest {
         val second = Triple("Ana", "second", 2_000L)
 
         fake.post(hello)
-        val key = withTimeout(TIMEOUT_MS) {
-            hub.inbox(setOf(TestTalkApp.FAKE_SOURCE.id)).first { it.items.isNotEmpty() }.items.single().key
-        }
-        val chat = hub.inbox().first().items.single { it.key == key } as InboxItem.Chat
+        val key = withTimeout(TIMEOUT_MS) { hub.inbox().first { it.isNotEmpty() }.single().key }
+        val chat = hub.inbox().first().single { it.key == key }
         assertEquals("Test chat", chat.title)
         assertEquals(1, chat.unreadCount)
 
@@ -71,12 +68,10 @@ class FakeSenderEndToEndTest {
         assertEquals(listOf("hello", "second", "pong"), confirmed.messages.map { it.text })
         assertEquals(listOf(false, false, true), confirmed.messages.map { it.outgoing })
         assertEquals(listOf("Ana", "Ana", null), confirmed.messages.map { it.senderName })
-        assertEquals(2, (hub.inbox().first().items.single { it.key == key } as InboxItem.Chat).unreadCount)
+        assertEquals(2, hub.inbox().first().single { it.key == key }.unreadCount)
 
         fake.cancel()
-        val gone = awaitThread(key) { it.capabilities.replyBlocked == ReplyFailure.NOTIFICATION_GONE }
-        assertEquals(NotificationListenerService.REASON_APP_CANCEL, awaitThread(key) { it.notificationRemovedReason != null }.notificationRemovedReason)
-        assertEquals(false, gone.capabilities.canReply)
+        awaitThread(key) { !it.canReply }
 
         assertEquals(ReplyResult.Failed(ReplyFailure.NOTIFICATION_GONE), hub.sendReply(key, "late"))
         val after = awaitThread(key) { t -> t.messages.any { it.text == "late" && it.status == MessageStatus.FAILED } }

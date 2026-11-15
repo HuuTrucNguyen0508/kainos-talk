@@ -1,9 +1,9 @@
 # Kainos Talk
 
-One app for Proton Mail, Discord, WhatsApp, Messenger and SMS.
+One app for Proton Mail, Discord, WhatsApp and Messenger, with your phone's texts (SMS and RCS) on the PC.
 
-- `desktop/`: the PC app (Electron). Each service runs in its own view inside one window, with a sidebar to switch between them.
-- `android/`: the phone app (Kotlin, Gradle). It reads the notifications the real apps post; see [android/docs/notification-facts.md](android/docs/notification-facts.md). It also sends the phone's texts to the PC's SMS tab over the local network; see [docs/sms-sync-plan.md](docs/sms-sync-plan.md).
+- `desktop/`: the PC app (Electron). Each website runs in its own view inside one window, with a dock that slides up from the bottom to switch between them, and a Texts page shows the phone's texts.
+- `android/`: the phone app (Kotlin, Gradle). It is an SMS bridge: it sends the phone's texts (SMS and RCS from the messages app) to the PC's Texts page over the local network, and sends the replies you write there. See [docs/sms-sync-plan.md](docs/sms-sync-plan.md).
 - `protocol/`: test vectors for the phone-to-PC SMS sync, checked by both apps' tests.
 
 ## Requirements

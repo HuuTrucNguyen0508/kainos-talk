@@ -1,7 +1,5 @@
 package app.kainos.talk.hub
 
-import app.kainos.talk.core.Shape
-import app.kainos.talk.core.Source
 import app.kainos.talk.store.MessageStatus
 import app.kainos.talk.sync.FakeSmsStore
 import app.kainos.talk.sync.SyncConversation
@@ -31,20 +29,17 @@ class SmsOwnershipTest {
         val texts = listOf(sms(1, countedNumber), sms(2, listOf("+33699999999")), sms(3, listOf("+33688888888")))
         val notifiedKey = "sms|rcs"
         val fake = FakeTalkHub().apply {
-            chats.value = listOf(InboxItem.Chat(notifiedKey, Source.SMS, "+33612345678", false,
-                2000, 2, false, "RCS", null, false, null, true))
-            threads.value = mapOf(notifiedKey to ChatThread(notifiedKey, Source.SMS, "+33612345678", false,
-                false, Shape.MESSAGING_STYLE,
-                listOf(ThreadMessage(7, "Sender", "RCS", 2000, false, MessageStatus.INCOMING, null, false)),
-                ChatCapabilities(true, null, false), null))
+            chats.value = listOf(InboxChat(notifiedKey, "+33612345678", false, 2000, 2, "RCS", null))
+            threads.value = mapOf(notifiedKey to ChatThread(notifiedKey, "+33612345678", false,
+                listOf(ThreadMessage(7, "Sender", "RCS", 2000, false, MessageStatus.INCOMING, null, false)), canReply = true))
         }
         val store = FakeSmsStore(texts)
         val hub = SmsAwareHub(fake, store, backgroundScope)
-        var inbox: Inbox? = null
+        var inbox: List<InboxChat>? = null
         val threads = mutableMapOf<String, ChatThread?>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { hub.inbox().collect { value ->
             inbox = value
-            value.items.filterIsInstance<InboxItem.Chat>().filter { it.key.startsWith("sms|t:") }.forEach { chat ->
+            value.filter { it.key.startsWith("sms|t:") }.forEach { chat ->
                 val owns = chat.title == "SMS 1" || chat.title == "Moved 2"
                 assertEquals("unread belongs to the same snapshot as its conversation", if (owns) 3 else 1, chat.unreadCount)
             }
@@ -61,7 +56,7 @@ class SmsOwnershipTest {
         runCurrent()
         assertEquals("one match for the inbox and all three threads", 1, matches.get())
         assertEquals(listOf("text 1", "RCS"), threads["sms|t:1"]!!.messages.map { it.text })
-        assertEquals(3, inbox!!.items.filterIsInstance<InboxItem.Chat>().single { it.key == "sms|t:1" }.unreadCount)
+        assertEquals(3, inbox!!.single { it.key == "sms|t:1" }.unreadCount)
 
         matches.set(0)
         // The same notified chat now belongs to thread 2, which leads this provider snapshot.
@@ -70,7 +65,7 @@ class SmsOwnershipTest {
         assertEquals("one match after the provider update", 1, matches.get())
         assertEquals(listOf("text 1"), threads["sms|t:1"]!!.messages.map { it.text })
         assertEquals(listOf("text 2", "RCS"), threads["sms|t:2"]!!.messages.map { it.text })
-        val chats = requireNotNull(inbox).items.filterIsInstance<InboxItem.Chat>().associateBy { it.key }
+        val chats = requireNotNull(inbox).associateBy { it.key }
         assertEquals(1, chats.getValue("sms|t:1").unreadCount)
         assertEquals(3, chats.getValue("sms|t:2").unreadCount)
     }
@@ -108,15 +103,15 @@ class SmsThreadPagingTest {
     @Test fun foldedInMessagesAndTheCutGiveWhatCuttingTheFullThreadGives() = runTest {
         val notifiedKey = "sms|rcs"
         val fake = FakeTalkHub().apply {
-            chats.value = listOf(InboxItem.Chat(notifiedKey, Source.SMS, "+33612345678", false, 5000, 2, false, "RCS", null, false, null, true))
-            threads.value = mapOf(notifiedKey to ChatThread(notifiedKey, Source.SMS, "+33612345678", false, false, Shape.MESSAGING_STYLE,
+            chats.value = listOf(InboxChat(notifiedKey, "+33612345678", false, 5000, 2, "RCS", null))
+            threads.value = mapOf(notifiedKey to ChatThread(notifiedKey, "+33612345678", false,
                 listOf(
                     ThreadMessage(7, "Ana", "RCS only", 5_000_000, false, MessageStatus.INCOMING, null, false),
                     ThreadMessage(8, "Ana", "RCS early", 900, false, MessageStatus.INCOMING, null, false),
                     // The inbox has this one, just outside the newest page, but the notification stamped it
                     // 119 s later, inside the page: it is not an RCS-only message and must not push one off.
                     ThreadMessage(9, "Ana", "text 800", 800_000 + 119_000, false, MessageStatus.INCOMING, null, false),
-                ), ChatCapabilities(true, null, false), null))
+                ), canReply = true))
         }
         val hub = SmsAwareHub(fake, FakeSmsStore(listOf(conversation(all))), backgroundScope)
         val results = mutableMapOf<Int, ChatThread?>()

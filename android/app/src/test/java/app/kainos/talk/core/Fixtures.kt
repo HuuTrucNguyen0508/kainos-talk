@@ -2,7 +2,7 @@ package app.kainos.talk.core
 
 /** Builds snapshots for adapter tests. Defaults describe an empty, non-summary notification. */
 fun snapshot(
-    packageName: String = "com.whatsapp",
+    packageName: String = "com.google.android.apps.messaging",
     userId: Int = 0,
     id: Int = 1,
     tag: String? = null,
@@ -22,7 +22,6 @@ fun snapshot(
     isGroupConversation: Boolean = false,
     messages: List<SnapshotMessage> = emptyList(),
     actions: List<SnapshotAction> = emptyList(),
-    extras: List<ExtraEntry> = emptyList(),
 ) = NotificationSnapshot(
     packageName = packageName,
     userId = userId,
@@ -52,7 +51,6 @@ fun snapshot(
     actions = actions,
     wearableActions = emptyList(),
     hasContentIntent = true,
-    extras = extras,
 )
 
 const val MESSAGING_STYLE = "android.app.Notification\$MessagingStyle"

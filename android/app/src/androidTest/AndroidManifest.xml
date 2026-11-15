@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Merged into the test APK (app.kainos.talk.test), which plays the fake chat app. -->
+<!-- Merged into the test APK (app.kainos.talk.test), which plays the fake SMS app. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

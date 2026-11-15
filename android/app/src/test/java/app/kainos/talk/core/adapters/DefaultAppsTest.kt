@@ -1,33 +1,38 @@
 package app.kainos.talk.core.adapters
 
-import app.kainos.talk.core.Source
-import app.kainos.talk.core.WatchedApps
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class DefaultAppsTest {
     @Test
-    fun messengerAndTheKnownSmsAppsAreWatched() {
-        val watched = WatchedApps(defaultWatchedApps())
-        assertEquals(Source.MESSENGER, watched["com.facebook.orca"]?.source)
-        for (pkg in KNOWN_SMS_PACKAGES) assertEquals(Source.SMS, watched[pkg]?.source)
+    fun theKnownSmsAppsAreRead() {
         assertEquals(
-            listOf(Source.WHATSAPP, Source.WHATSAPP_BUSINESS, Source.DISCORD, Source.MESSENGER, Source.PROTON_MAIL, Source.SMS),
-            watched.sources,
+            listOf("com.google.android.apps.messaging", "com.samsung.android.messaging", "com.android.messaging"),
+            smsPackages().toList(),
         )
     }
 
     @Test
-    fun anUnusualDefaultSmsAppIsWatchedFirst() {
-        val apps = defaultWatchedApps("org.fossify.messages")
-        val sms = apps.filter { it.source == Source.SMS }.map { it.packageName }
-        assertEquals(listOf("org.fossify.messages") + KNOWN_SMS_PACKAGES, sms)
+    fun anUnusualDefaultSmsAppIsReadFirst() {
+        assertEquals(
+            listOf("org.fossify.messages", "com.google.android.apps.messaging", "com.samsung.android.messaging", "com.android.messaging"),
+            smsPackages("org.fossify.messages").toList(),
+        )
     }
 
     @Test
-    fun aDefaultSmsAppThatIsAlsoAChatAppIsNotReadTwice() {
-        val apps = defaultWatchedApps("com.whatsapp")
-        assertEquals(Source.WHATSAPP, apps.single { it.packageName == "com.whatsapp" }.source)
-        assertEquals(KNOWN_SMS_PACKAGES, apps.filter { it.source == Source.SMS }.map { it.packageName })
+    fun aKnownDefaultSmsAppIsReadOnce() {
+        assertEquals(
+            listOf("com.samsung.android.messaging", "com.google.android.apps.messaging", "com.android.messaging"),
+            smsPackages("com.samsung.android.messaging").toList(),
+        )
+    }
+
+    @Test
+    fun otherChatAndMailAppsAreNotRead() {
+        val read = smsPackages()
+        for (pkg in listOf("com.whatsapp", "com.whatsapp.w4b", "com.discord", "com.facebook.orca", "ch.protonmail.android")) {
+            assertEquals(pkg, false, pkg in read)
+        }
     }
 }

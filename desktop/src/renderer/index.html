@@ -9,16 +9,22 @@
     <script src="main.js" defer></script>
   </head>
   <body>
-    <nav class="rail" aria-label="Services">
-      <button class="mark-button" id="bar-options" type="button" aria-haspopup="menu" aria-label="Kainos Talk bar options" title="Bar options">
-        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-          <rect x="2" y="2" width="28" height="28" rx="8" />
-          <circle class="mark-ring" cx="16" cy="16" r="7.7" />
-          <circle class="mark-dot" cx="16" cy="16" r="2.4" />
-        </svg>
-      </button>
-      <ul class="sockets" id="sockets"></ul>
-    </nav>
     <main class="stage" id="stage" aria-live="polite"></main>
+    <nav class="dock" id="dock" aria-label="Services">
+      <div class="group" id="group">
+        <div class="island services">
+          <button class="mark-button" id="dock-options" type="button" aria-haspopup="menu" aria-label="Dock options" title="Dock options">
+            <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+              <rect x="2" y="2" width="28" height="28" rx="8" />
+              <circle class="mark-ring" cx="16" cy="16" r="7.7" />
+              <circle class="mark-dot" cx="16" cy="16" r="2.4" />
+            </svg>
+          </button>
+          <span class="divider" aria-hidden="true"></span>
+          <ul class="tabs" id="tabs"></ul>
+        </div>
+        <button class="island link" id="phone" type="button" aria-haspopup="menu" hidden></button>
+      </div>
+    </nav>
   </body>
 </html>

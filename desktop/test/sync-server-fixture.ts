@@ -56,7 +56,6 @@ for await (const line of createInterface({ input: process.stdin })) {
   else if (command === 'reply') console.log(`replied ${sync.reply(key!, rest.join(' '))}`);
   else if (command === 'read') sync.markRead(key!);
   else if (command === 'send') console.log(`sent ${sync.send(key!, rest.join(' '))}`);
-  else if (command === 'mail') console.log(`mailed ${sync.mailAction(key!, rest[0] as 'archive')}`);
   else if (command === 'image') {
     const picture = await sync.image(key!);
     console.log(`image ${picture ? `data:image/jpeg;base64,${picture.toString('base64')}` : 'null'}`);

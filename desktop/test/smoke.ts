@@ -6,7 +6,7 @@
 import { _electron, type ElectronApplication, type Page } from 'playwright';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,24 +186,22 @@ function launch(profile: string): Promise<ElectronApplication> {
       KAINOS_BLOCK_EXTERNAL: '1',
       KAINOS_SYNC_PORT: String(syncPort),
       KAINOS_SYNC_MDNS: '0',
-      // Websites that start asleep load nothing; Playwright needs every view to load a page.
-      KAINOS_BLANK_WHEN_ASLEEP: '1',
       DBUS_SESSION_BUS_ADDRESS: bus!.address,
     }),
     timeout: 60_000,
   });
 }
 
-async function sidebar(app: ElectronApplication): Promise<Page> {
+async function dockPage(app: ElectronApplication): Promise<Page> {
   const page = await poll(
     async () => app.windows().find((candidate) => candidate.url().endsWith('/renderer/index.html')),
     Boolean,
     20_000,
   );
-  if (!page) throw new Error('sidebar page never opened');
+  if (!page) throw new Error('dock page never opened');
   check(await app.evaluate(({ BaseWindow, BrowserWindow }) => !(BaseWindow.getAllWindows()[0] instanceof BrowserWindow)), 'the main window has no renderer of its own');
   page.setDefaultTimeout(20_000);
-  await page.waitForSelector('.socket:nth-child(3)');
+  await page.waitForSelector('#tabs li:nth-child(3) .tab');
   return page;
 }
 
@@ -217,8 +215,8 @@ function inService<T>(app: ElectronApplication, id: ServiceId, code: string, ges
   ) as Promise<T>;
 }
 
-/** Sends a key through Electron's input pipeline (before-input-event sees it), to the sidebar or a service. */
-function sendKey(app: ElectronApplication, target: 'sidebar' | ServiceId, keyCode: string, modifiers: string[] = []): Promise<void> {
+/** Sends a key through Electron's input pipeline (before-input-event sees it), to the dock or a service. */
+function sendKey(app: ElectronApplication, target: 'dock' | ServiceId, keyCode: string, modifiers: string[] = []): Promise<void> {
   return app.evaluate(
     ({ BaseWindow }, { index, keyCode, modifiers }) => {
       const win = BaseWindow.getAllWindows()[0]!;
@@ -227,7 +225,7 @@ function sendKey(app: ElectronApplication, target: 'sidebar' | ServiceId, keyCod
       contents.sendInputEvent({ type: 'keyDown', keyCode, modifiers: mods });
       contents.sendInputEvent({ type: 'keyUp', keyCode, modifiers: mods });
     },
-    { index: target === 'sidebar' ? -1 : SERVICE_IDS.indexOf(target), keyCode, modifiers },
+    { index: target === 'dock' ? -1 : SERVICE_IDS.indexOf(target), keyCode, modifiers },
   );
 }
 
@@ -263,23 +261,186 @@ interface MenuRecord {
 const menus = (app: ElectronApplication) =>
   app.evaluate(() => ((globalThis as Record<string, unknown>).__menus as (MenuRecord & { menu: unknown })[]).map(({ x, y, labels }) => ({ x, y, labels })));
 const boxes = (app: ElectronApplication) => app.evaluate(() => (globalThis as Record<string, unknown>).__boxes as { type: string; message: string }[]);
-/** Clicks the item whose label starts with `label` in the last recorded menu. */
+/** Clicks the item whose label starts with `label` in the last recorded menu; 'Theme > Carbon' goes through a submenu. */
 function clickMenuItem(app: ElectronApplication, label: string): Promise<boolean> {
-  return app.evaluate((_electron, label) => {
+  return app.evaluate((_electron, path) => {
     const all = (globalThis as Record<string, unknown>).__menus as { menu: Electron.Menu }[];
-    const item = all.at(-1)?.menu.items.find((candidate) => candidate.label.startsWith(label));
+    let item: Electron.MenuItem | undefined;
+    let items = all.at(-1)?.menu.items ?? [];
+    for (const step of path.split(' > ')) {
+      item = items.find((candidate) => candidate.label.startsWith(step));
+      items = item?.submenu?.items ?? [];
+    }
     item?.click();
     return Boolean(item);
   }, label);
 }
+/** The items of a submenu of the last recorded menu, the checked one marked with a *. */
+const submenuLabels = (app: ElectronApplication, label: string) =>
+  app.evaluate((_electron, label) => {
+    const all = (globalThis as Record<string, unknown>).__menus as { menu: Electron.Menu }[];
+    const submenu = all.at(-1)?.menu.items.find((item) => item.label === label)?.submenu;
+    return (submenu?.items ?? []).map((item) => `${item.checked ? '*' : ''}${item.label}`);
+  }, label);
+
+/** The theme names in the dock's Theme menu, in order (shared/theme.ts). */
+const THEME_NAMES = ['Switchboard', 'Daylight', 'Bakelite', 'Carbon', 'Aubergine'] as const;
+const themeId = (name: string) => name.toLowerCase();
+/** Picks a theme the way a user does: the Kainos mark's menu, then Theme. */
+async function pickTheme(app: ElectronApplication, page: Page, name: string): Promise<boolean> {
+  const before = (await menus(app)).length;
+  await page.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
+  await poll(() => menus(app), (all) => all.length > before && all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+  return clickMenuItem(app, `Theme > ${name}`);
+}
+/** `data-theme` on the root of the dock page and of the Texts page; 'none' when unset. */
+async function themeAttributes(app: ElectronApplication, page: Page): Promise<string> {
+  const dock = await page.evaluate(() => document.documentElement.dataset.theme ?? 'none');
+  const texts = await inService<string>(app, 'inbox', `document.documentElement.dataset.theme ?? 'none'`);
+  return `dock ${dock}, texts ${texts}`;
+}
+
+interface Measured {
+  readonly text: string;
+  readonly kind: 'text' | 'large' | 'icon';
+  readonly ratio: number;
+  readonly fg: string;
+  readonly bg: string;
+  /** A disabled control: WCAG sets it no minimum. */
+  readonly exempt: boolean;
+}
+/**
+ * Runs in a page: every visible piece of text (and every line icon and brand glyph) with its
+ * colour composited over the backgrounds of its ancestors, and the WCAG 2 ratio between them.
+ * Under the last translucent layer lies the theme's --surface (what main paints behind pages).
+ */
+const CONTRAST_WALK = `(() => {
+  const parse = (value) => {
+    let m = value.match(/^rgba?\\(([^)]+)\\)/);
+    if (m) { const p = m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1]; }
+    m = value.match(/^color\\(srgb ([^)]+)\\)/);
+    if (m) { const p = m[1].split(/[\\s\\/]+/).filter(Boolean).map(Number); return [p[0] * 255, p[1] * 255, p[2] * 255, p.length > 3 ? p[3] : 1]; }
+    return null;
+  };
+  const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
+  const lum = (c) => c.slice(0, 3).reduce((sum, v, i) => { const s = v / 255; return sum + [0.2126, 0.7152, 0.0722][i] * (s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4); }, 0);
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const hex = (c) => '#' + c.slice(0, 3).map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+  const surface = parse(getComputedStyle(document.body).getPropertyValue('--surface').trim().replace(/^#(..)(..)(..)$/, (_, r, g, b) => 'rgb(' + [r, g, b].map((h) => parseInt(h, 16)).join(' ') + ')'));
+  const backdrop = (el) => {
+    const layers = [];
+    let opacity = 1;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      opacity *= Number(style.opacity);
+      const bg = parse(style.backgroundColor);
+      if (bg && bg[3] > 0) { layers.push(bg); if (bg[3] >= 1) break; }
+    }
+    let base = surface;
+    for (const layer of layers.reverse()) base = over(layer, base);
+    return { base, opacity };
+  };
+  const shown = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2 || r.bottom <= 0 || r.right <= 0 || r.top >= innerHeight || r.left >= innerWidth) return false;
+    return getComputedStyle(el).visibility === 'visible';
+  };
+  const out = [];
+  const measure = (el, colour, text, kind) => {
+    const fg = parse(colour);
+    if (!fg) return;
+    const { base, opacity } = backdrop(el);
+    if (opacity <= 0) return;
+    const ink = over([fg[0], fg[1], fg[2], fg[3] * opacity], base);
+    out.push({ text: text.slice(0, 40), kind, ratio: Math.round(ratio(ink, base) * 100) / 100, fg: hex(ink), bg: hex(base), exempt: !!el.closest(':disabled') });
+  };
+  for (const el of document.querySelectorAll('body *')) {
+    if (!shown(el) || el.closest('svg') && el.tagName.toLowerCase() !== 'svg') continue;
+    const style = getComputedStyle(el);
+    const size = parseFloat(style.fontSize), bold = Number(style.fontWeight) >= 700;
+    const large = size >= 24 || (size >= 18.66 && bold);
+    if (el.tagName === 'svg') {
+      if (el.matches('svg.ic, .tile > svg')) measure(el, style.stroke !== 'none' ? (style.stroke.startsWith('rgb') ? style.stroke : style.color) : style.fill.startsWith('rgb') ? style.fill : style.color, el.closest('[aria-label], [title]')?.getAttribute('aria-label') || el.closest('[class]')?.getAttribute('class') || 'icon', 'icon');
+      continue;
+    }
+    if (el.matches('input, textarea')) {
+      if (el.value) measure(el, style.color, el.value, large ? 'large' : 'text');
+      else if (el.placeholder) measure(el, getComputedStyle(el, '::placeholder').color, el.placeholder, 'text');
+      continue;
+    }
+    const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(' ').trim();
+    if (own) measure(el, style.color, own, large ? 'large' : 'text');
+  }
+  return out;
+})()`;
+/** Measures one Kainos page in the current theme; checks each floor and returns the lowest text and icon. */
+async function measureContrast(label: string, run: () => Promise<Measured[]>): Promise<string> {
+  const all = await run();
+  const floor = (m: Measured) => (m.kind === 'text' ? 4.5 : 3);
+  const misses = all.filter((m) => !m.exempt && m.ratio < floor(m));
+  const lowest = (kind: Measured['kind'][]) => {
+    const found = all.filter((m) => !m.exempt && kind.includes(m.kind)).sort((a, b) => a.ratio - b.ratio)[0];
+    return found ? `${found.ratio.toFixed(2)}:1 "${found.text}" ${found.fg} on ${found.bg}` : 'none';
+  };
+  const exempt = all.filter((m) => m.exempt).map((m) => `${m.text} ${m.ratio.toFixed(2)}:1`);
+  const summary = `${all.length} measured; text ${lowest(['text', 'large'])}; icons ${lowest(['icon'])}${exempt.length ? `; disabled (exempt) ${exempt.join(', ')}` : ''}`;
+  check(all.length > 0 && misses.length === 0, `${label}: every text reaches 4.5:1 (large text and icons 3:1)`, misses.length ? misses.map((m) => `${m.ratio}:1 "${m.text}" ${m.fg} on ${m.bg}`).join('; ') : summary);
+  contrastLog.push({ label, summary, all });
+  return summary;
+}
+const contrastLog: { label: string; summary: string; all: Measured[] }[] = [];
 
 /** The active service's bounds inside the window. */
 const viewBounds = (app: ElectronApplication, id: ServiceId) =>
   app.evaluate(({ BaseWindow }, index) => (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).getBounds(), SERVICE_IDS.indexOf(id));
 const serviceFocused = (app: ElectronApplication, id: ServiceId) =>
   app.evaluate(({ BaseWindow }, index) => (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).webContents.isFocused(), SERVICE_IDS.indexOf(id));
-/** Index of the rail socket whose button has keyboard focus in the sidebar, or -1. */
-const railFocus = (page: Page) => page.evaluate(() => [...document.querySelectorAll('.socket')].findIndex((socket) => socket.contains(document.activeElement)));
+/** Index of the dock tab that has keyboard focus, or -1. */
+const dockFocus = (page: Page) => page.evaluate(() => [...document.querySelectorAll('.tab')].indexOf(document.activeElement as Element));
+/** The dock page's bounds in the window, or null while it is hidden. */
+const dockBounds = (app: ElectronApplication) =>
+  app.evaluate(({ BaseWindow }) => {
+    const view = BaseWindow.getAllWindows()[0]!.contentView.children.at(-1) as Electron.WebContentsView;
+    return view.getVisible() ? view.getBounds() : null;
+  });
+const contentSize = (app: ElectronApplication) => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getContentSize() as [number, number]);
+/** The always-shown dock's strip, in pixels (shared/ipc.ts DOCK_HEIGHT). */
+const DOCK = 64;
+/** The floating dock's view: the group, 16px each side and above, 8px below (shared/ipc.ts DOCK_FLOAT). */
+const FLOAT = { margin: 16, bottom: 8 };
+
+/** Sends a pointer event through Electron's input pipeline to the dock page or a service page. */
+function pointer(app: ElectronApplication, target: 'dock' | ServiceId, type: 'mouseMove' | 'mouseLeave', x: number, y: number): Promise<void> {
+  return app.evaluate(
+    ({ BaseWindow }, { index, type, x, y }) => {
+      const view = BaseWindow.getAllWindows()[0]!.contentView.children.at(index) as Electron.WebContentsView;
+      view.webContents.sendInputEvent({ type: type as 'mouseMove', x: Math.round(x), y: Math.round(y) });
+    },
+    { index: target === 'dock' ? -1 : SERVICE_IDS.indexOf(target), type, x, y },
+  );
+}
+const raisedDock = (page: Page) => page.evaluate(() => document.body.dataset.frame === 'float' && document.body.hasAttribute('data-raised'));
+/** Brings the auto-hiding dock up the way a user does, with the pointer against the active page's bottom edge. */
+async function revealDock(app: ElectronApplication, page: Page, id: ServiceId): Promise<Electron.Rectangle | null> {
+  const [w, h] = await contentSize(app);
+  await pointer(app, id, 'mouseMove', w / 3, h - 1);
+  const shown = await poll(async () => ((await raisedDock(page)) ? dockBounds(app) : null), (b) => b !== null, 3000);
+  await sleep(300); // the slide up
+  return shown;
+}
+/** Sends the pointer up into the middle of the page, off the dock, and waits for the dock to go. */
+async function lowerDock(app: ElectronApplication, id: ServiceId): Promise<boolean> {
+  const [w, h] = await contentSize(app);
+  await pointer(app, 'dock', 'mouseLeave', 0, 0);
+  await pointer(app, id, 'mouseMove', w / 2, h / 2);
+  return (await poll(() => dockBounds(app), (b) => b === null, 3000)) === null;
+}
+/** The centre of the dock's group of islands, in window coordinates. */
+async function groupCentre(app: ElectronApplication, page: Page): Promise<number> {
+  const at = await dockBounds(app);
+  const box = await page.evaluate(() => document.querySelector('#group')!.getBoundingClientRect().toJSON() as DOMRect);
+  return (at?.x ?? 0) + box.left + box.width / 2;
+}
 
 function serviceUrl(app: ElectronApplication, id: ServiceId): Promise<string> {
   return app.evaluate(
@@ -291,9 +452,9 @@ function serviceUrl(app: ElectronApplication, id: ServiceId): Promise<string> {
 /**
  * Presses Ctrl+<digit> through Electron's own input pipeline. Playwright's keyboard goes
  * through DevTools, which skips the before-input-event hook the shortcut listens on.
- * `target` is the sidebar or a service page, to prove the shortcut works with focus in either.
+ * `target` is the dock or a service page, to prove the shortcut works with focus in either.
  */
-async function pressShortcut(app: ElectronApplication, page: Page, target: 'sidebar' | ServiceId, digit: number): Promise<number> {
+async function pressShortcut(app: ElectronApplication, page: Page, target: 'dock' | ServiceId, digit: number): Promise<number> {
   await app.evaluate(
     ({ BaseWindow }, { index, key }) => {
       const win = BaseWindow.getAllWindows()[0]!;
@@ -301,50 +462,27 @@ async function pressShortcut(app: ElectronApplication, page: Page, target: 'side
       contents.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers: ['control'] });
       contents.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers: ['control'] });
     },
-    { index: target === 'sidebar' ? -1 : SERVICE_IDS.indexOf(target), key: String(digit) },
+    { index: target === 'dock' ? -1 : SERVICE_IDS.indexOf(target), key: String(digit) },
   );
   return poll(() => activeIndex(page), (index) => index === digit - 1, 5000);
 }
 
-/** Proportional set size of a process and all its descendants, from /proc (Linux). */
-function processTreePssMb(root: number): number {
-  const children = new Map<number, number[]>();
-  for (const entry of readdirSync('/proc')) {
-    if (!/^\d+$/.test(entry)) continue;
-    try {
-      const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
-      const parent = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-      children.set(parent, [...(children.get(parent) ?? []), Number(entry)]);
-    } catch {
-      // The process ended meanwhile.
-    }
-  }
-  let kb = 0;
-  const pending = [root];
-  while (pending.length) {
-    const pid = pending.pop()!;
-    try {
-      kb += Number(/^Pss:\s+(\d+)/m.exec(readFileSync(`/proc/${pid}/smaps_rollup`, 'utf8'))?.[1] ?? 0);
-    } catch {
-      // The process ended meanwhile.
-    }
-    pending.push(...(children.get(pid) ?? []));
-  }
-  return Math.round(kb / 1024);
-}
+const tab = (page: Page, id: ServiceId) => page.locator('.tab').nth(SERVICE_IDS.indexOf(id));
+const status = (page: Page, id: ServiceId) => tab(page, id).getAttribute('data-status');
+const activeIndex = (page: Page) => page.locator('.tab').evaluateAll((items) => items.findIndex((item) => item.getAttribute('aria-current') === 'page'));
+/** What a dock tab shows after its name: "count:4", "dot:", "muted:", "failed:", "offline:" or ":" for nothing. */
+const tabState = (page: Page, id: ServiceId) => tab(page, id).locator('.state').evaluate((node) => `${(node as HTMLElement).dataset.kind ?? ''}:${node.querySelector('.count')?.textContent ?? ''}`);
 
-const status = (page: Page, id: ServiceId) => page.locator('.socket').nth(SERVICE_IDS.indexOf(id)).getAttribute('data-status');
-const activeIndex = (page: Page) => page.locator('.socket').evaluateAll((items) => items.findIndex((item) => item.hasAttribute('data-active')));
-
-/** Screenshot of the whole window: every visible view (service, then the sidebar page above it) in order. */
+/** Screenshot of the whole window: every visible view (service, then the dock page) in order, each at its place. */
 async function screenshot(app: ElectronApplication, name: string): Promise<void> {
   const dataUrl = await app.evaluate(async ({ BaseWindow, BrowserWindow }) => {
     const win = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!;
     const [width, height] = win.getContentSize();
     const background = win.getBackgroundColor();
-    const layers: { url: string; x: number }[] = [];
+    const layers: { url: string; x: number; y: number }[] = [];
     for (const view of win.contentView.children as Electron.WebContentsView[]) {
-      if (view.getVisible()) layers.push({ url: (await view.webContents.capturePage()).toDataURL(), x: view.getBounds().x });
+      const { x, y } = view.getBounds();
+      if (view.getVisible()) layers.push({ url: (await view.webContents.capturePage()).toDataURL(), x, y });
     }
     const canvas = new BrowserWindow({ show: false, width: 200, height: 200 });
     await canvas.loadURL('about:blank');
@@ -352,7 +490,7 @@ async function screenshot(app: ElectronApplication, name: string): Promise<void>
       const load = (src) => { const img = new Image(); img.src = src; return img.decode().then(() => img); };
       const c = document.createElement('canvas'); c.width = ${width}; c.height = ${height};
       const g = c.getContext('2d'); g.fillStyle = ${JSON.stringify(background)}; g.fillRect(0, 0, c.width, c.height);
-      for (const layer of ${JSON.stringify(layers)}) g.drawImage(await load(layer.url), layer.x, 0);
+      for (const layer of ${JSON.stringify(layers)}) g.drawImage(await load(layer.url), layer.x, layer.y);
       return c.toDataURL('image/png');
     })()`);
     canvas.destroy();
@@ -414,7 +552,7 @@ async function run(profile: string): Promise<void> {
     writeFileSync(stateFile, JSON.stringify({ activeServiceId: 'inbox' }));
     const app = await launch(profile);
     try {
-      await sidebar(app);
+      await dockPage(app);
       await sleep(5000);
       const root = app.process().pid!;
       const tree = (pid: number): number[] => {
@@ -430,31 +568,29 @@ async function run(profile: string): Promise<void> {
     } finally { await shutdown(app); }
     return;
   }
-  // Saved state from a "previous session": WhatsApp was open and Discord was muted.
-  writeFileSync(stateFile, JSON.stringify({ activeServiceId: 'whatsapp', mutedServiceIds: ['discord'] }));
+  // Saved state from a "previous session" of older versions: WhatsApp was open, Discord was
+  // muted, the side bar sat on the right, auto-hidden, and the dock's services on the right.
+  writeFileSync(stateFile, JSON.stringify({ activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true, dockAlign: 'end' }));
 
   let app = await launch(profile);
   let quitByKey = false;
   try {
-    const page = await sidebar(app);
+    const page = await dockPage(app);
     await stubMenusAndDialogs(app);
     check((await activeIndex(page)) === nth('whatsapp'), 'restores the last active service (WhatsApp)');
-    check((await page.locator('.socket').nth(nth('discord')).getAttribute('data-muted')) !== null, 'restores muted state (Discord)');
-    if ((await status(page, 'whatsapp')) === 'loading') await screenshot(app, '01-loading-light');
+    check((await tab(page, 'discord').getAttribute('data-muted')) !== null, 'restores muted state (Discord)');
+    if ((await status(page, 'whatsapp')) === 'loading') {
+      const [w, h] = await contentSize(app);
+      const cover = await dockBounds(app);
+      check(cover?.y === 0 && cover.height === h && cover.width === w, 'while the active service loads, the dock page covers the whole window to say so', JSON.stringify(cover));
+      await screenshot(app, '01-loading-light');
+    }
 
-    const asleepAtStart = await Promise.all((['proton-mail', 'discord', 'messenger'] as const).map((id) => status(page, id)));
-    check(asleepAtStart.every((value) => value === 'asleep'), 'websites stay asleep until opened, except the one open at quit', asleepAtStart.join(', '));
-    for (const id of ['inbox', 'whatsapp'] as const) {
+    // Every service loads at startup, the ones not on screen too, and none ever goes to sleep.
+    for (const id of SERVICE_IDS) {
       const final = await poll(() => status(page, id), (value) => value !== 'loading', 90_000);
       check(final === 'ready', `${id} loads at startup`, `status ${final}`);
     }
-    // Open each website once, so the checks below can use all of them, then go back to WhatsApp.
-    for (const id of ['proton-mail', 'discord', 'messenger'] as const) {
-      await pressShortcut(app, page, 'sidebar', digit(id));
-      const final = await poll(() => status(page, id), (value) => value === 'ready' || value === 'failed', 90_000);
-      check(final === 'ready', `${id} loads when opened`, `status ${final}`);
-    }
-    await pressShortcut(app, page, 'sidebar', digit('whatsapp'));
     const startupFocus = await poll(() => serviceFocused(app, 'whatsapp'), Boolean, 3000);
     if (startupFocus) check(true, 'the active service (WhatsApp) has keyboard focus once it is ready');
     else skip('the active service has keyboard focus once it is ready', 'the off-screen window never reports focus, so the app waits for it');
@@ -476,7 +612,7 @@ async function run(profile: string): Promise<void> {
     await sleep(2000);
     await screenshot(app, '02-proton-signin');
 
-    check((await pressShortcut(app, page, 'sidebar', digit('discord'))) === nth('discord'), `Ctrl+${digit('discord')} in the sidebar switches to Discord`);
+    check((await pressShortcut(app, page, 'dock', digit('discord'))) === nth('discord'), `Ctrl+${digit('discord')} in the dock switches to Discord`);
     const discord = await poll(
       () => inService<boolean>(app, 'discord', `location.pathname.startsWith('/login') && !!document.querySelector('input[name="email"]')`),
       Boolean,
@@ -486,8 +622,62 @@ async function run(profile: string): Promise<void> {
     await sleep(2000);
     await screenshot(app, '03-discord-login');
 
-    await page.locator('.socket').nth(nth('whatsapp')).locator('.tile').click();
-    check((await activeIndex(page)) === nth('whatsapp'), 'clicking the WhatsApp tile switches to it');
+    // The dock hides until the pointer reaches the bottom edge, then slides up over the page.
+    check(await lowerDock(app, 'discord'), 'the dock hides once the pointer is up in the page');
+    {
+      const [w, h] = await contentSize(app);
+      const view = await viewBounds(app, 'discord');
+      check(JSON.stringify(view) === JSON.stringify({ x: 0, y: 0, width: w, height: h }), 'with the dock hidden, the page fills the whole window', JSON.stringify(view));
+      for (const type of ['mousemove', 'mouseout']) {
+        await inService(app, 'discord', `document.dispatchEvent(new MouseEvent('${type}', { bubbles: true, clientX: innerWidth / 3, clientY: innerHeight - 1, relatedTarget: null }))`);
+        await sleep(350);
+        check((await dockBounds(app)) === null, `a synthetic ${type} cannot reveal the dock`);
+      }
+      await pointer(app, 'discord', 'mouseMove', w / 2, h - 1);
+      await sleep(60);
+      check((await dockBounds(app)) === null, 'the dock waits a moment at the edge, so passing by does not flash it');
+      await pointer(app, 'discord', 'mouseMove', w / 2, h - 30);
+      await sleep(400);
+      check((await dockBounds(app)) === null, 'overshooting the edge on the way to a message box does not bring the dock up');
+      const shown = await revealDock(app, page, 'discord');
+      const group = await page.evaluate(() => document.querySelector('#group')!.getBoundingClientRect().toJSON() as DOMRect);
+      check(
+        shown !== null && shown.y + shown.height === h && shown.height === Math.ceil(group.height) + FLOAT.margin + FLOAT.bottom && shown.width === Math.ceil(group.width) + 2 * FLOAT.margin && shown.width < w,
+        'the pointer at the bottom edge brings the dock up: a view no bigger than the islands and their shadow, at the bottom',
+        `${JSON.stringify(shown)} for a ${group.width}×${group.height} group in ${w}x${h}`,
+      );
+      check(Math.abs((await groupCentre(app, page)) - w / 2) <= 1, 'the services and the phone sit together in the middle of the window', `${await groupCentre(app, page)} of ${w}`);
+      check(JSON.stringify(await viewBounds(app, 'discord')) === JSON.stringify({ x: 0, y: 0, width: w, height: h }), '... over the page, which keeps the whole window');
+      await pointer(app, 'discord', 'mouseMove', w / 3, h - 20);
+      await sleep(700);
+      check((await dockBounds(app)) !== null, 'it stays while the pointer is beside it near the bottom');
+      check(await lowerDock(app, 'discord'), 'it slides away once the pointer goes up into the page');
+      await revealDock(app, page, 'discord');
+      await pointer(app, 'discord', 'mouseMove', w / 2, h / 2);
+      await inService(app, 'discord', `
+        document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: innerWidth / 3, clientY: innerHeight - 1 }));
+        document.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, clientX: innerWidth / 3, clientY: innerHeight - 1, relatedTarget: null }));
+      `);
+      check((await poll(() => dockBounds(app), (b) => b === null, 3000)) === null, 'synthetic edge events cannot hold the dock shown');
+      // A tiled window with gaps (Hyprland): the pointer slammed down ends outside the window.
+      await pointer(app, 'discord', 'mouseMove', w / 2, h - 12);
+      await pointer(app, 'discord', 'mouseLeave', w / 2, h - 12);
+      check((await poll(() => dockBounds(app), (b) => b !== null, 3000)) !== null, 'leaving the window through its bottom edge brings the dock up too');
+      check(await lowerDock(app, 'discord'), '... and coming back up into the page sends it away');
+    }
+    // B already reported away. A reports edge, then switching back to B must drop A's hold.
+    await pressShortcut(app, page, 'discord', digit('inbox'));
+    check(await lowerDock(app, 'inbox'), 'Texts reports away before the service-switch regression');
+    await pressShortcut(app, page, 'inbox', digit('discord'));
+    await revealDock(app, page, 'discord');
+    await pressShortcut(app, page, 'discord', digit('inbox'));
+    check((await poll(() => dockBounds(app), (b) => b === null, 3000)) === null, 'switching from Discord at the edge to Texts last away hides the dock after the delay');
+    check((await revealDock(app, page, 'inbox')) !== null, 'the newly active Texts preload reports trusted edge movement again');
+    await pressShortcut(app, page, 'inbox', digit('discord'));
+    check(await lowerDock(app, 'discord'), 'switching back clears Texts pointer state too');
+    await revealDock(app, page, 'discord');
+    await tab(page, 'whatsapp').click();
+    check((await activeIndex(page)) === nth('whatsapp'), 'clicking the WhatsApp tab switches to it');
     const whatsappText = await poll(
       () => inService<string>(app, 'whatsapp', `document.querySelector('canvas') ? 'QR ' + document.body.innerText : document.body.innerText`),
       (text) => text.startsWith('QR '),
@@ -509,11 +699,17 @@ async function run(profile: string): Promise<void> {
     await sleep(2000);
     await screenshot(app, '04b-messenger-signin');
 
-    check((await pressShortcut(app, page, 'sidebar', digit('inbox'))) === nth('inbox'), `Ctrl+${digit('inbox')} switches to the Inbox`);
+    check((await pressShortcut(app, page, 'dock', digit('inbox'))) === nth('inbox'), `Ctrl+${digit('inbox')} switches to the Inbox`);
     // SMS: the phone's texts arrive from the Kainos phone app (a fake one here) over TLS.
     const smsText = () => inService<string>(app, 'inbox', 'document.body.innerText');
     check(/Connect your phone/.test(await poll(smsText, (t) => /Connect your phone/.test(t), 10_000)), 'with no phone paired, SMS explains how to connect one');
     await screenshot(app, '04c-sms-setup');
+    for (const name of THEME_NAMES) {
+      await pickTheme(app, page, name);
+      await poll(() => themeAttributes(app, page), (t) => t === `dock ${themeId(name)}, texts ${themeId(name)}`, 3000);
+      await measureContrast(`${name}: the Texts setup screen`, () => inService<Measured[]>(app, 'inbox', CONTRAST_WALK));
+    }
+    await pickTheme(app, page, 'Match system');
     const pairing = await startPairing(syncPort, 'Pixel 9');
     const shownCode = `${pairing.code.slice(0, 3)} ${pairing.code.slice(3)}`;
     check((await poll(smsText, (t) => t.includes(shownCode), 5000)).includes(shownCode), 'a phone asking to pair shows the same code on the PC', shownCode);
@@ -530,7 +726,9 @@ async function run(profile: string): Promise<void> {
     smsPhone.send({ t: 'conversation', conversation: conversation('sms|0|s:mum', 'Mum', [{ id: 'm1', text: 'Dinner on Sunday?', timeMs: Date.now() }]) });
     const notified = await smsNotified;
     check(notified.serviceId === 'inbox' && notified.shown, 'a new text raises a desktop notification', JSON.stringify(notified));
-    check((await poll(() => page.locator('.socket').nth(nth('inbox')).locator('.badge').textContent(), (t) => t === '2', 5000)) === '2', 'the SMS badge counts unread texts');
+    check((await poll(() => tabState(page, 'inbox'), (t) => t === 'count:2', 5000)) === 'count:2', 'the Texts tab counts unread texts');
+    const phoneIsland = await poll(() => page.locator('#phone').innerText(), (t) => /Pixel 9/.test(t) && /\bconnected/.test(t), 5000);
+    check(/Pixel 9\s*connected/.test(phoneIsland), "the dock's phone island names the phone and says it is connected", phoneIsland.replace(/\s+/g, ' '));
     await sleep(500);
     await screenshot(app, '04e-sms-inbox');
     await inService(app, 'inbox', `document.querySelector('.row[data-key="sms|0|s:garage"]').click(); 1`, true);
@@ -549,7 +747,7 @@ async function run(profile: string): Promise<void> {
     check((await poll(smsText, (t) => t.includes('Coming at 18:00'), 5000)).includes('Coming at 18:00'), 'the sent reply shows in the thread');
     await inService(app, 'inbox', `document.querySelector('.row[data-key="sms|0|s:mum"]').click(); 1`, true);
     await smsPhone.next('read');
-    check((await poll(() => page.locator('.socket').nth(nth('inbox')).locator('.badge').textContent(), (t) => t === '', 5000)) === '', 'reading every text clears the SMS badge');
+    check((await poll(() => tabState(page, 'inbox'), (t) => t === ':', 5000)) === ':', 'reading every text clears the Texts count');
     await inService(app, 'inbox', `document.querySelector('.row[data-key="sms|0|s:garage"]').click(); 1`, true);
     // A picture message: the view asks the phone for the picture when it shows it.
     const withPicture = conversation('sms|0|s:garage', 'Garage Delaunay', [
@@ -604,34 +802,9 @@ async function run(profile: string): Promise<void> {
     const found = await poll(() => inService<string[]>(app, 'inbox', `[...document.querySelectorAll('.row .row-title')].map((t) => t.textContent)`), (t) => t.length === 1, 3000);
     check(found.length === 1 && found[0] === 'Garage Delaunay', 'search finds a conversation by its text', JSON.stringify(found));
 
-    // Sleep: a website can sleep to free its memory; its badge then comes from the inbox.
-    const rendererOf = (id: ServiceId) =>
-      app.evaluate(({ BaseWindow, app: electronApp }, index) => {
-        const pid = (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).webContents.getOSProcessId();
-        const metric = electronApp.getAppMetrics().find((m) => m.pid === pid);
-        return metric ? { pid, mb: Math.round(metric.memory.workingSetSize / 1024) } : null;
-      }, nth(id));
-    const running = (pid: number) => app.evaluate(({ app: electronApp }, pid) => electronApp.getAppMetrics().some((m) => m.pid === pid), pid);
-    const awake = await rendererOf('discord');
-    await page.locator('.socket').nth(nth('discord')).locator('.tile').click({ button: 'right' });
-    const discordMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels.includes('Sleep now') === true, 5000)).at(-1);
-    check(discordMenu?.labels.includes('Keep running in the background') === true, "a website's menu offers Keep running and Sleep now", JSON.stringify(discordMenu?.labels));
-    await clickMenuItem(app, 'Sleep now');
-    check((await poll(() => status(page, 'discord'), (value) => value === 'asleep', 5000)) === 'asleep', 'Sleep now puts Discord to sleep');
-    await sleep(3000);
-    const asleep = await rendererOf('discord');
-    info('Discord page renderer memory, awake then asleep (MB)', `${awake?.mb} → ${asleep?.mb ?? 'no renderer'}`);
-    check(awake !== null && asleep === null && !(await running(awake.pid)), "sleeping closes the page's renderer process", JSON.stringify({ awake, asleep }));
-    smsPhone.send({ t: 'conversation', conversation: conversation('discord|0|s:pavlo', 'pavlo.k', [{ id: 'd1', text: 'did the fix land?', timeMs: Date.now() }], 2, 'discord') });
-    const discordBadge = () => page.locator('.socket').nth(nth('discord')).locator('.badge').textContent();
-    check((await poll(discordBadge, (t) => t === '2', 5000)) === '2', "an asleep website's badge shows what the inbox has unread for it");
-    await screenshot(app, '04h-discord-asleep');
-    await pressShortcut(app, page, 'sidebar', digit('discord'));
-    check((await poll(() => status(page, 'discord'), (value) => value === 'ready', 60_000)) === 'ready', 'opening an asleep website wakes it');
-    const wokenNotified = nextAppEvent<{ serviceId: string }>(app, 'kainos-notification');
-    await inService(app, 'discord', `new Notification('From the woken page'); 1`);
-    check((await wokenNotified).serviceId === 'discord', 'a notification from the woken Discord page is routed to Discord');
-    // The Inbox is out of sight now, with Garage Delaunay still open in it: a new text there stays unread until the Inbox is seen.
+    // Leave the Texts page: a text arriving in its open conversation stays unread until it is seen again.
+    await pressShortcut(app, page, 'dock', digit('discord'));
+    
     smsPhone.send({
       t: 'conversation',
       conversation: conversation('sms|0|s:garage', 'Garage Delaunay', [
@@ -643,51 +816,124 @@ async function run(profile: string): Promise<void> {
     const readWhileHidden = smsPhone.frames.findIndex((frame) => frame.t === 'read');
     if (readWhileHidden >= 0) smsPhone.frames.splice(readWhileHidden, 1);
     check(readWhileHidden < 0, 'a text arriving in the open conversation while the Inbox is hidden is not marked read');
-    check((await pressShortcut(app, page, 'discord', digit('inbox'))) === nth('inbox'), `Ctrl+${digit('inbox')} from the woken Discord page switches to the Inbox`);
+    check((await pressShortcut(app, page, 'discord', digit('inbox'))) === nth('inbox'), `Ctrl+${digit('inbox')} from the Discord page switches to the Texts page`);
     if (readWhileHidden < 0) check((await smsPhone.next('read')).key === 'sms|0|s:garage', 'showing the Inbox again marks the open conversation read');
     await inService(app, 'inbox', `(() => { const f = document.querySelector('.search input'); f.value = ''; f.dispatchEvent(new Event('input')); return 1; })()`, true);
     await inService(app, 'inbox', `document.querySelector('.bubbles').dataset.kept = ''; 1`);
-    smsPhone.send({ t: 'conversation', conversation: conversation('discord|0|s:pavlo', 'pavlo.k', [{ id: 'd2', text: 'merged it', timeMs: Date.now() }], 1, 'discord') });
+    smsPhone.send({ t: 'conversation', conversation: conversation('sms|0|s:pavlo', 'Pavlo', [{ id: 'd2', text: 'merged it', timeMs: Date.now() }], 1) });
     await poll(smsText, (t) => t.includes('merged it'), 5000);
     check(await inService<boolean>(app, 'inbox', `document.querySelector('.bubbles').dataset.kept === ''`), 'news in another conversation leaves the open thread as it is');
 
+    // Notices: texts from services (the phone marks short codes and sender IDs) get their own feed.
+    const [narrowWidth, narrowHeight] = await contentSize(app);
+    const layoutOf = () =>
+      inService<{ aside: string; seg: string; tab: string; inAside: boolean }>(
+        app,
+        'inbox',
+        `({ aside: getComputedStyle(document.querySelector('.notices')).display, seg: getComputedStyle(document.querySelector('.seg')).display, tab: document.querySelector('.texts').dataset.tab, inAside: !!document.querySelector('.notices .notice-item') })`,
+      );
+    const noticeRaised = nextAppEvent<{ serviceId: string; shown: boolean }>(app, 'kainos-notification');
+    const stripe = { ...conversation('sms|0|s:stripe', 'StripeLink', [{ id: 's1', text: '248677 is your Link verification code.', timeMs: Date.now() }], 1), sender: 'service' as const };
+    smsPhone.send({ t: 'conversation', conversation: stripe });
+    check((await noticeRaised).shown, 'a new notice raises a desktop notification like any text');
+    const placed = await poll(
+      () => inService<{ people: boolean; notice: boolean }>(app, 'inbox', `({ people: !!document.querySelector('.people-rows [data-key="sms|0|s:stripe"]'), notice: !!document.querySelector('.notice-item[data-key="sms|0|s:stripe"]') })`),
+      (where) => where.notice,
+      5000,
+    );
+    check(placed.notice && !placed.people, 'a text from a service is listed under Notices, not People', JSON.stringify(placed));
+    const narrowLayout = await layoutOf();
+    check(narrowWidth < 1500 && narrowLayout.aside === 'none' && narrowLayout.seg === 'flex', 'under 1500px the notices are a second tab beside People', `${narrowWidth}px ${JSON.stringify(narrowLayout)}`);
+    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.setContentSize(1600, 820));
+    const wideLayout = await poll(layoutOf, (l) => l.aside !== 'none' && l.inAside, 3000);
+    check(wideLayout.aside === 'flex' && wideLayout.seg === 'none' && wideLayout.inAside, 'from 1500px the notices have their own column on the right', JSON.stringify(wideLayout));
+    await sleep(500);
+    await screenshot(app, '04h-texts-wide');
+    // Real ultrawide and portrait tiles: the page fills the window, and the dock comes up centred.
+    for (const [width, height] of [[3440, 1440], [1720, 1440], [1418, 2488], [1418, 1244], [709, 2488]] as const) {
+      await app.evaluate(({ BaseWindow }, { width, height }) => BaseWindow.getAllWindows()[0]!.setContentSize(width, height), { width, height });
+      await lowerDock(app, 'inbox');
+      const service = await poll(() => viewBounds(app, 'inbox'), (b) => b.height === height && b.width === width, 3000);
+      const shown = await revealDock(app, page, 'inbox');
+      const centre = await groupCentre(app, page);
+      check(service.height === height && service.width === width && shown !== null && shown.y + shown.height === height && Math.abs(centre - width / 2) <= 1,
+        `${width}×${height}: the page fills the window and the dock comes up centred at its bottom`, `${JSON.stringify(shown)} centre ${centre}`);
+      await lowerDock(app, 'inbox');
+      const fits = await inService<boolean>(app, 'inbox', `(() => {
+        const composer = document.querySelector('.composer');
+        const header = document.querySelector('.thread-head');
+        const people = document.querySelector('.people');
+        return !!composer && !!header && !!people && document.body.scrollWidth === innerWidth && document.body.scrollHeight === innerHeight
+          && composer.getBoundingClientRect().bottom === innerHeight
+          && people.getBoundingClientRect().height === innerHeight
+          && getComputedStyle(header).paddingLeft === getComputedStyle(composer).paddingLeft;
+      })()`);
+      check(fits, `${width}×${height}: the full-height panes fit and the header follows the composer column`);
+    }
+    await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows()[0]!.setContentSize(w!, h!), [narrowWidth, narrowHeight]);
+    await poll(layoutOf, (l) => l.aside === 'none', 3000);
+    // Clicking the notification opens the notice in the middle and its tab in the narrow layout.
+    await pressShortcut(app, page, 'dock', digit('discord'));
+    await app.evaluate(() => ((globalThis as Record<string, unknown>).__kainosLast as { notification: Electron.Notification }).notification.emit('click'));
+    await poll(() => activeIndex(page), (index) => index === nth('inbox'), 5000);
+    const routed = await poll(
+      () => inService<{ open: boolean; tab: string }>(app, 'inbox', `({ open: document.querySelector('.notice-item[data-key="sms|0|s:stripe"]')?.getAttribute('aria-current') === 'true' && document.querySelector('.thread-head h1')?.textContent === 'StripeLink', tab: document.querySelector('.texts').dataset.tab })`),
+      (r) => r.open,
+      5000,
+    );
+    check(routed.open && routed.tab === 'notices', "clicking a notice's notification opens it in the middle, with the Notices tab selected", JSON.stringify(routed));
+    check((await smsPhone.next('read')).key === 'sms|0|s:stripe', '... and marks it read on the phone');
+    const inlineCode = await inService<string | null>(app, 'inbox', `document.querySelector('.bubble .code-inline')?.textContent ?? null`);
+    check(inlineCode === '248 677', "the code inside the notice's bubble is a Copy button", String(inlineCode));
+    await app.evaluate(({ clipboard }) => clipboard.writeText('before'));
+    await inService(app, 'inbox', `document.querySelector('.notice-item[data-key="sms|0|s:stripe"] .chip').click(); 1`, true);
+    const copied = await poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), (text) => text === '248677', 3000);
+    check(copied === '248677', "Copy on a notice's code puts the code on the clipboard (the headless app's, not yours)", copied);
+    const parcel = { ...conversation('sms|0|s:36679', '36679', [{ id: 'p1', text: 'Livraison terminée. Votre colis a été déposé dans votre boîte aux lettres.', timeMs: Date.now() - 60_000 }], 2), sender: 'service' as const };
+    smsPhone.send({ t: 'conversation', conversation: parcel });
+    await poll(() => inService<boolean>(app, 'inbox', `!!document.querySelector('.notice-item[data-unread][data-key="sms|0|s:36679"]')`), Boolean, 5000);
+    await inService(app, 'inbox', `document.querySelector('.notices-body .quiet').click(); 1`, true);
+    check((await smsPhone.next('read')).key === 'sms|0|s:36679', 'Mark all read marks each unread notice read on the phone');
+    await inService(app, 'inbox', `document.querySelector('.seg [data-tab="people"]').click(); 1`, true);
+
     // Unread counts come from page titles.
-    const badge = (index: number) => page.locator('.socket').nth(index + 1).locator('.badge');
     await inService(app, 'proton-mail', `document.title = '(4) Inbox | Proton Mail'`);
     await inService(app, 'discord', `document.title = '• Discord | #general'`);
-    check((await poll(() => badge(0).textContent(), (text) => text === '4', 5000)) === '4', 'Proton badge shows 4');
-    const marker = await poll(() => badge(1).getAttribute('data-marker'), (value) => value !== null, 5000);
-    check(marker !== null, 'Discord badge shows an unread marker');
-    // With the phone connected the inbox counts every source, so the title follows the inbox alone.
-    const inboxCount = (await inService<string>(app, 'inbox', 'document.title')).match(/^\((\d+)\)/)?.[1];
-    const expectedTitle = inboxCount ? `(${inboxCount}) Kainos Talk` : 'Kainos Talk';
+    check((await poll(() => tabState(page, 'proton-mail'), (text) => text === 'count:4', 5000)) === 'count:4', 'the Proton tab shows 4');
+    check((await poll(() => tabState(page, 'discord'), (text) => text === 'dot:', 5000)) === 'dot:', 'the Discord tab shows a dot for new activity');
+    // The window title counts every service: the texts' unread plus Proton's 4 (Discord's marker adds no number).
+    const textsUnread = Number((await inService<string>(app, 'inbox', 'document.title')).match(/^\((\d+)\)/)?.[1] ?? 0);
+    const expectedTitle = `(${textsUnread + 4}) Kainos Talk`;
     const title = await poll(() => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getTitle()), (value) => value === expectedTitle, 5000);
-    check(title === expectedTitle, "window title carries the inbox's unread total, not the websites' again", title);
+    check(title === expectedTitle, "window title adds up the texts and the websites' unread", title);
     await inService(app, 'whatsapp', `document.title = '(99+) WhatsApp'`);
-    check((await poll(() => badge(2).textContent(), (text) => text === '99+', 5000)) === '99+', 'a capped "(99+)" title shows 99+');
+    check((await poll(() => tabState(page, 'whatsapp'), (text) => text === 'count:99+', 5000)) === 'count:99+', 'a capped "(99+)" title shows 99+');
     await inService(app, 'whatsapp', `document.title = 'WhatsApp'`);
     await screenshot(app, '05-unread-badges');
 
     // Proton's Inbox counter, read from the page. The real selector is unverified (it needs a
     // signed-in page), so this plants a stand-in element to prove the preload-to-badge path.
     await inService(app, 'proton-mail', `document.body.insertAdjacentHTML('beforeend', '<nav id="kainos-smoke-inbox" data-testid="navigation-link:inbox"><span data-testid="navigation-link:unread-count">12</span></nav>'); 1`);
-    check((await poll(() => badge(0).textContent(), (text) => text === '12', 6000)) === '12', 'Proton badge follows the Inbox counter in the page over the title (stand-in element)');
+    check((await poll(() => tabState(page, 'proton-mail'), (text) => text === 'count:12', 6000)) === 'count:12', 'the Proton tab follows the Inbox counter in the page over the title (stand-in element)');
     await inService(app, 'proton-mail', `document.querySelector('#kainos-smoke-inbox span').remove(); 1`);
-    check((await poll(() => badge(0).textContent(), (text) => text === '', 6000)) === '', 'Proton badge clears when the Inbox counter disappears');
+    check((await poll(() => tabState(page, 'proton-mail'), (text) => text === ':', 6000)) === ':', 'the Proton count clears when the Inbox counter disappears');
     await inService(app, 'proton-mail', `document.querySelector('#kainos-smoke-inbox').remove(); 1`);
-    check((await poll(() => badge(0).textContent(), (text) => text === '4', 6000)) === '4', 'without the Inbox link, Proton falls back to the title');
+    check((await poll(() => tabState(page, 'proton-mail'), (text) => text === 'count:4', 6000)) === 'count:4', 'without the Inbox link, Proton falls back to the title');
 
-    // While the phone is connected, the inbox notifies for the websites; their own would be doubles.
-    const doubled = nextAppEvent<{ serviceId: string; muted: boolean; shown: boolean }>(app, 'kainos-notification');
-    await inService(app, 'whatsapp', `new Notification('Double'); 1`);
-    const twice = await doubled;
-    check(twice.serviceId === 'whatsapp' && twice.muted && !twice.shown, "with the phone connected, a website's own notification is dropped", JSON.stringify(twice));
+    // The phone brings texts only, so a website's own notification still shows while it is connected.
+    const own = nextAppEvent<{ serviceId: string; muted: boolean; shown: boolean }>(app, 'kainos-notification');
+    await inService(app, 'whatsapp', `new Notification('Own'); 1`);
+    const ownShown = await own;
+    check(ownShown.serviceId === 'whatsapp' && !ownShown.muted && ownShown.shown, "with the phone connected, a website's own notification is shown", JSON.stringify(ownShown));
     smsPhone?.close();
     smsPhone = undefined;
     await poll(() => inService<string>(app, 'inbox', 'document.body.innerText'), (t) => /not connected/.test(t), 5000);
+    check((await poll(() => tabState(page, 'inbox'), (t) => t === 'offline:', 5000)) === 'offline:', 'with the phone gone, the Texts tab shows it is not connected');
+    const offlineIsland = await page.locator('#phone').innerText();
+    check(/Pixel 9\s*not connected/.test(offlineIsland), '... and so does the phone island', offlineIsland.replace(/\s+/g, ' '));
 
     // Notifications: forwarded when unmuted, clicking focuses the service; dropped when muted.
-    await pressShortcut(app, page, 'sidebar', digit('proton-mail'));
+    await pressShortcut(app, page, 'dock', digit('proton-mail'));
     const shownPromise = nextAppEvent<{ serviceId: string; muted: boolean; shown: boolean }>(app, 'kainos-notification');
     await inService(app, 'whatsapp', `window.__clicked = false; new Notification('Smoke test', { body: 'hello' }).onclick = () => { window.__clicked = true; }; Notification.permission`);
     const shown = await shownPromise;
@@ -770,7 +1016,7 @@ async function run(profile: string): Promise<void> {
     check((await poll(windowCount, (count) => count === 1, 5000)) === 1, '... and the popup closes');
 
     // Permissions the services' own pages now get, and one they still do not.
-    await pressShortcut(app, page, 'sidebar', digit('whatsapp'));
+    await pressShortcut(app, page, 'dock', digit('whatsapp'));
     // Copy is allowed and reading the clipboard stays denied. A site's own Permissions-Policy
     // (WhatsApp sometimes sends one) or a missing focus can refuse first, which proves nothing
     // about Kainos, so each service page is tried and only answers from Kainos count.
@@ -779,7 +1025,7 @@ async function run(profile: string): Promise<void> {
       for (const [index, id] of SERVICE_IDS.entries()) {
         // The SMS view is Kainos' own page; it never copies to the clipboard.
         if (id === 'inbox') continue;
-        await pressShortcut(app, page, 'sidebar', index + 1);
+        await pressShortcut(app, page, 'dock', index + 1);
         await app.evaluate(({ BaseWindow }, i) => (BaseWindow.getAllWindows()[0]!.contentView.children[i] as Electron.WebContentsView).webContents.focus(), index);
         results.push(`${id}: ${await inService<string>(app, id, `${call}.then(() => 'ok', (e) => e.name + ': ' + e.message)`, true)}`);
       }
@@ -794,40 +1040,65 @@ async function run(profile: string): Promise<void> {
     if (reads.some((read) => read.endsWith(': ok'))) check(false, 'a service page may not read the clipboard', reads.join(' | '));
     else if (denied) check(true, 'a service page may not read the clipboard (denied by Kainos)', denied);
     else skip('a service page may not read the clipboard', `no page reached the app's handler: ${reads.join(' | ')}`);
-    await pressShortcut(app, page, 'sidebar', digit('whatsapp'));
+    await pressShortcut(app, page, 'dock', digit('whatsapp'));
     const persisted = await inService<boolean>(app, 'whatsapp', `navigator.storage.persist()`);
     check(persisted, "a service page's storage is marked persistent");
-    const [width] = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getContentSize());
+    const [width] = await contentSize(app);
     const entered = await inService<string>(app, 'whatsapp', `document.documentElement.requestFullscreen().then(() => 'ok', (e) => e.name)`, true);
-    const full = await poll(() => viewBounds(app, 'whatsapp'), (b) => b.x === 0, 5000);
-    check(entered === 'ok' && full.x === 0 && full.width === (await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getContentSize()[0])), 'a page in fullscreen covers the whole window, sidebar included', `${entered} ${JSON.stringify(full)}`);
+    const covered = async () => {
+      const [w, h] = await contentSize(app);
+      const b = await viewBounds(app, 'whatsapp');
+      return b.y === 0 && b.width === w && b.height === h && (await dockBounds(app)) === null;
+    };
+    const full = await poll(covered, Boolean, 5000);
+    check(entered === 'ok' && full, 'a page in fullscreen covers the whole window, dock included', `${entered} ${JSON.stringify(await viewBounds(app, 'whatsapp'))}`);
     info('the window itself went fullscreen with the page', String(await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.isFullScreen())));
     await inService(app, 'whatsapp', `document.exitFullscreen().then(() => 1, () => 0)`, true);
-    const back = await poll(() => viewBounds(app, 'whatsapp'), (b) => b.x === 68, 5000);
-    check(back.x === 68, 'leaving fullscreen puts the page back beside the sidebar', JSON.stringify(back));
-    await poll(() => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getContentSize()[0]), (w) => w === width, 5000);
+    await pointer(app, 'whatsapp', 'mouseMove', 300, 300);
+    const back = async () => {
+      const [, h] = await contentSize(app);
+      return (await viewBounds(app, 'whatsapp')).height === h && (await dockBounds(app)) === null;
+    };
+    check(await poll(back, Boolean, 5000), 'after fullscreen the page fills the window and the dock stays hidden', JSON.stringify(await viewBounds(app, 'whatsapp')));
+    await poll(async () => (await contentSize(app))[0], (w) => w === width, 5000);
 
     // Failed load, light and dark, then retry.
-    await pressShortcut(app, page, 'sidebar', digit('discord'));
+    await pressShortcut(app, page, 'dock', digit('discord'));
     await app.evaluate(({ BaseWindow }) => {
       const view = BaseWindow.getAllWindows()[0]!.contentView.children[2] as Electron.WebContentsView;
       view.webContents.loadURL('https://kainos-smoke.invalid/').catch(() => undefined);
     });
     check((await poll(() => status(page, 'discord'), (value) => value === 'failed', 20_000)) === 'failed', 'an unreachable page shows the failed state');
     await page.waitForSelector('.notice[data-state="failed"]');
+    {
+      const [w, h] = await contentSize(app);
+      const cover = await dockBounds(app);
+      check(cover?.y === 0 && cover.height === h && cover.width === w, 'a failed service: the dock page covers the whole window to say why', JSON.stringify(cover));
+      const facts = await page.locator('.facts').innerText();
+      check(/kainos-smoke\.invalid/.test(facts) && /ERR_NAME_NOT_RESOLVED/.test(facts), 'the failed screen names the address and the error', facts.replace(/\s+/g, ' '));
+    }
     await screenshot(app, '06-failed-light');
+    for (const name of THEME_NAMES) {
+      await pickTheme(app, page, name);
+      await poll(() => page.evaluate(() => document.documentElement.dataset.theme ?? ''), (t) => t === themeId(name), 3000);
+      await measureContrast(`${name}: the failed notice and the dock`, () => page.evaluate(CONTRAST_WALK) as Promise<Measured[]>);
+    }
+    await pickTheme(app, page, 'Match system');
+    await poll(() => page.evaluate(() => document.documentElement.dataset.theme ?? 'none'), (t) => t === 'none', 3000);
     await app.evaluate(({ nativeTheme }) => {
       nativeTheme.themeSource = 'dark';
     });
     const followsSystem = await poll(() => page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches), Boolean, 3000);
-    const darkRail = () => page.evaluate(() => getComputedStyle(document.querySelector('.rail')!).backgroundColor);
+    // Bakelite: the islands are --rail #1f1814 on the --strip #0e0a08.
+    const darkDock = () => page.evaluate(() => `${getComputedStyle(document.querySelector('.island')!).backgroundColor} on ${getComputedStyle(document.querySelector('.dock')!).backgroundColor}`);
+    const bakelite = 'rgb(31, 24, 20) on rgb(14, 10, 8)';
     if (followsSystem) {
-      check((await darkRail()) === 'rgb(22, 32, 36)', 'the sidebar follows the system dark theme');
+      check((await darkDock()) === bakelite, 'the dock follows the system dark theme (Bakelite)');
     } else {
-      skip('the sidebar follows the system dark theme', 'headless Ozone does not pass nativeTheme to the page');
+      skip('the dock follows the system dark theme', 'headless Ozone does not pass nativeTheme to the page');
       await page.emulateMedia({ colorScheme: 'dark' });
-      const rail = await darkRail();
-      check(rail === 'rgb(22, 32, 36)', 'the dark palette applies under an emulated prefers-color-scheme: dark', rail);
+      const colours = await darkDock();
+      check(colours === bakelite, 'the Bakelite palette applies under an emulated prefers-color-scheme: dark', colours);
     }
       skip('service views paint the theme colour before their page', 'WebContentsView has no getter for its background colour; set in code only');
     await screenshot(app, '07-failed-dark');
@@ -837,29 +1108,55 @@ async function run(profile: string): Promise<void> {
     if (isWinFocused) check(await poll(() => serviceFocused(app, 'discord'), Boolean, 3000), 'after Retry, keyboard focus is in Discord');
     else skip('after Retry, keyboard focus is in Discord', 'the off-screen window never reports focus, so the app waits for it');
 
-    // Keyboard: F6 from inside the page to its rail button.
+    // Keyboard: F6 from inside the page to its dock tab, then the arrows along the dock.
+    await lowerDock(app, 'discord');
     await sendKey(app, 'discord', 'F6');
-    check((await poll(() => railFocus(page), (index) => index === nth('discord'), 5000)) === nth('discord'), 'F6 inside Discord moves focus to its button in the sidebar');
+    check((await poll(() => dockFocus(page), (index) => index === nth('discord'), 5000)) === nth('discord'), 'F6 inside Discord moves focus to its tab in the dock');
+    check((await poll(() => raisedDock(page), Boolean, 3000)) && (await dockBounds(app)) !== null, '... and brings the hidden dock up');
+    await pointer(app, 'discord', 'mouseMove', 300, 300);
+    await sleep(800);
+    check((await dockBounds(app)) !== null, 'with keyboard focus in it, the dock stays up whatever the pointer does');
+    await page.keyboard.press('ArrowRight');
+    check((await dockFocus(page)) === nth('discord') + 1, 'the right arrow moves to the next tab in the dock');
+    await page.keyboard.press('ArrowLeft');
+    check((await dockFocus(page)) === nth('discord'), '... and the left arrow back');
 
-    // The service menu: by mouse at the pointer, by keyboard beside the button.
-    await page.locator('.socket').nth(nth('discord')).locator('.tile').click({ button: 'right' });
+    // The service menu: by mouse at the pointer, by keyboard at the tab.
+    await tab(page, 'discord').click({ button: 'right' });
     const byMouse = (await poll(() => menus(app), (all) => all.length > 0, 5000)).at(-1);
     check(byMouse !== undefined && byMouse.x === undefined && byMouse.labels[0] === 'Reload Discord', 'a right-click opens the Discord menu at the pointer', JSON.stringify(byMouse));
-    const box = await page.locator('.socket').nth(nth('discord')).locator('.tile').boundingBox();
-    await page.locator('.socket').nth(nth('discord')).locator('.tile').focus();
+    check(
+      JSON.stringify(byMouse?.labels.filter(Boolean)) === '["Reload Discord","Unmute notifications","Sign out of Discord…"]',
+      "a website's menu offers Reload, mute and Sign out, and nothing about sleeping",
+      JSON.stringify(byMouse?.labels),
+    );
+    const box = await tab(page, 'discord').boundingBox();
+    await tab(page, 'discord').focus();
     const count = (await menus(app)).length;
-    await sendKey(app, 'sidebar', 'F10', ['shift']);
+    await sendKey(app, 'dock', 'F10', ['shift']);
     let byKey = (await poll(() => menus(app), (all) => all.length > count, 3000)).at(-1);
     let how = 'Shift+F10';
     if ((await menus(app)).length === count) {
       // Chromium did not turn the synthetic Shift+F10 into a contextmenu event here; fire the
       // event the key would have produced, which still has no pointer press before it.
       how = 'a contextmenu event with no pointer press (Shift+F10 not delivered off screen)';
-      await page.locator('.socket').nth(nth('discord')).locator('.tile').dispatchEvent('contextmenu');
+      await tab(page, 'discord').dispatchEvent('contextmenu');
       byKey = (await poll(() => menus(app), (all) => all.length > count, 3000)).at(-1);
     }
-    const expected = box ? { x: Math.round(box.x + box.width), y: Math.round(box.y) } : undefined;
-    check(byKey?.x === expected?.x && byKey?.y === expected?.y, 'a keyboard-opened menu appears beside the focused button', `${how}: ${JSON.stringify(byKey)} expected ${JSON.stringify(expected)}`);
+    // The dock page sits at the bottom of the window, so its y offset is added to the tab's place.
+    const dockAt = await dockBounds(app);
+    const expected = box && dockAt ? { x: Math.round(box.x) + dockAt.x, y: Math.round(box.y) + dockAt.y } : undefined;
+    check(byKey?.x === expected?.x && byKey?.y === expected?.y, 'a keyboard-opened menu appears at the focused tab, in window coordinates', `${how}: ${JSON.stringify(byKey)} expected ${JSON.stringify(expected)}`);
+
+    // Escape leaves the dock for the page and sends the dock away.
+    await tab(page, 'discord').focus();
+    await pointer(app, 'dock', 'mouseLeave', 0, 0);
+    await sendKey(app, 'dock', 'Escape');
+    check((await poll(() => dockBounds(app), (b) => b === null, 3000)) === null, 'Escape in the dock sends it away');
+    check(await poll(() => serviceFocused(app, 'discord'), Boolean, 3000), '... and puts keyboard focus back in the page');
+    await revealDock(app, page, 'discord');
+    await tab(page, 'discord').click({ button: 'right' });
+    await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Discord', 5000);
 
     // Reload is not blocked by a page's "leave site?" prompt.
     await inService(app, 'discord', `window.__kainosMark = 1; addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; }); 1`, true);
@@ -869,7 +1166,7 @@ async function run(profile: string): Promise<void> {
 
     // Sign out: a page that writes its login back while unloading, behind a "leave site?"
     // prompt, still ends up signed out.
-    await pressShortcut(app, page, 'sidebar', digit('whatsapp'));
+    await pressShortcut(app, page, 'dock', digit('whatsapp'));
     await inService(
       app,
       'whatsapp',
@@ -880,11 +1177,18 @@ async function run(profile: string): Promise<void> {
        1`,
       true,
     );
-    await page.locator('.socket').nth(nth('whatsapp')).locator('.tile').click({ button: 'right' });
+    await revealDock(app, page, 'whatsapp');
+    await tab(page, 'whatsapp').click({ button: 'right' });
     await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload WhatsApp', 5000);
     check(await clickMenuItem(app, 'Sign out'), 'the menu has Sign out');
     await poll(() => status(page, 'whatsapp'), (value) => value === 'loading', 10_000);
-    check((await poll(() => status(page, 'whatsapp'), (value) => value === 'ready', 60_000)) === 'ready', 'WhatsApp loads again after Sign out');
+    // The temporary about:blank page also reports ready, before storage has been cleared.
+    // Wait for WhatsApp to return before inspecting its storage.
+    const signedOutReady = await poll(async () => {
+      const url = await inService<string>(app, 'whatsapp', 'location.href').catch(() => '');
+      return url.startsWith('https://web.whatsapp.com/') && (await status(page, 'whatsapp')) === 'ready';
+    }, Boolean, 60_000);
+    check(signedOutReady, 'WhatsApp loads again after Sign out');
     const stored = await inService<string | null>(app, 'whatsapp', `localStorage.getItem('kainosSmoke')`);
     const cookies = await app.evaluate(({ session }) => session.fromPartition('persist:service-whatsapp').cookies.get({ name: 'kainosSmoke' }));
     check(stored === null && cookies.length === 0, 'Sign out leaves no login behind, even one written back at unload', `localStorage ${stored}, cookies ${cookies.length}`);
@@ -895,7 +1199,8 @@ async function run(profile: string): Promise<void> {
       const ses = session.fromPartition('persist:service-proton-mail');
       ses.clearStorageData = () => Promise.reject(new Error('smoke: disk is read-only'));
     });
-    await page.locator('.socket').nth(nth('proton-mail')).locator('.tile').click({ button: 'right' });
+    await revealDock(app, page, (SERVICE_IDS[await activeIndex(page)] ?? 'whatsapp') as ServiceId);
+    await tab(page, 'proton-mail').click({ button: 'right' });
     await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Proton Mail', 5000);
     await clickMenuItem(app, 'Sign out');
     const report = await poll(() => boxes(app), (all) => all.some((b) => b.type === 'error'), 10_000);
@@ -907,90 +1212,146 @@ async function run(profile: string): Promise<void> {
     });
     await page.emulateMedia({ colorScheme: null });
 
-    await pressShortcut(app, page, 'sidebar', digit('whatsapp'));
+    await pressShortcut(app, page, 'dock', digit('whatsapp'));
     await sleep(2500);
+    await lowerDock(app, 'whatsapp');
     await screenshot(app, '08-whatsapp');
 
-    // The bar: hidden until the pointer reaches the page's edge or F6 asks for it, then docked
-    // on the right.
-    const sidebarBounds = () =>
-      app.evaluate(({ BaseWindow }) => {
-        const view = BaseWindow.getAllWindows()[0]!.contentView.children.at(-1) as Electron.WebContentsView;
-        return view.getVisible() ? view.getBounds() : null;
+    // The dock at the user's window sizes, light and dark: hidden and up over WhatsApp, up over
+    // Texts, and always shown. In desktop/.verify/reveal/.
+    {
+      mkdirSync(join(verify, 'reveal'), { recursive: true });
+      const [w0, h0] = await contentSize(app);
+      const pages = [page, ...app.windows().filter((candidate) => /\/renderer\/inbox\.html|web\.whatsapp\.com/.test(candidate.url()))];
+      const toggleAlways = async () => {
+        await page.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
+        await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+        await clickMenuItem(app, 'Always show the dock');
+      };
+      for (const scheme of ['light', 'dark'] as const) {
+        await app.evaluate(({ nativeTheme }, source) => {
+          nativeTheme.themeSource = source;
+        }, scheme);
+        for (const candidate of pages) await candidate.emulateMedia({ colorScheme: scheme });
+        for (const [width, height] of [[3440, 1440], [1418, 2488]] as const) {
+          const shot = (name: string) => screenshot(app, `reveal/${width}x${height}-${scheme}-${name}`);
+          await app.evaluate(({ BaseWindow }, { width, height }) => BaseWindow.getAllWindows()[0]!.setContentSize(width, height), { width, height });
+          await pressShortcut(app, page, 'whatsapp', digit('whatsapp'));
+          await lowerDock(app, 'whatsapp');
+          await sleep(800);
+          await shot('1-whatsapp-hidden');
+          await revealDock(app, page, 'whatsapp');
+          await shot('2-whatsapp-revealed');
+          await pressShortcut(app, page, 'whatsapp', digit('inbox'));
+          await lowerDock(app, 'inbox');
+          await revealDock(app, page, 'inbox');
+          await shot('3-texts-revealed');
+          await pressShortcut(app, page, 'inbox', digit('whatsapp'));
+          await toggleAlways();
+          await poll(() => dockBounds(app), (b) => b?.height === DOCK, 3000);
+          await lowerDock(app, 'whatsapp').catch(() => false);
+          await sleep(500);
+          await shot('4-whatsapp-always-shown');
+          await toggleAlways();
+          await lowerDock(app, 'whatsapp');
+        }
+      }
+      await app.evaluate(({ nativeTheme }) => {
+        nativeTheme.themeSource = 'system';
       });
-    const pointerAt = (x: number) =>
-      app.evaluate(({ BaseWindow }, x) => {
-        const contents = (BaseWindow.getAllWindows()[0]!.contentView.children[3] as Electron.WebContentsView).webContents;
-        contents.sendInputEvent({ type: 'mouseMove', x, y: 300 });
-      }, x);
-    const contentWidth = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getContentSize()[0]!);
-    const leaveRail = () => page.evaluate(() => document.querySelector('.rail')!.dispatchEvent(new PointerEvent('pointerleave')));
-    await page.locator('#bar-options').click();
-    const barMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0]?.startsWith('Hide the bar') === true, 5000)).at(-1);
-    check(barMenu?.labels.includes('Bar always on the right') === true, 'the Kainos mark opens the bar options', JSON.stringify(barMenu?.labels));
-    await clickMenuItem(app, 'Hide the bar');
-    await leaveRail();
-    check((await poll(sidebarBounds, (b) => b === null, 3000)) === null, 'with auto-hide on, the bar hides once the pointer leaves it');
-    const whole = await viewBounds(app, 'whatsapp');
-    check(whole.x === 0 && whole.width === contentWidth, 'the page takes the whole window while the bar is hidden', JSON.stringify(whole));
-    await pointerAt(400);
-    await pointerAt(0);
-    const out = await poll(sidebarBounds, (b) => b !== null, 3000);
-    check(out?.x === 0 && out.width === 68, 'the pointer at the left edge brings the bar out', JSON.stringify(out));
-    check((await viewBounds(app, 'whatsapp')).width === contentWidth, '... over the page, without squeezing it');
+      for (const candidate of pages) await candidate.emulateMedia({ colorScheme: null });
+      await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows()[0]!.setContentSize(w!, h!), [w0, h0]);
+      await sleep(500);
+    }
+
+    // The dock options: keep the dock shown in its own strip, saved with the window state.
+    await revealDock(app, page, 'whatsapp');
+    await page.locator('#dock-options').click();
+    const dockMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000)).at(-1);
+    check(JSON.stringify(dockMenu?.labels) === '["Always show the dock","Theme"]', 'the Kainos mark opens the dock options: Always show the dock, Theme', JSON.stringify(dockMenu?.labels));
+    const themeItems = await submenuLabels(app, 'Theme');
+    check(JSON.stringify(themeItems) === '["*Match system","Switchboard","Daylight","Bakelite","Carbon","Aubergine"]', 'Theme offers Match system (picked) and the five themes', JSON.stringify(themeItems));
+    await clickMenuItem(app, 'Always show the dock');
+    {
+      const [w, h] = await contentSize(app);
+      const strip = await poll(() => dockBounds(app), (b) => b?.height === DOCK, 3000);
+      const view = await viewBounds(app, 'whatsapp');
+      check(JSON.stringify(strip) === JSON.stringify({ x: 0, y: h - DOCK, width: w, height: DOCK }), 'Always show the dock: a 64px strip along the bottom of the window', `${JSON.stringify(strip)} in ${w}x${h}`);
+      check(JSON.stringify(view) === JSON.stringify({ x: 0, y: 0, width: w, height: h - DOCK }), "... and the page ends above it, so the dock never covers the page's composer", JSON.stringify(view));
+      check(Math.abs((await groupCentre(app, page)) - w / 2) <= 1, '... with the services and the phone together in the middle', String(await groupCentre(app, page)));
+      await lowerDock(app, 'whatsapp').catch(() => false);
+      await sleep(800);
+      check(JSON.stringify(await dockBounds(app)) === JSON.stringify(strip), '... which stays when the pointer goes up into the page');
+    }
     await sleep(300);
-    await screenshot(app, '09-bar-revealed');
-    await pointerAt(500);
-    check((await poll(sidebarBounds, (b) => b === null, 3000)) === null, 'moving the pointer back into the page hides the bar');
-    await pointerAt(contentWidth - 1);
-    check((await poll(sidebarBounds, (b) => b !== null, 1500)) === null, 'the right edge does nothing while the bar is on the left');
-    await pointerAt(500);
-    // The SMS view is Kainos' own page, not a website: the bar must come out from it too.
-    const smsPointerAt = (x: number) =>
-      app.evaluate(({ BaseWindow }, x) => {
-        const contents = (BaseWindow.getAllWindows()[0]!.contentView.children[0] as Electron.WebContentsView).webContents;
-        contents.sendInputEvent({ type: 'mouseMove', x, y: 300 });
-      }, x);
-    await pressShortcut(app, page, 'whatsapp', digit('inbox'));
-    await smsPointerAt(400);
-    await smsPointerAt(0);
-    check((await poll(sidebarBounds, (b) => b !== null, 3000)) !== null, 'the pointer at the edge of the SMS view brings the bar out too');
-    await smsPointerAt(500);
-    check((await poll(sidebarBounds, (b) => b === null, 3000)) === null, '... and it hides again over the SMS view');
-    // Discord's view was made new when it woke from sleep: the bar comes out from it too.
-    const discordPointerAt = (x: number) =>
-      app.evaluate(({ BaseWindow }, { x, index }) => {
-        const contents = (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).webContents;
-        contents.sendInputEvent({ type: 'mouseMove', x, y: 300 });
-      }, { x, index: nth('discord') });
-    await pressShortcut(app, page, 'inbox', digit('discord'));
-    await poll(() => status(page, 'discord'), (value) => value === 'ready', 30_000);
-    await discordPointerAt(400);
-    await discordPointerAt(0);
-    check((await poll(sidebarBounds, (b) => b !== null, 3000)) !== null, 'the pointer at the edge of the woken Discord page brings the bar out');
-    await discordPointerAt(500);
-    check((await poll(sidebarBounds, (b) => b === null, 3000)) === null, '... and it hides again over Discord');
-    await pressShortcut(app, page, 'inbox', digit('whatsapp'));
-    await sendKey(app, 'whatsapp', 'F6');
-    check((await poll(sidebarBounds, (b) => b !== null, 3000)) !== null, 'F6 brings the hidden bar out');
-    check((await poll(() => railFocus(page), (index) => index === nth('whatsapp'), 3000)) === nth('whatsapp'), '... with focus on the active service');
-    await page.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
-    await clickMenuItem(app, 'Hide the bar');
-    check((await poll(sidebarBounds, (b) => b?.x === 0, 3000))?.x === 0, 'turning auto-hide off docks the bar again');
-    await page.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
-    await clickMenuItem(app, 'Bar always on the right');
-    const right = await poll(sidebarBounds, (b) => b?.x === contentWidth - 68, 3000);
-    check(right?.x === contentWidth - 68, 'the bar can sit on the right', JSON.stringify(right));
-    const left = await viewBounds(app, 'whatsapp');
-    check(left.x === 0 && left.width === contentWidth - 68, '... with the page beside it on the left', JSON.stringify(left));
-    check((await page.evaluate(() => document.body.dataset.side)) === 'right', '... and the bar drawn mirrored');
-    await sleep(300);
-    await screenshot(app, '10-bar-right');
-    await page.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
-    const outer = (await menus(app)).at(-1)?.labels.find((label) => label.startsWith("Bar on the screen's outer edge"));
-    info('screen side the app sees off screen', outer ?? '');
-    await clickMenuItem(app, "Bar on the screen's outer edge");
-    check((await poll(sidebarBounds, (b) => b?.x === 0, 3000))?.x === 0, "the screen's outer edge on a single screen is the left");
+    await screenshot(app, '09-dock-always');
+
+    // Themes: each one applies at once to the dock and the Texts page and the window behind
+    // them, with every text readable. In desktop/.verify/themes/, Texts at 1720×1440.
+    {
+      mkdirSync(join(verify, 'themes'), { recursive: true });
+      const [w0, h0] = await contentSize(app);
+      await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.setContentSize(1720, 1440));
+      await pressShortcut(app, page, 'dock', digit('inbox'));
+      const background = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getBackgroundColor().toLowerCase());
+      // With the phone gone: the disconnected bar and the dock's "not connected".
+      for (const name of THEME_NAMES) {
+        await pickTheme(app, page, name);
+        const id = themeId(name);
+        const applied = await poll(() => themeAttributes(app, page), (t) => t === `dock ${id}, texts ${id}`, 3000);
+        check(applied === `dock ${id}, texts ${id}`, `${name} applies to the dock and the Texts page without a restart`, applied);
+        const paints = await background();
+        check(paints === { switchboard: '#0b1316', daylight: '#ffffff', bakelite: '#15100d', carbon: '#000000', aubergine: '#21152b' }[id], `... and the window behind the pages paints its page colour`, paints);
+        await measureContrast(`${name}: the Texts page, phone not connected`, () => inService<Measured[]>(app, 'inbox', CONTRAST_WALK));
+        await measureContrast(`${name}: the dock, phone not connected`, () => page.evaluate(CONTRAST_WALK) as Promise<Measured[]>);
+      }
+      // With the phone back: a thread with a sent reply and a code, for the screenshots.
+      smsPhone = await connectPaired(syncPort, deviceId);
+      smsPhone.send({
+        t: 'conversation',
+        conversation: conversation('sms|0|s:garage', 'Garage Delaunay', [
+          { id: 'g1', text: 'Your car is ready. We close at 18:30.', timeMs: Date.now() - 3_600_000 },
+          { id: 'g2', text: 'Coming at 18:00', timeMs: Date.now() - 3_000_000, outgoing: true },
+          { id: 'g4', text: 'Your pickup code is 482913. Keys are at the desk.', timeMs: Date.now() - 60_000 },
+        ], 0),
+      });
+      await poll(() => tabState(page, 'inbox'), (t) => !t.startsWith('offline'), 5000);
+      await inService(app, 'inbox', `document.querySelector('.row[data-key="sms|0|s:garage"]').click(); 1`, true);
+      await poll(smsText, (t) => t.includes('Coming at 18:00') && t.includes('482'), 5000);
+      for (const [i, name] of THEME_NAMES.entries()) {
+        await pickTheme(app, page, name);
+        await poll(() => themeAttributes(app, page), (t) => t === `dock ${themeId(name)}, texts ${themeId(name)}`, 3000);
+        await measureContrast(`${name}: the Texts page`, () => inService<Measured[]>(app, 'inbox', CONTRAST_WALK));
+        await measureContrast(`${name}: the dock`, () => page.evaluate(CONTRAST_WALK) as Promise<Measured[]>);
+        await sleep(300);
+        await screenshot(app, `themes/${i + 1}-${themeId(name)}`);
+      }
+      smsPhone.close();
+      smsPhone = undefined;
+      await poll(() => tabState(page, 'inbox'), (t) => t === 'offline:', 5000);
+      await pickTheme(app, page, 'Match system');
+      const system = await poll(() => themeAttributes(app, page), (t) => t === 'dock none, texts none', 3000);
+      check(system === 'dock none, texts none', 'Match system takes the forced theme off both pages', system);
+      // Kept for the second launch.
+      await pickTheme(app, page, 'Carbon');
+      await poll(() => themeAttributes(app, page), (t) => t === 'dock carbon, texts carbon', 3000);
+      writeFileSync(join(verify, 'themes', 'contrast.json'), JSON.stringify(contrastLog, null, 2));
+      await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows()[0]!.setContentSize(w!, h!), [w0, h0]);
+      await pressShortcut(app, page, 'dock', digit('whatsapp'));
+    }
+
+    // The phone island: forgetting the phone is one menu away from any service.
+    await page.locator('#phone').click();
+    const phoneMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Open Texts', 5000)).at(-1);
+    check(JSON.stringify(phoneMenu?.labels.filter(Boolean)) === '["Open Texts","Forget Pixel 9…"]', 'the phone island opens Open Texts and Forget this phone', JSON.stringify(phoneMenu?.labels));
+    check(await clickMenuItem(app, 'Forget'), 'the phone menu has Forget');
+    check((await boxes(app)).some((b) => b.message === 'Forget Pixel 9?'), 'Forget asks first');
+    check(/No phone/.test(await poll(() => page.locator('#phone').innerText(), (t) => /No phone/.test(t), 5000)), 'after Forget, the phone island says there is no phone');
+    await page.locator('#phone').click();
+    check((await poll(() => activeIndex(page), (index) => index === nth('inbox'), 3000)) === nth('inbox'), 'with no phone, the phone island opens the Texts page to connect one');
+    const forgotten = await poll(() => inService<string>(app, 'inbox', 'document.body.innerText'), (t) => /Connect your phone/.test(t), 5000);
+    check(/Connect your phone/.test(forgotten), '... where Texts asks to connect a phone again');
+    await pressShortcut(app, page, 'dock', digit('whatsapp'));
 
     // With a tray host, closing the window hides it to the tray instead of quitting.
     await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.close());
@@ -1003,22 +1364,9 @@ async function run(profile: string): Promise<void> {
       win.show();
       win.setBounds({ x: 120, y: 90, width: 1100, height: 720 });
     });
-    // Memory: every website was woken earlier; put them all to sleep.
-    await pressShortcut(app, page, 'sidebar', digit('inbox'));
-    const treeBefore = processTreePssMb(app.process().pid!);
-    for (const id of ['proton-mail', 'discord', 'whatsapp', 'messenger'] as const) {
-      if ((await status(page, id)) === 'asleep') continue;
-      await page.locator('.socket').nth(nth(id)).locator('.tile').click({ button: 'right' });
-      await poll(() => menus(app), (all) => all.at(-1)?.labels.includes('Sleep now') === true, 5000);
-      await clickMenuItem(app, 'Sleep now');
-      await poll(() => status(page, id), (value) => value === 'asleep', 5000);
-    }
-    await sleep(3000);
-    const asleepStatuses = await Promise.all((['proton-mail', 'discord', 'whatsapp', 'messenger'] as const).map((id) => status(page, id)));
-    info("PSS of the app's process tree, websites awake then all asleep (MB)", `${treeBefore} → ${processTreePssMb(app.process().pid!)} (${asleepStatuses.join(', ')})`);
-    check((await pressShortcut(app, page, 'sidebar', digit('proton-mail'))) === nth('proton-mail'), `Ctrl+${digit('proton-mail')} switches back to Proton Mail before quitting`);
+    check((await pressShortcut(app, page, 'dock', digit('proton-mail'))) === nth('proton-mail'), `Ctrl+${digit('proton-mail')} switches back to Proton Mail before quitting`);
     await sleep(800);
-    await sendKey(app, 'sidebar', 'Q', ['control']);
+    await sendKey(app, 'dock', 'Q', ['control']);
     quitByKey = await exits(app, 10_000);
     check(quitByKey, 'Ctrl+Q quits the app');
   } finally {
@@ -1030,15 +1378,33 @@ async function run(profile: string): Promise<void> {
   check(saved.activeServiceId === 'proton-mail', 'saves the last active service on quit', String(saved.activeServiceId));
   check(JSON.stringify(saved.bounds) === JSON.stringify({ x: 120, y: 90, width: 1100, height: 720 }), 'saves window size and position', JSON.stringify(saved.bounds));
   check(JSON.stringify(saved.mutedServiceIds) === '["discord"]', 'keeps the muted list', JSON.stringify(saved.mutedServiceIds));
+  check(saved.theme === 'carbon', 'saves the picked theme', String(saved.theme));
+  check(saved.dockAlwaysShown === true && !('dockAlign' in saved) && !('barSide' in saved) && !('barAutoHide' in saved), 'saves Always show the dock, and nothing of the old alignment or side bar', JSON.stringify({ dockAlwaysShown: saved.dockAlwaysShown, dockAlign: saved.dockAlign, barSide: saved.barSide }));
 
   // Second launch, then the tray host goes away (a desktop with no tray): closing quits.
   // The host is only switched off after launch: without one at startup, Electron's tray falls
   // back to GTK, which crashes with no display. The app asks the session again at close time.
   app = await launch(profile);
   try {
-    const page = await sidebar(app);
+    const page = await dockPage(app);
     bus!.setTrayHost(false);
     check((await activeIndex(page)) === nth('proton-mail'), 'second launch opens on Proton Mail');
+    await stubMenusAndDialogs(app);
+    await poll(() => status(page, 'proton-mail'), (value) => value === 'ready', 60_000);
+    const [w, h] = await contentSize(app);
+    const kept = await poll(() => dockBounds(app), (b) => b?.height === DOCK, 5000);
+    check(JSON.stringify(kept) === JSON.stringify({ x: 0, y: h - DOCK, width: w, height: DOCK }), 'second launch keeps the dock shown in its strip', JSON.stringify(kept));
+    const relaunched = await poll(() => themeAttributes(app, page), (t) => t === 'dock carbon, texts carbon', 5000);
+    check(relaunched === 'dock carbon, texts carbon', 'second launch keeps Carbon on the dock and the Texts page', relaunched);
+    const relaunchedBackground = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getBackgroundColor().toLowerCase());
+    check(relaunchedBackground === '#000000', "... and paints the window in Carbon's black from the start", relaunchedBackground);
+    await page.locator('#dock-options').click();
+    await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+    await clickMenuItem(app, 'Always show the dock');
+    await pointer(app, 'dock', 'mouseLeave', 0, 0);
+    await pointer(app, 'proton-mail', 'mouseMove', w / 2, h / 2);
+    const gone = await poll(() => dockBounds(app), (b) => b === null, 3000);
+    check(gone === null && (await viewBounds(app, 'proton-mail')).height === h, 'switching it off again hides the dock and gives the page the whole window');
     const bounds = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getBounds());
     check(bounds.width === 1100 && bounds.height === 720, 'second launch restores the window size', JSON.stringify(bounds));
     await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.close()).catch(() => undefined);

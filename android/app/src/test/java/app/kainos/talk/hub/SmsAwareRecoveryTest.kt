@@ -1,6 +1,5 @@
 package app.kainos.talk.hub
 
-import app.kainos.talk.core.Source
 import app.kainos.talk.sync.FakeSmsStore
 import app.kainos.talk.ui.FakeTalkHub
 import kotlinx.coroutines.*
@@ -21,20 +20,18 @@ class SmsAwareRecoveryTest {
         val fake = FakeTalkHub()
         val fail = CompletableDeferred<Unit>()
         var subscriptions = 0
-        val old = InboxItem.Chat("sms|rcs", Source.SMS, "Old", false, 1, 0, false, "old", null, false, null, false)
+        val old = InboxChat("sms|rcs", "Old", false, 1, 0, "old", null)
         val fresh = old.copy(title = "Fresh +33612345678", lastText = "fresh")
-        fake.threads.value = mapOf("sms|rcs" to ChatThread("sms|rcs", Source.SMS, "RCS", false, false,
-            app.kainos.talk.core.Shape.MESSAGING_STYLE, emptyList(),
-            ChatCapabilities(false, ReplyFailure.NOTIFICATION_GONE, false), null))
+        fake.threads.value = mapOf("sms|rcs" to ChatThread("sms|rcs", "RCS", false, emptyList(), canReply = false))
         val base = object : TalkHub by fake {
-            override fun inbox(sourceIds: Set<String>?): Flow<Inbox> = flow {
+            override fun inbox(): Flow<List<InboxChat>> = flow {
                 subscriptions++
                 if (subscriptions == 1) {
-                    emit(Inbox(listOf(old), emptyMap()))
+                    emit(listOf(old))
                     fail.await()
                     throw IOException("temporary provider failure")
                 }
-                emit(Inbox(listOf(fresh), emptyMap()))
+                emit(listOf(fresh))
                 awaitCancellation()
             }
         }
@@ -52,8 +49,8 @@ class SmsAwareRecoveryTest {
         runCurrent()
         assertEquals(2, subscriptions)
         assertEquals(2, values.size)
-        assertFalse(values.first()!!.capabilities.canReply)
-        assertTrue(values.last()!!.capabilities.canReply)
+        assertFalse(values.first()!!.canReply)
+        assertTrue(values.last()!!.canReply)
         // This subscriber reads notified.first() and would hang if the sharing job had died.
         assertEquals(ReplyResult.Sent, hub.sendReply("sms|rcs", "reply"))
         job.cancelAndJoin()
@@ -61,7 +58,7 @@ class SmsAwareRecoveryTest {
         runCurrent()
         val later = backgroundScope.async(UnconfinedTestDispatcher(testScheduler)) { hub.thread("sms|rcs").first() }
         runCurrent()
-        assertTrue(later.await()!!.capabilities.canReply)
+        assertTrue(later.await()!!.canReply)
         assertEquals(3, subscriptions)
     }
 }

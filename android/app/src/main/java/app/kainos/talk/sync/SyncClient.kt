@@ -9,10 +9,6 @@ import android.net.NetworkRequest
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.first
-import app.kainos.talk.core.Source
-import app.kainos.talk.core.MailAction
-import app.kainos.talk.hub.ActionResult
-import app.kainos.talk.hub.InboxItem
 import app.kainos.talk.hub.ReplyResult
 import app.kainos.talk.hub.TalkHub
 import kotlinx.coroutines.CompletableDeferred
@@ -29,7 +25,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -37,8 +32,6 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -102,8 +95,8 @@ interface SyncControl {
 
 /**
  * The phone end of PC sync: keeps one TLS connection to the paired PC while the app runs, sends
- * it every conversation and mail the inbox shows, and passes the PC's replies, reads and mail
- * actions to the hub. Nothing goes anywhere but the paired PC, at a local address.
+ * it every text conversation the hub shows, and passes the PC's replies and reads to the hub.
+ * Nothing goes anywhere but the paired PC, at a local address.
  */
 class SyncClient(
     context: Context,
@@ -318,19 +311,7 @@ class SyncClient(
                             val jpeg = withContext(Dispatchers.IO) { runCatching { pictures(frame.id) }.getOrNull() }
                             send(SyncProtocol.image(frame.id, jpeg, if (jpeg == null) "not available" else null))
                         }
-                        is PcFrame.Read -> if (frame.key in mailKeys) hub.markMailRead(frame.key) else hub.markRead(frame.key)
-                        is PcFrame.MailAction -> launch {
-                            val action = when (frame.action) {
-                                "archive" -> MailAction.ARCHIVE
-                                "trash" -> MailAction.TRASH
-                                else -> MailAction.MARK_READ
-                            }
-                            val error = when (val result = hub.mailAction(frame.key, action)) {
-                                ActionResult.Requested -> null
-                                is ActionResult.Failed -> result.reason.name.lowercase().replace('_', ' ')
-                            }
-                            send(SyncProtocol.replyResult(frame.id, error))
-                        }
+                        is PcFrame.Read -> hub.markRead(frame.key)
                         is PcFrame.Send -> launch {
                             val error = withContext(Dispatchers.IO) { sms.send(frame.to, frame.text) }
                             send(SyncProtocol.replyResult(frame.id, error))
@@ -355,27 +336,22 @@ class SyncClient(
     }
 
     /**
-     * Every conversation and mail the phone shows right now, newest first. Each one's own flow is
+     * Every conversation the phone shows right now, newest first. Each one's own flow is
      * subscribed while it is in the list: a new message that only reorders the list or changes a
      * preview does not resubscribe them all.
      */
-    private fun fromHub(): Flow<Pair<List<SyncConversation>, List<SyncMail>>> = channelFlow {
-        val lists = hub.inbox(null)
-            .map { inbox ->
-                inbox.items.filterIsInstance<InboxItem.Chat>().take(SyncProtocol.MAX_CONVERSATIONS) to
-                    inbox.items.filterIsInstance<InboxItem.Mail>().take(SyncProtocol.MAX_CONVERSATIONS)
-            }
-            .stateIn(this)
-        lists
-            .map { (chats, mails) -> chats.mapTo(HashSet()) { it.key } to mails.mapTo(HashSet()) { it.key } }
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun fromHub(): Flow<List<SyncConversation>> = channelFlow {
+        val chats = hub.inbox().map { it.take(SyncProtocol.MAX_CONVERSATIONS) }.stateIn(this)
+        chats
+            .map { list -> list.mapTo(HashSet()) { it.key } }
             .distinctUntilChanged()
-            .flatMapLatest { (chatKeys, mailKeys) ->
-                val threads = if (chatKeys.isEmpty()) flowOf(emptyMap()) else combine(chatKeys.map { key -> hub.thread(key, SyncProtocol.MAX_MESSAGES).map { key to it } }) { it.toMap() }
-                val details = if (mailKeys.isEmpty()) flowOf(emptyMap()) else combine(mailKeys.map { key -> hub.mailItem(key).map { key to it } }) { it.toMap() }
-                combine(lists, threads, details) { (chats, mails), threadByKey, detailByKey ->
+            .flatMapLatest { keys ->
+                val threads = if (keys.isEmpty()) flowOf(emptyMap()) else combine(keys.map { key -> hub.thread(key, SyncProtocol.MAX_MESSAGES).map { key to it } }) { it.toMap() }
+                combine(chats, threads) { list, threadByKey ->
                     // The list already holds other conversations; the flows for them are on their way.
-                    if (chats.mapTo(HashSet()) { it.key } != chatKeys || mails.mapTo(HashSet()) { it.key } != mailKeys) return@combine null
-                    val conversations = chats.mapNotNull { chat ->
+                    if (list.mapTo(HashSet()) { it.key } != keys) return@combine null
+                    list.mapNotNull { chat ->
                         val thread = threadByKey[chat.key] ?: return@mapNotNull null
                         SyncConversation(
                             key = chat.key,
@@ -383,93 +359,46 @@ class SyncClient(
                             isGroup = chat.isGroup,
                             unread = chat.unreadCount,
                             lastActivityMs = chat.timeMs,
-                            canReply = thread.capabilities.canReply,
+                            canReply = thread.canReply,
+                            sender = chat.sender,
                             messages = thread.messages.takeLast(SyncProtocol.MAX_MESSAGES).map {
                                 SyncMessage(it.id.toString(), it.senderName, it.text, it.timeMs, it.outgoing, it.status.name.lowercase(), it.media?.name?.lowercase(), it.imageId)
                             },
-                            source = chat.source.id,
-                            sourceLabel = chat.source.label,
                         )
                     }
-                    val mailItems = mails.map { item ->
-                        SyncMail(
-                            key = item.key,
-                            source = item.source.id,
-                            sourceLabel = item.source.label,
-                            sender = if (item.senderHidden) null else item.sender,
-                            subject = item.subject,
-                            account = item.accountLabel,
-                            timeMs = item.timeMs,
-                            read = item.read,
-                            actions = detailByKey[item.key]?.actions.orEmpty().map { actionName(it.action) },
-                            requested = item.requestedAction?.let(::actionName),
-                        )
-                    }
-                    conversations to mailItems
                 }.filterNotNull()
             }
             .collect { send(it) }
     }
 
     /**
-     * Sends every conversation and mail the PC does not hold yet ([welcome] says what it kept from
-     * an earlier connection), then each again whenever it changes. The hub already merges the SMS
+     * Sends every conversation the PC does not hold yet ([welcome] says what it kept from an
+     * earlier connection), then each again whenever it changes. The hub already merges the SMS
      * inbox with notified chats, so the PC sees what this phone shows.
+     *
+     * What was sent is kept as values, not frames: comparing them is cheap, and a frame is only
+     * built for one that changed. A frame is a function of every field, so equal values mean equal frames.
      */
     internal suspend fun syncConversations(welcome: PcFrame.Welcome = PcFrame.Welcome(""), send: suspend (String) -> Unit) {
-        val chats = Mirror(welcome.conversations, SyncConversation::key, SyncProtocol::conversation, SyncProtocol::removed)
-        val mail = Mirror(welcome.mails, SyncMail::key, SyncProtocol::mail, SyncProtocol::mailRemoved)
-        fromHub().conflate().collect { (conversations, mails) ->
-            chats.update(conversations, send)
-            mail.update(mails, send)
-            mailKeys = mail.keys()
-        }
-    }
-
-    /**
-     * What the PC holds of one kind (conversations or mails). What was sent is kept as values, not
-     * frames: comparing them is cheap, and a frame is only built for one that changed. A frame is
-     * a function of every field, so equal values mean equal frames.
-     */
-    private class Mirror<T>(
-        /** Frame hashes the PC kept from an earlier connection; each is checked once, then dropped. */
-        held: Map<String, String>,
-        private val keyOf: (T) -> String,
-        private val frame: (T) -> String,
-        private val removed: (String) -> String,
-    ) {
-        private val held = HashMap(held)
-        private val sent = HashMap<String, T>()
-
-        fun keys(): Set<String> = sent.keys.toSet()
-
-        suspend fun update(items: List<T>, send: suspend (String) -> Unit) {
-            for (item in items) {
-                val key = keyOf(item)
-                if (sent[key] == item) continue
-                val line = frame(item)
-                val pcHash = held.remove(key)
+        // Frame hashes the PC kept from an earlier connection; each is checked once, then dropped.
+        val held = HashMap(welcome.conversations)
+        val sent = HashMap<String, SyncConversation>()
+        fromHub().conflate().collect { conversations ->
+            for (c in conversations) {
+                if (sent[c.key] == c) continue
+                val line = SyncProtocol.conversation(c)
+                val pcHash = held.remove(c.key)
                 if (pcHash == null || pcHash != SyncProtocol.frameHash(line)) send(line)
-                sent[key] = item
+                sent[c.key] = c
             }
-            val current = items.mapTo(HashSet(), keyOf)
+            val current = conversations.mapTo(HashSet()) { it.key }
             for (key in (sent.keys + held.keys) - current) {
-                send(removed(key))
+                send(SyncProtocol.removed(key))
                 sent.remove(key)
                 held.remove(key)
             }
         }
     }
-
-    /** Mail keys the PC knows, so its "read" goes to the right place. */
-    @Volatile private var mailKeys: Set<String> = emptySet()
-
-    private fun actionName(action: MailAction) = when (action) {
-        MailAction.ARCHIVE -> "archive"
-        MailAction.TRASH -> "trash"
-        MailAction.MARK_READ -> "markRead"
-    }
-
 
     /** The first of [hosts] that answers, and its socket. */
     private fun openFirst(hosts: List<String>, trust: X509TrustManager): Pair<String, SSLSocket> {

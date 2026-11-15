@@ -1,11 +1,8 @@
 package app.kainos.talk.sync
 
 import androidx.test.core.app.ApplicationProvider
-import app.kainos.talk.core.Shape
-import app.kainos.talk.core.Source
-import app.kainos.talk.hub.ChatCapabilities
 import app.kainos.talk.hub.ChatThread
-import app.kainos.talk.hub.InboxItem
+import app.kainos.talk.hub.InboxChat
 import app.kainos.talk.hub.ThreadMessage
 import app.kainos.talk.store.MessageStatus
 import app.kainos.talk.ui.FakeTalkHub
@@ -32,7 +29,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * The phone's real SyncClient against the PC's real sync server (desktop/src/main/sms-sync.ts,
- * run with Node through desktop/test/sync-server-fixture.ts): pairing, texts, a reply, a read.
+ * run with Node through desktop/test/sync-server-fixture.ts): pairing, texts, a reply, a read, a
+ * picture and a new text.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -108,32 +106,22 @@ class SyncInteropTest {
     private fun identity(name: String) = Pkcs12Identity(javaClass.classLoader!!.getResourceAsStream("sync/$name")!!, "kainos-test")
 
     private fun hub() = FakeTalkHub(now = { 2_000L }).apply {
-        val wa = "whatsapp|0|s:allot"
-        val halden = "protonmail|0|halden"
-        mails.value = mapOf(
-            halden to app.kainos.talk.hub.MailItem(
-                halden, Source.PROTON_MAIL, "acct", "me@proton.me", "Halden Housing Co-op", false, "Minutes", 1_500L, false, null, true,
-                listOf(app.kainos.talk.hub.AvailableMailAction(app.kainos.talk.core.MailAction.ARCHIVE, "Archive")), Shape.EXPECTED,
-            ),
-        )
-        val key = "sms|0|s:mum"
+        val mum = "sms|0|s:mum"
+        val crew = "sms|0|s:allot"
         chats.value = listOf(
-            InboxItem.Chat(key, Source.SMS, "Mum", false, 1_000L, 1, false, "Dinner on Sunday?", "Mum", false, null, notificationLive = true),
-            InboxItem.Chat(wa, Source.WHATSAPP, "Allotment crew", true, 900L, 1, false, "Shed key?", "Odile", false, null, notificationLive = true),
-        )
-        val waThread = ChatThread(
-            wa, Source.WHATSAPP, "Allotment crew", isGroup = true, muted = false, shape = Shape.MESSAGING_STYLE,
-            messages = listOf(ThreadMessage(7, "Odile", "Shed key?", 900L, outgoing = false, status = MessageStatus.INCOMING, media = null, read = false)),
-            capabilities = ChatCapabilities(canReply = true, replyBlocked = null, canMarkReadInApp = false),
-            notificationRemovedReason = null,
+            InboxChat(mum, "Mum", false, 1_000L, 1, "Dinner on Sunday?", "Mum"),
+            InboxChat(crew, "Allotment crew", true, 900L, 1, "Shed key?", "Odile"),
         )
         threads.value = mapOf(
-            wa to waThread,
-            key to ChatThread(
-                key, Source.SMS, "Mum", isGroup = false, muted = false, shape = Shape.MESSAGING_STYLE,
+            crew to ChatThread(
+                crew, "Allotment crew", isGroup = true,
+                messages = listOf(ThreadMessage(7, "Odile", "Shed key?", 900L, outgoing = false, status = MessageStatus.INCOMING, media = null, read = false)),
+                canReply = true,
+            ),
+            mum to ChatThread(
+                mum, "Mum", isGroup = false,
                 messages = listOf(ThreadMessage(1, "Mum", "Dinner on Sunday?", 1_000L, outgoing = false, status = MessageStatus.INCOMING, media = null, read = false)),
-                capabilities = ChatCapabilities(canReply = true, replyBlocked = null, canMarkReadInApp = false),
-                notificationRemovedReason = null,
+                canReply = true,
             ),
         )
     }
@@ -166,28 +154,27 @@ class SyncInteropTest {
         assertEquals("Dinner on Sunday?", mum.getJSONArray("messages").getJSONObject(0).getString("text"))
 
         // Protocol 4: a reconnect sends only what the PC does not hold already.
-        awaitState("the whole inbox") { s -> s.getJSONArray("conversations").length() == 2 && s.getJSONArray("mails").length() == 1 }
+        awaitState("both conversations") { s -> s.getJSONArray("conversations").length() == 2 }
         Thread.sleep(500)
         val firstSync = traffic()
         println("traffic first connection: $firstSync")
         assertEquals(2, firstSync.frames("conversation"))
+        assertEquals("texts only: no mail", 0, firstSync.frames("mail"))
         reconnect()
         val unchanged = traffic()
         println("traffic reconnect, nothing changed: $unchanged")
         assertEquals("nothing changed: no conversation is sent again", 0, unchanged.frames("conversation"))
-        assertEquals(0, unchanged.frames("mail"))
         assertEquals(0, unchanged.frames("removed"))
         reconnect {
-            // While the phone is away, a message comes in on WhatsApp.
-            val allot = hub.threads.value.getValue("whatsapp|0|s:allot")
-            hub.threads.value += "whatsapp|0|s:allot" to allot.copy(messages = allot.messages + allot.messages[0].copy(id = 8, text = "Found it", timeMs = 950L))
+            // While the phone is away, a message comes in over RCS.
+            val allot = hub.threads.value.getValue("sms|0|s:allot")
+            hub.threads.value += "sms|0|s:allot" to allot.copy(messages = allot.messages + allot.messages[0].copy(id = 8, text = "Found it", timeMs = 950L))
         }
         val oneChange = traffic()
         println("traffic reconnect, one conversation changed: $oneChange")
         assertEquals("one conversation changed: only it is sent", 1, oneChange.frames("conversation"))
-        assertEquals(0, oneChange.frames("mail"))
         command("state")
-        awaitState("the new WhatsApp message") { s -> s.conversation("whatsapp|0|s:allot")?.getJSONArray("messages")?.length() == 2 }
+        awaitState("the new RCS message") { s -> s.conversation("sms|0|s:allot")?.getJSONArray("messages")?.length() == 2 }
 
         command("reply sms|0|s:mum Yes, at 7")
         await("the reply to be sent") { it == "replied true" }
@@ -205,18 +192,6 @@ class SyncInteropTest {
         while (hub.readKeys.isEmpty() && System.currentTimeMillis() < end) Thread.sleep(20)
         assertEquals(listOf("sms|0|s:mum"), hub.readKeys)
         assertEquals(SyncStatus.Connected::class, client.status.value::class)
-
-        // Protocol 3: other apps' chats and mail travel too, and mail actions come back.
-        val chatsAndMail = awaitState("WhatsApp and mail") { s ->
-            s.getJSONArray("mails").length() == 1 &&
-                (0 until s.getJSONArray("conversations").length()).any { s.getJSONArray("conversations").getJSONObject(it).getString("source") == "whatsapp" }
-        }
-        assertEquals("Halden Housing Co-op", chatsAndMail.getJSONArray("mails").getJSONObject(0).getString("sender"))
-        command("mail protonmail|0|halden archive")
-        await("the mail action to be sent") { it == "mailed true" }
-        val until2 = System.currentTimeMillis() + 5_000
-        while (hub.requestedMailActions.isEmpty() && System.currentTimeMillis() < until2) Thread.sleep(20)
-        assertEquals(listOf("protonmail|0|halden" to app.kainos.talk.core.MailAction.ARCHIVE), hub.requestedMailActions)
 
         command("image mms-part:1")
         assertEquals("image data:image/jpeg;base64,/9j/", await("the picture") { it.startsWith("image ") })

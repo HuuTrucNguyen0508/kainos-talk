@@ -11,6 +11,12 @@ test('registry has the inbox and four websites, with unique ids and https start 
   }
 });
 
+test('the phone texts page is the Texts service, drawn as a line icon among filled brand logos', () => {
+  const texts = SERVICES[0]!;
+  assert.deepEqual({ id: texts.id, name: texts.name, localPage: texts.localPage, paint: texts.icon.paint }, { id: 'inbox', name: 'Texts', localPage: 'inbox', paint: 'stroke' });
+  assert.deepEqual(SERVICES.slice(1).map((s) => s.icon.paint), ['fill', 'fill', 'fill', 'fill']);
+});
+
 test('each service gets its own persistent login partition', () => {
   const partitions = SERVICES.map(partitionFor);
   assert.deepEqual(partitions, [

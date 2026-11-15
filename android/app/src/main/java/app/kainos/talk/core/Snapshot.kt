@@ -4,7 +4,7 @@ package app.kainos.talk.core
  * A plain, immutable copy of what the hub needs from one posted notification.
  *
  * The listener builds it from a `StatusBarNotification` at the boundary; everything past that
- * point (adapters, store, dump) works on this type only, so it runs on the JVM without Android.
+ * point (adapter, store) works on this type only, so it runs on the JVM without Android.
  * Live handles (PendingIntents, actions) are not here: they stay in memory in the listener layer.
  */
 data class NotificationSnapshot(
@@ -42,8 +42,6 @@ data class NotificationSnapshot(
     /** Actions found only in the WearableExtender bundle. */
     val wearableActions: List<SnapshotAction>,
     val hasContentIntent: Boolean,
-    /** Every extras key with its type and value, for the dump screen only. */
-    val extras: List<ExtraEntry> = emptyList(),
 ) {
     fun hasFlag(flag: Int): Boolean = flags and flag != 0
 }
@@ -88,14 +86,4 @@ object SemanticAction {
     const val NONE = 0
     const val REPLY = 1
     const val MARK_AS_READ = 2
-}
-
-/** Values copied from `android.service.notification.NotificationListenerService`. */
-object RemovalReason {
-    const val CLICK = 1
-    const val CANCEL = 2
-    const val CANCEL_ALL = 3
-    const val APP_CANCEL = 8
-    const val LISTENER_CANCEL = 10
-    const val GROUP_SUMMARY_CANCELED = 12
 }

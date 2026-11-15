@@ -33,10 +33,25 @@ class SyncProtocolTest {
     }
 
     @Test
+    fun senderKindMatchesTheVectors() {
+        val cases = vectors.getJSONArray("senderKind")
+        assertTrue(cases.length() > 0)
+        for (i in 0 until cases.length()) {
+            val v = cases.getJSONObject(i)
+            val address = v.getString("address")
+            assertEquals(
+                "\"$address\" contact=${v.getBoolean("isContact")} group=${v.getBoolean("isGroup")}",
+                v.getString("sender"),
+                senderKind(address, v.getBoolean("isContact"), v.getBoolean("isGroup")).wire,
+            )
+        }
+    }
+
+    @Test
     fun aWelcomeCarriesWhatThePcHolds() {
         assertEquals(PcFrame.Welcome("PC"), SyncProtocol.parse("""{"t":"welcome","name":"PC"}"""))
         assertEquals(
-            PcFrame.Welcome("PC", mapOf("sms|0|s:mum" to "b6dd71f0d853d309", "sms|0|s:read" to ""), mapOf("protonmail|0|h" to "e3b0c44298fc1c14")),
+            PcFrame.Welcome("PC", mapOf("sms|0|s:mum" to "b6dd71f0d853d309", "sms|0|s:read" to "")),
             SyncProtocol.parse("""{"t":"welcome","name":"PC","conversations":{"sms|0|s:mum":"b6dd71f0d853d309","sms|0|s:read":"","bad":5},"mails":{"protonmail|0|h":"e3b0c44298fc1c14"}}"""),
         )
     }
@@ -57,8 +72,7 @@ class SyncProtocolTest {
         assertEquals(PcFrame.Reply("r1", "sms|0|s:mum", "On my way"), SyncProtocol.parse("""{"t":"reply","id":"r1","key":"sms|0|s:mum","text":"On my way"}"""))
         assertEquals(PcFrame.Paired("d"), SyncProtocol.parse("""{"t":"paired","deviceId":"d"}"""))
         assertEquals(PcFrame.Ping, SyncProtocol.parse("""{"t":"ping"}"""))
-        assertEquals(PcFrame.MailAction("m1", "protonmail|0|h", "archive"), SyncProtocol.parse("""{"t":"mailAction","id":"m1","key":"protonmail|0|h","action":"archive"}"""))
-        assertNull("only the mail app's own actions", SyncProtocol.parse("""{"t":"mailAction","id":"m1","key":"k","action":"delete"}"""))
+        assertNull("the phone no longer carries mail", SyncProtocol.parse("""{"t":"mailAction","id":"m1","key":"protonmail|0|h","action":"archive"}"""))
         assertNull(SyncProtocol.parse("""{"t":"reply","id":"r1","key":"k"}"""))
         assertNull(SyncProtocol.parse("""{"t":"reply","id":5,"key":"k","text":"x"}"""))
         assertNull(SyncProtocol.parse("not json"))
@@ -82,10 +96,23 @@ class SyncProtocolTest {
         )
         assertEquals("conversation", frame.getString("t"))
         val conversation = frame.getJSONObject("conversation")
+        assertEquals("sms" to "SMS", conversation.getString("source") to conversation.getString("sourceLabel"))
+        assertEquals("a conversation nobody classified is a person", "person", conversation.getString("sender"))
         val messages = conversation.getJSONArray("messages")
         assertEquals(SyncProtocol.MAX_MESSAGES, messages.length())
         assertEquals("250", messages.getJSONObject(messages.length() - 1).getString("id"))
         assertTrue(messages.getJSONObject(0).isNull("media"))
         assertEquals("""{"t":"replyResult","id":"r","ok":false,"error":"notification gone"}""", SyncProtocol.replyResult("r", "notification gone"))
+    }
+
+    @Test
+    fun everyConversationFrameSaysWhoItComesFrom() {
+        fun line(sender: SenderKind) = SyncProtocol.conversation(
+            SyncConversation("sms|t:1", "36679", isGroup = false, unread = 0, lastActivityMs = 1, canReply = true, messages = emptyList(), sender = sender),
+        )
+        assertTrue(line(SenderKind.SERVICE), line(SenderKind.SERVICE).contains(""""sender":"service""""))
+        assertEquals("service", JSONObject(line(SenderKind.SERVICE)).getJSONObject("conversation").getString("sender"))
+        assertTrue(line(SenderKind.PERSON), line(SenderKind.PERSON).contains(""""sender":"person""""))
+        assertEquals("person", JSONObject(line(SenderKind.PERSON)).getJSONObject("conversation").getString("sender"))
     }
 }

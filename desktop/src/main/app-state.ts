@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { SIDE_PREFERENCES, type SidePreference } from './bar.ts';
+import { parseThemeChoice, type ThemeChoice } from '../shared/theme.ts';
 
 export interface Rect {
   readonly x: number;
@@ -16,19 +16,17 @@ export interface AppState {
   readonly maximized: boolean;
   readonly activeServiceId: string;
   readonly mutedServiceIds: readonly string[];
-  /** Which side the bar sits on: the screen's outer edge, or always left or right. */
-  readonly barSide: SidePreference;
-  /** The bar hides until the pointer reaches its edge of the window. */
-  readonly barAutoHide: boolean;
-  /** Websites that never go to sleep (they keep their own notifications and unread counts). */
-  readonly keepAwakeServiceIds: readonly string[];
+  /** The dock keeps its strip instead of hiding until the pointer reaches the bottom edge. */
+  readonly dockAlwaysShown: boolean;
+  /** The colour theme of the dock and the Texts page. */
+  readonly theme: ThemeChoice;
 }
 
 export const DEFAULT_SIZE = { width: 1280, height: 820 } as const;
 export const MIN_SIZE = { width: 640, height: 480 } as const;
 
 export function defaultState(serviceIds: readonly string[]): AppState {
-  return { bounds: undefined, maximized: false, activeServiceId: serviceIds[0] ?? '', mutedServiceIds: [], barSide: 'auto', barAutoHide: false, keepAwakeServiceIds: [] };
+  return { bounds: undefined, maximized: false, activeServiceId: serviceIds[0] ?? '', mutedServiceIds: [], dockAlwaysShown: false, theme: 'system' };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,7 +44,8 @@ function parseRect(value: unknown): Rect | undefined {
 
 /**
  * Reads a saved state file. Bad or missing fields fall back to defaults one by one, and ids
- * of services that no longer exist are dropped.
+ * of services that no longer exist are dropped, as are fields from older versions (the side
+ * bar's `barSide` and `barAutoHide`, the dock's `dockAlign`).
  */
 export function parseAppState(raw: unknown, serviceIds: readonly string[]): AppState {
   const fallback = defaultState(serviceIds);
@@ -57,9 +56,8 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[]): AppS
     maximized: raw.maximized === true,
     activeServiceId: known(raw.activeServiceId) ? raw.activeServiceId : fallback.activeServiceId,
     mutedServiceIds: Array.isArray(raw.mutedServiceIds) ? [...new Set(raw.mutedServiceIds.filter(known))] : [],
-    barSide: SIDE_PREFERENCES.find((side) => side === raw.barSide) ?? fallback.barSide,
-    barAutoHide: raw.barAutoHide === true,
-    keepAwakeServiceIds: Array.isArray(raw.keepAwakeServiceIds) ? [...new Set(raw.keepAwakeServiceIds.filter(known))] : [],
+    dockAlwaysShown: raw.dockAlwaysShown === true,
+    theme: parseThemeChoice(raw.theme),
   };
 }
 

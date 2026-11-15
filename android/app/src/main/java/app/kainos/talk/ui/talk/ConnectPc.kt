@@ -59,12 +59,12 @@ private sealed interface Pairing {
 }
 
 /**
- * Connect to PC: pairs this phone with Kainos Talk on a computer so its texts show there. Lists
- * PCs found on the Wi-Fi, takes an address by hand, shows the pairing code, and once paired
- * shows the connection and a way to forget the PC.
+ * Connect to PC, the app's home screen: pairs this phone with Kainos Talk on a computer so its
+ * texts can be read and answered there. Lists PCs found on the Wi-Fi, shows the pairing code, and
+ * once paired shows the connection and a way to forget the PC. [warning] sits under the header.
  */
 @Composable
-fun ConnectPcScreen(sync: SyncControl, onBack: () -> Unit) {
+fun ConnectPcScreen(sync: SyncControl, warning: @Composable () -> Unit = {}) {
     val status by sync.status.collectAsStateWithLifecycle()
     val found by sync.discovered.collectAsStateWithLifecycle()
     var pairing by rememberSaveable(stateSaver = PairingSaver) { mutableStateOf<Pairing>(Pairing.Idle) }
@@ -91,14 +91,17 @@ fun ConnectPcScreen(sync: SyncControl, onBack: () -> Unit) {
     Scaffold(
         containerColor = c.surface,
         topBar = {
-            TalkTopBar {
-                TalkIconButton(TalkIcons.Back, "Back", onBack)
-                Text(
-                    "Connect to PC",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = c.ink,
-                    modifier = Modifier.padding(start = sp.xs).semantics { heading() },
-                )
+            Column {
+                TalkTopBar {
+                    AppMark(MaterialTheme.sizes.appMark, c.teal, c.onTeal)
+                    Text(
+                        "Kainos Talk",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = c.ink,
+                        modifier = Modifier.padding(start = sp.md).semantics { heading() },
+                    )
+                }
+                warning()
             }
         },
     ) { padding ->
@@ -126,12 +129,12 @@ fun ConnectPcScreen(sync: SyncControl, onBack: () -> Unit) {
                 status !is SyncStatus.NotPaired -> PairedPanel(status, onForget = sync::forget, onSmsAccess = sync::refreshInbox)
                 else -> {
                     Text(
-                        "Your inbox (texts, chats and mail) shows in Kainos Talk on your computer while this phone and the computer are on the same Wi-Fi. Nothing goes through the internet.",
+                        "Read and answer this phone's texts in Kainos Talk on your computer while both are on the same Wi-Fi. Nothing goes through the internet.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = c.ink,
                     )
                     Text(
-                        "Open the SMS tab in Kainos Talk on the computer, then pick it here.",
+                        "Open Texts in Kainos Talk on the computer, then pick it here.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = c.soft,
                     )
@@ -201,7 +204,7 @@ private fun CodePanel(code: String, confirmed: Boolean, onMatch: () -> Unit, onC
             .semantics { contentDescription = "Code ${code.toList().joinToString(" ")}" },
     )
     if (!confirmed) BigButton("Codes match", onClick = onMatch, modifier = Modifier.padding(top = MaterialTheme.spacing.lg))
-    LinkButton(if (confirmed) "Cancel" else "They don't match", onClick = onCancel, icon = null)
+    LinkButton(if (confirmed) "Cancel" else "They don't match", onClick = onCancel)
 }
 
 @Composable
@@ -209,7 +212,7 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
     val c = MaterialTheme.switchboard
     val sp = MaterialTheme.spacing
     val (name, line, live) = when (status) {
-        is SyncStatus.Connected -> Triple(status.pcName, "Connected. Your inbox shows on this computer.", true)
+        is SyncStatus.Connected -> Triple(status.pcName, "Connected. Your texts show on this computer.", true)
         is SyncStatus.Connecting -> Triple(status.pcName, "Connecting…", false)
         is SyncStatus.Offline -> Triple(status.pcName, "Can't reach it. Kainos Talk needs to be open on the computer, on the same Wi-Fi as this phone. Retrying.", false)
         is SyncStatus.Mismatch -> Triple(status.pcName, "This phone and the computer run different versions of Kainos Talk. Update both; they reconnect by themselves.", false)
@@ -222,7 +225,7 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
     }
     Text(line, style = MaterialTheme.typography.bodyLarge, color = if (status is SyncStatus.Refused) c.alert else c.ink)
     Text(
-        "Your whole inbox shows on the computer: texts, WhatsApp, Discord, Messenger and mail. It goes only to this computer, over your Wi-Fi.",
+        "Your texts go only to this computer, over your Wi-Fi. You don't need to open this app again: it keeps passing texts on in the background.",
         style = MaterialTheme.typography.bodyMedium,
         color = c.soft,
     )
@@ -232,7 +235,7 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
         style = MaterialTheme.typography.bodyMedium,
         color = c.soft,
     )
-    LinkButton("Forget this computer", onClick = onForget, icon = null)
+    LinkButton("Forget this computer", onClick = onForget)
 }
 
 private val SMS_PERMISSIONS = arrayOf(Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS)
@@ -259,7 +262,7 @@ private fun SmsAccess(onGranted: () -> Unit) {
         style = MaterialTheme.typography.bodyMedium,
         color = c.ink,
     )
-    LinkButton("Allow texts and contacts", onClick = { ask.launch(SMS_PERMISSIONS) }, icon = null)
+    LinkButton("Allow texts and contacts", onClick = { ask.launch(SMS_PERMISSIONS) })
 }
 
 private val PairingSaver = androidx.compose.runtime.saveable.Saver<Pairing, String>(

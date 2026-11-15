@@ -1,12 +1,12 @@
 // Preload for each service page. It routes the page's web notifications through Kainos Talk,
 // so muting works and clicking one opens the right service (Electron gives the main process no
-// other hook into a page's notifications), and reads the page's own unread counter for
-// services that have one.
+// other hook into a page's notifications), reads the page's own unread counter for services
+// that have one, and reports the pointer at the bottom edge for the auto-hiding dock.
 import { contextBridge, ipcRenderer } from 'electron';
 import { Channel, type NotificationRequest } from '../shared/ipc.ts';
 import { findService } from '../shared/services.ts';
-import { reportPointerEdges } from './edges.ts';
 import type { CounterReading } from '../shared/unread.ts';
+import { reportBottomEdge } from './bottom-edge.ts';
 
 interface Bridge {
   show(request: Omit<NotificationRequest, 'id'>): number;
@@ -139,4 +139,4 @@ if (counter) {
   }, 1500);
 }
 
-reportPointerEdges();
+reportBottomEdge();
