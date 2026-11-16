@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { findService } from '../shared/services.ts';
-import { decideNavigation, decidePopupNavigation, decideWindowOpen, popupTitle } from './navigation.ts';
+import { SERVICES, findService } from '../shared/services.ts';
+import { claimingService, decideNavigation, decidePopupNavigation, decideWindowOpen, popupTitle } from './navigation.ts';
 
 const proton = findService('proton-mail')!;
 const discord = findService('discord')!;
@@ -64,4 +64,12 @@ test('a popup title names the host it shows', () => {
   assert.equal(popupTitle('https://account.proton.me/sso', ''), 'account.proton.me');
   assert.equal(popupTitle('https://account.proton.me/sso', 'account.proton.me/sso'), 'account.proton.me — account.proton.me/sso');
   assert.equal(popupTitle('about:blank', 'Hi'), 'about:blank — Hi');
+});
+
+test('a Streamroom invite sent in another service opens in the Streamroom tab; other links do not', () => {
+  assert.equal(claimingService(SERVICES, 'https://streamroom.adenkigo.workers.dev/r/abc123#key')?.id, 'streamroom');
+  assert.equal(decideNavigation(findService('discord')!, 'https://streamroom.adenkigo.workers.dev/r/abc123'), 'external', 'it leaves Discord first');
+  for (const url of ['https://web.whatsapp.com/', 'http://streamroom.adenkigo.workers.dev/r/a', 'https://streamroom.adenkigo.workers.dev.evil.com/', 'not a url']) {
+    assert.equal(claimingService(SERVICES, url), undefined, url);
+  }
 });

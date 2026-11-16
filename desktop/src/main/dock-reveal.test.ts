@@ -63,6 +63,12 @@ test('an open menu keeps it until the menu closes', () => {
   assert.equal(run([{ kind: 'menu', open: false }], s).phase, 'hiding');
 });
 
+test('dragging a tab keeps it while the pointer strays off the dock, until the drop', () => {
+  const s = run([page('edge'), timer, { kind: 'dock-pointer', over: true }, { kind: 'drag', active: true }, { kind: 'dock-pointer', over: false }, page('away'), timer, timer]);
+  assert.equal(s.phase, 'shown');
+  assert.deepEqual(phases([{ kind: 'drag', active: false }, timer, timer], s), ['hiding', 'leaving', 'hidden']);
+});
+
 test('while it does not apply (kept shown, loading, fullscreen) nothing reveals, and inputs are still tracked', () => {
   const off = { ...initialReveal };
   const s = run([page('edge'), timer, { kind: 'keyboard', focused: true }], off);

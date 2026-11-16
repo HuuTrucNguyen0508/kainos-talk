@@ -37,6 +37,13 @@ export class NotificationBook<T extends Closable> {
     return true;
   }
 
+  /** Notification `id` will never be shown: its page closed while its icon was loading. */
+  abandon(sender: number, id: number): void {
+    const key = `${sender}:${id}`;
+    this.#pending.delete(key);
+    this.#cancelled.delete(key);
+  }
+
   /** The page closed notification `id`. */
   close(sender: number, id: number): void {
     const key = `${sender}:${id}`;

@@ -36,6 +36,10 @@ export const Channel = {
   getTheme: 'kainos:get-theme',
   /** Main to Kainos' own pages: the theme choice changed (ThemeChoice). */
   theme: 'kainos:theme',
+  /** Dock to main: move a service to a place among the dock's tabs (id, index from parseDockIndex). */
+  moveService: 'kainos:move-service',
+  /** Dock to main: a tab drag started (true) or ended (false). */
+  dockDrag: 'kainos:dock-drag',
 } as const;
 
 /** The dock's reserved strip along the bottom of the window, in pixels, when it is always shown. */
@@ -73,6 +77,8 @@ export function parseDockSize(raw: unknown): DockSize | undefined {
 }
 
 export type ServiceStatus =
+  /** Its page is closed to free memory; opening its tab wakes it. */
+  | { readonly kind: 'hibernated' }
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready' }
   | { readonly kind: 'failed'; readonly reason: string; readonly host: string };
@@ -99,7 +105,10 @@ export interface PhoneLink {
 
 export interface Snapshot {
   readonly activeId: string;
+  /** Every service, in the dock's order, hidden ones included. */
   readonly services: readonly ServiceSnapshot[];
+  /** Services with no tab in the dock. */
+  readonly hiddenIds: readonly string[];
   /** Null until a phone is paired. */
   readonly phone: PhoneLink | null;
 }
@@ -122,6 +131,10 @@ export interface KainosApi {
   reportPointer(over: boolean): void;
   reportKeyboard(focused: boolean): void;
   dismiss(): void;
+  /** Asks main to make the service the tab at `index` among the dock's tabs. */
+  moveService(serviceId: string, index: number): void;
+  /** A tab drag started or ended; an auto-hiding dock stays shown in between. */
+  reportDrag(active: boolean): void;
 }
 
 export interface MenuPoint {
@@ -135,6 +148,11 @@ export function parseMenuPoint(raw: unknown): MenuPoint | undefined {
   const { x, y } = raw as Record<string, unknown>;
   const ok = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n < 100_000;
   return ok(x) && ok(y) ? { x: Math.round(x), y: Math.round(y) } : undefined;
+}
+
+/** A place among the dock's tabs from the dock page is untrusted input: a whole number, 0 or more. */
+export function parseDockIndex(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw < 1000 ? raw : undefined;
 }
 
 /** A page notification forwarded by a service view. */

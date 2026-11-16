@@ -34,3 +34,15 @@ test('denies other origins, other permissions and unknown media types', () => {
   }
   assert.equal(ask('notifications', ''), false);
 });
+
+const room = findService('streamroom')!;
+const askRoom = (permission: string, origin = 'https://streamroom.adenkigo.workers.dev') => allowPermission(room, { permission, origin, mediaTypes: [] });
+
+test('a call app may also share the screen and pick the speaker, on its own pages only', () => {
+  assert.equal(askRoom('display-capture'), true);
+  assert.equal(askRoom('speaker-selection'), true);
+  assert.equal(allowPermission(room, { permission: 'media', origin: 'https://streamroom.adenkigo.workers.dev/r/abc', mediaTypes: ['audio'] }), true);
+  assert.equal(askRoom('display-capture', 'https://evil.workers.dev'), false);
+  assert.equal(askRoom('display-capture', 'http://streamroom.adenkigo.workers.dev'), false);
+  for (const permission of ['geolocation', 'clipboard-read', 'midi', 'hid']) assert.equal(askRoom(permission), false, permission);
+});

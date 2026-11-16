@@ -20,9 +20,12 @@ const OWN_PAGE_PERMISSIONS = new Set([
   'persistent-storage',
 ]);
 
+/** Also granted to a call app's own https pages (`calls` in the registry). */
+const CALL_PERMISSIONS = new Set(['display-capture', 'speaker-selection']);
+
 /**
  * Notifications, copy, fullscreen, persistent storage and microphone/camera are allowed for
- * the service's own https pages. Every other permission, and any request from another origin,
+ * the service's own https pages, and screen sharing and speaker choice for a call app's. Every other permission, and any request from another origin,
  * is denied.
  */
 export function allowPermission(service: ServiceDefinition, ask: PermissionAsk): boolean {
@@ -36,5 +39,8 @@ export function allowPermission(service: ServiceDefinition, ask: PermissionAsk):
   if (!own) return false;
   if (OWN_PAGE_PERMISSIONS.has(ask.permission)) return true;
   if (ask.permission === 'media') return ask.mediaTypes.every((type) => type === 'audio' || type === 'video');
+  // A call app shares the screen (the system's own picker chooses what) and plays the call on
+  // the speaker the user picks.
+  if (service.calls) return CALL_PERMISSIONS.has(ask.permission);
   return false;
 }

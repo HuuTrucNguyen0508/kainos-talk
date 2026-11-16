@@ -54,3 +54,18 @@ test('F6 moves between the sidebar and the service', () => {
   assert.equal(shortcutFor(press('F6', 'F6', { shift: true }), 'linux', 3), undefined);
   assert.equal(shortcutFor(press('F6', 'F6', { type: 'keyUp' }), 'linux', 3), undefined);
 });
+
+test('F5 and Ctrl+R reload the open service; Shift or Ctrl+F5 skips the cache', () => {
+  const reload = { kind: 'reload', ignoreCache: false };
+  const hard = { kind: 'reload', ignoreCache: true };
+  assert.deepEqual(shortcutFor(press('F5', 'F5'), 'linux', 3), reload);
+  assert.deepEqual(shortcutFor(press('F5', 'F5', { shift: true }), 'linux', 3), hard);
+  assert.deepEqual(shortcutFor(press('F5', 'F5', ctrl), 'linux', 3), hard);
+  assert.deepEqual(shortcutFor(press('r', 'KeyR', ctrl), 'linux', 3), reload);
+  assert.deepEqual(shortcutFor(press('R', 'KeyR', { control: true, shift: true }), 'linux', 3), hard);
+  assert.deepEqual(shortcutFor(press('r', 'KeyR', { meta: true }), 'darwin', 3), reload);
+  assert.equal(shortcutFor(press('r', 'KeyR'), 'linux', 3), undefined);
+  assert.equal(shortcutFor(press('r', 'KeyR', { control: true, alt: true }), 'linux', 3), undefined);
+  assert.equal(shortcutFor(press('F5', 'F5', { alt: true }), 'linux', 3), undefined);
+  assert.equal(shortcutFor(press('F5', 'F5', { type: 'keyUp' }), 'linux', 3), undefined);
+});

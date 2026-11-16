@@ -8,7 +8,7 @@ import { buildSync, transformSync } from 'esbuild';
 function harness() {
   return runInNewContext(`(() => {
     const mainListeners = new Map(), pageListeners = new Map(), natives = [], requests = [];
-    let release;
+    let release, destroyed = false;
     const loading = new Promise(resolve => release = resolve);
     class NativeNotification extends EventTarget {
       static isSupported() { return true; }
@@ -20,7 +20,7 @@ function harness() {
     const contents = { id: 1, session: { fetch: async () => {
       requests.push(1); await loading;
       return new Response(new Uint8Array([1]));
-    } }, isDestroyed: () => false, send: (channel, id) => pageListeners.get(channel)?.({}, id) };
+    } }, isDestroyed: () => destroyed, send: (channel, id) => pageListeners.get(channel)?.({}, id) };
     let muted = false;
     const electron = {
       Notification: NativeNotification,
@@ -40,7 +40,7 @@ function harness() {
     module.exports.forwardNotifications({ runtimeFor: () => ({ service: { id: 'test', iconHosts: ['example.org'] } }), isMuted: () => muted, fallbackIcon: {}, focusService() {} });
     ${transformSync(readFileSync(new URL('../preload/service.ts', import.meta.url), 'utf8').split('/** Main passes')[0]!.replace(/^import .*;$/gm, '').replace("import type { CounterReading } from '../shared/unread.ts';", ''), {loader:'ts'}).code}
     return { create: (options = {}) => new window.Notification('hello', options), live: () => window.Notification.live.size,
-      dismiss: () => natives.at(-1).close(), release, requests, natives, mute: () => muted = true };
+      dismiss: () => natives.at(-1).close(), release, requests, natives, mute: () => muted = true, destroy: () => destroyed = true };
   })()`, {
     EventTarget, Event, URL, queueMicrotask, Response, Uint8Array, Buffer, AbortSignal,
     window: { Notification: { permission: 'granted' } }, location: { href: 'https://example.org/' },
@@ -80,4 +80,13 @@ test('twenty notifications share one avatar fetch and decoded icon', async () =>
   h.create({ icon:'https://example.org/avatar' }); await tick();
   assert.equal(h.requests.length, 1);
   assert.equal(h.natives.length, 21);
+});
+
+test('a page closed while its icon loads (its service hibernated) shows no notification', async () => {
+  const h = harness();
+  h.create({ icon: 'https://example.org/avatar' });
+  await tick();
+  h.destroy();
+  h.release(); await tick();
+  assert.equal(h.natives.length, 0);
 });

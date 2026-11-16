@@ -7,7 +7,7 @@ import type { PagePointer } from '../shared/dock-edge.ts';
  *   hidden ──pointer at the bottom edge──▶ revealing ──dwell──▶ shown
  *   shown ──nothing holds it──▶ hiding ──delay──▶ leaving ──slide──▶ hidden
  *
- * Keyboard focus in the dock or an open dock menu shows it at once. The pointer near the
+ * Keyboard focus in the dock, an open dock menu or a tab being dragged shows it at once. The pointer near the
  * bottom, over the dock, or gone out through the window's bottom edge keeps it shown.
  */
 
@@ -24,6 +24,8 @@ export interface RevealState {
   /** Keyboard focus is in the dock (F6, Tab); a click's focus does not count. */
   readonly keyboard: boolean;
   readonly menu: boolean;
+  /** A tab is being dragged along the dock; the pointer may stray off it meanwhile. */
+  readonly drag: boolean;
 }
 
 export type RevealEvent =
@@ -31,6 +33,7 @@ export type RevealEvent =
   | { readonly kind: 'dock-pointer'; readonly over: boolean }
   | { readonly kind: 'keyboard'; readonly focused: boolean }
   | { readonly kind: 'menu'; readonly open: boolean }
+  | { readonly kind: 'drag'; readonly active: boolean }
   /** Escape in the dock. */
   | { readonly kind: 'dismiss' }
   | { readonly kind: 'active'; readonly active: boolean }
@@ -47,14 +50,14 @@ export const REVEAL_TIMING = {
   leaving: 180,
 } as const satisfies Partial<Record<RevealPhase, number>>;
 
-export const initialReveal: RevealState = { active: false, phase: 'hidden', page: 'away', edgeArmed: true, overDock: false, keyboard: false, menu: false };
+export const initialReveal: RevealState = { active: false, phase: 'hidden', page: 'away', edgeArmed: true, overDock: false, keyboard: false, menu: false, drag: false };
 
 /** On screen: the dock view has its bounds (sliding out included). */
 export const onScreen = (phase: RevealPhase): boolean => phase === 'shown' || phase === 'hiding' || phase === 'leaving';
 /** Drawn in its shown place rather than sliding away. */
 export const raised = (phase: RevealPhase): boolean => phase === 'shown' || phase === 'hiding';
 
-const urgent = (s: RevealState) => s.keyboard || s.menu;
+const urgent = (s: RevealState) => s.keyboard || s.menu || s.drag;
 const atEdge = (s: RevealState) => s.edgeArmed && (s.page === 'edge' || s.page === 'below');
 const held = (s: RevealState) => urgent(s) || s.overDock || s.page !== 'away';
 
@@ -86,6 +89,8 @@ export function stepReveal(s: RevealState, event: RevealEvent): RevealState {
       return settle(s.keyboard === event.focused ? s : { ...s, keyboard: event.focused });
     case 'menu':
       return settle(s.menu === event.open ? s : { ...s, menu: event.open });
+    case 'drag':
+      return settle(s.drag === event.active ? s : { ...s, drag: event.active });
     case 'dismiss':
       if (!s.active || !onScreen(s.phase)) return { ...s, keyboard: false };
       return { ...s, phase: 'leaving', keyboard: false, overDock: false, edgeArmed: false };

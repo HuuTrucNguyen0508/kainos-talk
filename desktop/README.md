@@ -1,9 +1,10 @@
 # Kainos Talk desktop
 
-Electron shell that hosts Proton Mail, Discord, WhatsApp and Messenger in one window, plus a Texts
+Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger and Streamroom in one window, plus a Texts
 page for the phone's SMS and RCS. A dock that slides up from the bottom of the window switches between them; each
 service runs in its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
-All four websites load at startup and stay loaded, so they keep notifying.
+The websites load at startup and stay loaded, so they keep notifying, unless you hibernate one;
+Streamroom starts hibernated.
 
 ## Commands
 
@@ -41,7 +42,8 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `src/shared/unread.ts` | Unread parsing from page titles, totals, badge and window-title labels. |
 | `src/main/index.ts` | Window, tray, menus, shortcuts, saved state, dock IPC. |
 | `src/main/bar.ts` | Layout: the page under the floating dock, or above the always-shown dock's strip. |
-| `src/main/dock-reveal.ts` | When the auto-hiding dock shows: a small state machine fed by the pointer, keyboard and menus. |
+| `src/main/dock-reveal.ts` | When the auto-hiding dock shows: a small state machine fed by the pointer, keyboard, menus and tab drags. |
+| `src/shared/dock-order.ts` | The dock's service order and hidden services: loading them, moving a tab, where a dragged tab lands. |
 | `src/shared/theme.ts` | The colour themes: ids, menu names, and each one's page colour, which main paints behind the pages. |
 | `src/preload/theme.ts` | Keeps `data-theme` on the dock and Texts pages' root on the picked theme. |
 | `src/preload/bottom-edge.ts` | Reports the pointer at a page's bottom edge, or leaving the window through it, for the dock. |
@@ -50,8 +52,9 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `src/main/mdns.ts` | Announces the sync server: Avahi over D-Bus, or an in-app responder; LAN interfaces only. |
 | `test/fake-phone.ts` | A protocol-speaking stand-in for the phone, used by the unit and smoke tests. |
 | `src/main/service-runtime.ts` | One service view: session, user agent, permissions, navigation rules, load status. |
-| `src/main/navigation.ts` | Which links stay in a service, open as a popup, or go to the system browser. |
-| `src/main/permissions.ts` | Notifications and mic/camera for the service's own origin; everything else denied. |
+| `src/main/navigation.ts` | Which links stay in a service, open as a popup, open in a service that claims them (Streamroom), or go to the system browser. |
+| `src/main/screen-share.ts` | Screen sharing for a call app (Streamroom): the system's picker, or a menu of screens and windows. |
+| `src/main/permissions.ts` | Notifications and mic/camera for the service's own origin, plus screen sharing and speaker choice for a call app; everything else denied. |
 | `src/main/notifications.ts` | Turns page notifications into native ones; mute and click-to-focus. |
 | `src/preload/app.ts` | The dock page's only API, `window.kainos`. |
 | `src/preload/service.ts` | Routes each page's `Notification` calls through the app (see below). |
@@ -62,6 +65,10 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 
 - **Browser identity.** Every service sees stock Chrome's user agent for this platform
   (`Chrome/<major>.0.0.0`, no Electron token). WhatsApp Web refuses anything else.
+- **HDR screens (Linux).** Chromium's Wayland colour management is turned off
+  (`--disable-features=WaylandWpColorManagerV1`). With it on, Hyprland's HDR mode showed the
+  whole window greyish, with raised blacks and faded colours, while other windows looked right;
+  screenshots looked normal. Without it the window is plain SDR and converted like the others.
 - **Notifications.** Electron gives the main process no hook into a page's notifications, so
   the service preload replaces `window.Notification` and `ServiceWorkerRegistration.showNotification`
   in the page with a version that hands each one to the app. Apart from Vencord in Discord,
@@ -84,8 +91,8 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 - **Texts and the websites.** Texts, first in the dock, shows the SMS and RCS conversations the paired
   phone sends, lets you reply or start a new text, and raises a desktop notification for each new
   text (mute it from its menu like any service). Its id stays `inbox`, because that names its
-  login partition and the saved state. The four websites load at startup, never sleep, and raise
-  their own notifications. The window title and the tray lamp count every service. The phone app
+  login partition and the saved state. The websites load at startup and raise their own
+  notifications until you hibernate one (see **Hibernate**). The window title and the tray lamp count every service. The phone app
   only syncs texts; `docs/pc-inbox-plan.md` records the earlier plan that mirrored every app and
   slept the websites, which was dropped.
 - **The dock** hides until it is wanted, then slides up over the bottom of the page; the page never
@@ -93,7 +100,7 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   (160ms, so passing by on the way to a message box does not flash it), or leaves the window
   through that edge, which is where the pointer ends in a tiled window with gaps (Hyprland). It
   stays while the pointer is on it or in the strip-high band along the bottom, while keyboard
-  focus is in it (F6) and while one of its menus is open, and slides away 400ms after the pointer
+  focus is in it (F6), while one of its menus is open and while a tab is being dragged, and slides away 400ms after the pointer
   goes up into the page, when focus leaves it, or at once on Escape. While shown it covers the
   page's message box. Its view is only as big as the islands and their shadow, so the rest of the
   page keeps its clicks. The two islands sit together in the middle of the window. **Always show
@@ -107,11 +114,36 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   one tab per service (logo, name, then its unread count, a dot for new activity, a bell for muted,
   a red mark when it failed to load or, on Texts, when the phone is not connected). When the names
   no longer fit, every tab but the active one drops its name, then the active name hides too.
-  If needed, the service tabs scroll horizontally; the mark and phone stay reachable. The right island shows the paired
+  If needed, the service tabs scroll horizontally; the mark and phone stay reachable.
+  **Rearranging:** drag a tab along the dock to move it (a press that moves less than 5px is
+  still a click); its neighbours step aside and a dashed slot shows where it lands. Alt+Left and
+  Alt+Right move the focused tab, and each service's menu has **Move left** and **Move right**.
+  **Hide from dock** in a service's menu takes its tab out; the service keeps running, notifying
+  and counting in the title and tray unless muted. Hiding the open service opens the next tab.
+  **Hidden services**, in the Kainos mark's menu, shows a hidden service again in its old place.
+  Texts cannot be hidden. The order and hidden services are kept with the window state, and a
+  service added in a later version appears at the end. The right island shows the paired
   phone and whether it is connected; click it for Open Texts and **Forget this phone**.
   Long device names truncate with the full name in a tooltip. While a service loads or fails, the
   dock page covers the whole window to say why, with the dock in its strip; a page in fullscreen
   covers the dock, which does not come up until it leaves fullscreen.
+- **Hibernate**, in a website's menu, closes its page to free the memory it holds: the page's
+  renderer process ends, and nothing of it stays loaded. The login, cookies and site storage stay,
+  so it wakes signed in. A hibernating tab's logo turns grey with a moon after its name; it shows
+  no unread count and raises no notifications. Opening its tab wakes it and loads its start page;
+  **Wake**, in the same menu, loads it without opening it. If the hibernated service was open, the
+  tab next to it opens, preferring one that is awake; hiding a tab does the same. Hibernating
+  services are kept with the window state. The service opened at launch is always awake, and
+  Texts cannot hibernate (its texts live in the app itself, not in a page).
+- **Streamroom** opens `streamroom.adenkigo.workers.dev`, the Streamroom project's rooms for
+  screen sharing and voice. It starts hibernated the first time Kainos knows it, since a room is
+  opened for a call and then left; its tab wakes it. It may use the microphone, share the screen
+  and pick the speaker. Sharing goes through the system's picker: on Linux under Wayland the
+  desktop portal (`xdg-desktop-portal`) asks what to share, on macOS the system picker does, and
+  elsewhere a menu lists the screens and windows. Electron captures system sound with the screen
+  only on Windows. A Streamroom link opened in any other service (an invite sent in Discord or
+  WhatsApp) opens in the Streamroom tab, waking it, instead of the browser. Files sent in a room
+  ask where to save them.
 - **Messenger** opens `www.messenger.com`. Sign-in and security checks may pass through
   `www.facebook.com`, which stays inside the view.
 - **Texts** is not a website. Google refuses its sign-in inside Kainos ("This browser or app may not
@@ -161,24 +193,31 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   connections (linking GitHub and so on) therefore open in the browser.
 - **Permissions.** A service's own pages may show notifications, use the microphone and camera,
   copy to the clipboard, go fullscreen (the page then covers the whole window) and keep their
-  storage from being evicted. Reading the clipboard, screen capture, location and everything
+  storage from being evicted. Streamroom, a call app, may also share the screen and choose the
+  speaker. Reading the clipboard, screen capture for every other service, location and everything
   else are denied, and no client certificate is ever sent.
 - **Sign out** stops the page and closes its popups, then clears the service's cookies,
   storage and cache, then reloads it. A page's "leave site?" prompt never blocks Reload or
   Sign out.
 - **Saved state** lives in `kainos-state.json` in Electron's userData folder: window bounds,
-  maximised, last active service, muted services and whether the dock is always shown.
+  maximised, last active service, muted services, whether the dock is always shown, the theme,
+  the dock's service order and hidden services, and the hibernating services.
 - **Close** hides the window to the tray when a tray is running. On Linux that means a
   StatusNotifierItem host such as a panel or waybar; with none (common on Wayland compositors),
   closing quits.
 - **Shortcuts** work from the dock or inside a page:
-  - Ctrl+1..5 (Cmd on macOS) switch service. The digit is the physical key, so it works on
-    AZERTY without Shift.
+  - Ctrl+1..9 (Cmd on macOS) open the tab in that place in the dock, as you have arranged it
+    (hidden services are skipped). The digit is the physical key, so it works on AZERTY without
+    Shift.
   - Ctrl+Q (Cmd+Q) quits.
+  - F5 or Ctrl+R (Cmd+R) reloads the open service, which picks up a new version of the site
+    (Streamroom after a deploy). Shift+F5, Ctrl+F5 or Ctrl+Shift+R fetch every file again,
+    past the cache.
   - F6 moves keyboard focus from the page to its tab in the dock (bringing a hidden dock up), and
-    back. Left and right arrows move between the tabs; Escape goes back to the page.
-  - On a dock tab, the Menu key or Shift+F10 opens the service menu (Reload, Mute, Sign out)
-    at the tab.
+    back. Left and right arrows move between the tabs, Alt+Left and Alt+Right move the focused
+    tab (its new place is announced to screen readers); Escape goes back to the page.
+  - On a dock tab, the Menu key or Shift+F10 opens the service menu (Reload or Wake, Hibernate,
+    Mute, Move left, Move right, Hide from dock, Sign out) at the tab.
 
 ## After you sign in
 

@@ -17,7 +17,9 @@ const desktop = fileURLToPath(new URL('..', import.meta.url));
 // KAINOS_VERIFY_DIR moves the screenshots elsewhere, for example to keep an earlier set.
 const verify = process.env.KAINOS_VERIFY_DIR ?? join(desktop, '.verify');
 const electronPath = createRequire(import.meta.url)('electron') as string;
-const SERVICE_IDS = ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger'] as const;
+const SERVICE_IDS = ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger', 'streamroom'] as const;
+/** The services that run from startup; Streamroom starts hibernated. */
+const AWAKE_IDS = SERVICE_IDS.filter((id) => id !== 'streamroom');
 /** The SMS sync server's port in the smoke run, away from a real Kainos Talk's. */
 const syncPort = 49_000 + Math.floor(Math.random() * 500);
 let smsPhone: FakePhoneLink | undefined;
@@ -275,6 +277,12 @@ function clickMenuItem(app: ElectronApplication, label: string): Promise<boolean
     return Boolean(item);
   }, label);
 }
+/** The last recorded menu's items, a disabled one in brackets. */
+const menuItems = (app: ElectronApplication) =>
+  app.evaluate(() => {
+    const all = (globalThis as Record<string, unknown>).__menus as { menu: Electron.Menu }[];
+    return (all.at(-1)?.menu.items ?? []).filter((item) => item.type !== 'separator').map((item) => (item.enabled ? item.label : `(${item.label})`));
+  });
 /** The items of a submenu of the last recorded menu, the checked one marked with a *. */
 const submenuLabels = (app: ElectronApplication, label: string) =>
   app.evaluate((_electron, label) => {
@@ -467,7 +475,12 @@ async function pressShortcut(app: ElectronApplication, page: Page, target: 'dock
   return poll(() => activeIndex(page), (index) => index === digit - 1, 5000);
 }
 
-const tab = (page: Page, id: ServiceId) => page.locator('.tab').nth(SERVICE_IDS.indexOf(id));
+const tab = (page: Page, id: ServiceId) => page.locator(`.tab[data-id="${id}"]`);
+/** The dock's tabs, left to right, by service id. */
+const tabOrder = (page: Page) => page.locator('.tab').evaluateAll((items) => items.map((item) => (item as HTMLElement).dataset.id).join(' '));
+const activeTab = (page: Page) => page.evaluate(() => document.querySelector<HTMLElement>('.tab[aria-current="page"]')?.dataset.id ?? 'none');
+/** What the dock last said to screen readers. */
+const announced = (page: Page) => page.evaluate(() => document.getElementById('announce')!.textContent ?? '');
 const status = (page: Page, id: ServiceId) => tab(page, id).getAttribute('data-status');
 const activeIndex = (page: Page) => page.locator('.tab').evaluateAll((items) => items.findIndex((item) => item.getAttribute('aria-current') === 'page'));
 /** What a dock tab shows after its name: "count:4", "dot:", "muted:", "failed:", "offline:" or ":" for nothing. */
@@ -586,8 +599,9 @@ async function run(profile: string): Promise<void> {
       await screenshot(app, '01-loading-light');
     }
 
-    // Every service loads at startup, the ones not on screen too, and none ever goes to sleep.
-    for (const id of SERVICE_IDS) {
+    // Every service loads at startup, the ones not on screen too, except Streamroom, which
+    // starts hibernated (checked with its own section below).
+    for (const id of AWAKE_IDS) {
       const final = await poll(() => status(page, id), (value) => value !== 'loading', 90_000);
       check(final === 'ready', `${id} loads at startup`, `status ${final}`);
     }
@@ -595,7 +609,7 @@ async function run(profile: string): Promise<void> {
     if (startupFocus) check(true, 'the active service (WhatsApp) has keyboard focus once it is ready');
     else skip('the active service has keyboard focus once it is ready', 'the off-screen window never reports focus, so the app waits for it');
 
-    for (const id of SERVICE_IDS) {
+    for (const id of AWAKE_IDS) {
       const ua = await inService<string>(app, id, 'navigator.userAgent');
       check(/Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/.test(ua) && !/Electron|Kainos/i.test(ua), `${id} sees a plain Chrome user agent`, ua);
     }
@@ -1022,7 +1036,7 @@ async function run(profile: string): Promise<void> {
     // about Kainos, so each service page is tried and only answers from Kainos count.
     const clipboard = async (call: string) => {
       const results: string[] = [];
-      for (const [index, id] of SERVICE_IDS.entries()) {
+      for (const [index, id] of AWAKE_IDS.entries()) {
         // The SMS view is Kainos' own page; it never copies to the clipboard.
         if (id === 'inbox') continue;
         await pressShortcut(app, page, 'dock', index + 1);
@@ -1126,8 +1140,8 @@ async function run(profile: string): Promise<void> {
     const byMouse = (await poll(() => menus(app), (all) => all.length > 0, 5000)).at(-1);
     check(byMouse !== undefined && byMouse.x === undefined && byMouse.labels[0] === 'Reload Discord', 'a right-click opens the Discord menu at the pointer', JSON.stringify(byMouse));
     check(
-      JSON.stringify(byMouse?.labels.filter(Boolean)) === '["Reload Discord","Unmute notifications","Sign out of Discord…"]',
-      "a website's menu offers Reload, mute and Sign out, and nothing about sleeping",
+      JSON.stringify(byMouse?.labels.filter(Boolean)) === '["Reload Discord","Hibernate","Unmute notifications","Move left","Move right","Hide from dock","Sign out of Discord…"]',
+      "a website's menu offers Reload, Hibernate, mute, moving and hiding its tab, and Sign out",
       JSON.stringify(byMouse?.labels),
     );
     const box = await tab(page, 'discord').boundingBox();
@@ -1205,7 +1219,8 @@ async function run(profile: string): Promise<void> {
     await clickMenuItem(app, 'Sign out');
     const report = await poll(() => boxes(app), (all) => all.some((b) => b.type === 'error'), 10_000);
     check(report.some((b) => b.type === 'error' && b.message === 'Could not sign out of Proton Mail'), 'a failed sign-out is reported to the user', JSON.stringify(report.at(-1)));
-    check((await poll(() => status(page, 'proton-mail'), (value) => value === 'ready', 60_000)) === 'ready', 'Proton Mail loads again after the failed sign-out');
+    const afterFailedSignOut = await poll(() => status(page, 'proton-mail'), (value) => value === 'ready', 60_000);
+    check(afterFailedSignOut === 'ready', 'Proton Mail loads again after the failed sign-out', `${afterFailedSignOut} at ${await serviceUrl(app, 'proton-mail')}`);
     await page.evaluate(() => undefined);
     await app.evaluate(({ nativeTheme }) => {
       nativeTheme.themeSource = 'system';
@@ -1268,7 +1283,7 @@ async function run(profile: string): Promise<void> {
     await revealDock(app, page, 'whatsapp');
     await page.locator('#dock-options').click();
     const dockMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000)).at(-1);
-    check(JSON.stringify(dockMenu?.labels) === '["Always show the dock","Theme"]', 'the Kainos mark opens the dock options: Always show the dock, Theme', JSON.stringify(dockMenu?.labels));
+    check(JSON.stringify(dockMenu?.labels) === '["Always show the dock","Hidden services","Theme"]', 'the Kainos mark opens the dock options: Always show the dock, Hidden services, Theme', JSON.stringify(dockMenu?.labels));
     const themeItems = await submenuLabels(app, 'Theme');
     check(JSON.stringify(themeItems) === '["*Match system","Switchboard","Daylight","Bakelite","Carbon","Aubergine"]', 'Theme offers Match system (picked) and the five themes', JSON.stringify(themeItems));
     await clickMenuItem(app, 'Always show the dock');
@@ -1353,6 +1368,306 @@ async function run(profile: string): Promise<void> {
     check(/Connect your phone/.test(forgotten), '... where Texts asks to connect a phone again');
     await pressShortcut(app, page, 'dock', digit('whatsapp'));
 
+    // Streamroom starts hibernated: no page, a moon on its tab. Opening its tab wakes it,
+    // Hibernate in its menu closes its page again (and its renderer process with it), Wake
+    // brings it back without opening it, and an invite link sent in another service opens in
+    // its tab instead of the browser.
+    {
+      const room = 'https://streamroom.adenkigo.workers.dev';
+      const pageViews = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.contentView.children.length - 1);
+      const roomPages = () =>
+        app.evaluate(({ webContents, session }) => webContents.getAllWebContents().filter((c) => !c.isDestroyed() && c.session === session.fromPartition('persist:service-streamroom')).length);
+      const savedAsleep = () => (JSON.parse(readFileSync(stateFile, 'utf8')) as { hibernatedServiceIds?: string[] }).hibernatedServiceIds?.join(' ') ?? '';
+      const openMenu = async (label: string) => {
+        await tab(page, 'streamroom').click({ button: 'right' });
+        return (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === label, 5000)).at(-1)?.labels[0] === label;
+      };
+      check((await status(page, 'streamroom')) === 'hibernated' && (await tabState(page, 'streamroom')) === 'asleep:', 'Streamroom starts hibernated, with a moon on its tab', `${await status(page, 'streamroom')} ${await tabState(page, 'streamroom')}`);
+      check((await pageViews()) === AWAKE_IDS.length && (await roomPages()) === 0, '... and has no page while it sleeps', `${await pageViews()} views, ${await roomPages()} Streamroom pages`);
+      check(/hibernating/.test((await tab(page, 'streamroom').getAttribute('aria-label')) ?? ''), '... which its tab says to screen readers', String(await tab(page, 'streamroom').getAttribute('aria-label')));
+      await lowerDock(app, 'whatsapp');
+      await revealDock(app, page, 'whatsapp');
+      await page.mouse.move(2, 2);
+      await screenshot(app, '05-streamroom-hibernating');
+
+      await tab(page, 'streamroom').click();
+      const woke = await poll(() => status(page, 'streamroom'), (value) => value === 'ready', 60_000);
+      check(woke === 'ready' && (await activeTab(page)) === 'streamroom', 'opening its tab wakes Streamroom and shows it', `${woke}, active ${await activeTab(page)}`);
+      check((await pageViews()) === SERVICE_IDS.length && (await tabState(page, 'streamroom')) === ':', '... with a page of its own again and no moon', `${await pageViews()} views`);
+      check(!savedAsleep().includes('streamroom'), '... and is saved as awake', savedAsleep());
+      live(/Streamroom/i.test(await inService<string>(app, 'streamroom', 'document.title + document.body.innerText')), 'Streamroom shows its start page (live site)', await serviceUrl(app, 'streamroom'));
+      await sleep(1500);
+      await screenshot(app, '06-streamroom-awake');
+
+      // Screen sharing: Streamroom's request reaches the picker (stubbed here to offer nothing,
+      // which the page sees as a cancelled share); Discord's never does.
+      await app.evaluate(({ desktopCapturer }) => {
+        const g = globalThis as Record<string, unknown>;
+        g.__pickerAsked = 0;
+        desktopCapturer.getSources = async () => {
+          g.__pickerAsked = (g.__pickerAsked as number) + 1;
+          return [];
+        };
+      });
+      const share = (id: ServiceId) => inService<string>(app, id, `navigator.mediaDevices.getDisplayMedia({ video: true }).then(() => 'shared', (e) => e.name)`, true);
+      const roomShare = await share('streamroom');
+      const asked = await app.evaluate(() => (globalThis as Record<string, unknown>).__pickerAsked as number);
+      // Electron reports a picker closed without a choice as AbortError, a refusal as NotAllowedError.
+      check(asked === 1 && roomShare === 'AbortError', 'Streamroom may share the screen: its request opens the picker, and closing it cancels', `${asked} picker, page got ${roomShare}`);
+      const discordShare = await share('discord');
+      const askedAfter = await app.evaluate(() => (globalThis as Record<string, unknown>).__pickerAsked as number);
+      check(askedAfter === 1 && discordShare === 'NotAllowedError', 'Discord may not: its request is refused without reaching a picker', `${askedAfter} picker, page got ${discordShare}`);
+
+      check(await openMenu('Reload Streamroom'), "Streamroom's menu opens");
+      check(
+        JSON.stringify(await menuItems(app)) === '["Reload Streamroom","Hibernate","Mute notifications","Move left","(Move right)","Hide from dock","Sign out of Streamroom…"]',
+        "an awake website's menu offers Hibernate",
+        JSON.stringify(await menuItems(app)),
+      );
+      await clickMenuItem(app, 'Hibernate');
+      check((await poll(() => status(page, 'streamroom'), (value) => value === 'hibernated', 5000)) === 'hibernated', 'Hibernate puts Streamroom back to sleep');
+      check((await poll(() => activeTab(page), (id) => id === 'messenger', 3000)) === 'messenger', '... and, as it was open, opens Messenger, the tab before it', await activeTab(page));
+      check((await poll(roomPages, (n) => n === 0, 5000)) === 0 && (await pageViews()) === AWAKE_IDS.length, '... closing its page and renderer process', `${await roomPages()} Streamroom pages`);
+      check((await poll(async () => savedAsleep(), (ids) => ids === 'streamroom', 3000)) === 'streamroom', '... and is saved at once', savedAsleep());
+
+      check(await openMenu('Wake Streamroom'), 'a hibernating service offers Wake instead of Reload', JSON.stringify((await menus(app)).at(-1)?.labels));
+      check(!(await menuItems(app)).includes('Hibernate'), '... and no Hibernate', JSON.stringify(await menuItems(app)));
+      await clickMenuItem(app, 'Wake');
+      check((await poll(() => status(page, 'streamroom'), (value) => value === 'ready', 60_000)) === 'ready' && (await activeTab(page)) === 'messenger', 'Wake loads Streamroom where it is, without opening its tab', await activeTab(page));
+      await openMenu('Reload Streamroom');
+      await clickMenuItem(app, 'Hibernate');
+      await poll(() => status(page, 'streamroom'), (value) => value === 'hibernated', 5000);
+
+      // An invite sent in WhatsApp: the link wakes Streamroom straight onto it.
+      await pressShortcut(app, page, 'dock', digit('whatsapp'));
+      await app.evaluate(({ app: electronApp }) => {
+        const g = globalThis as Record<string, unknown>;
+        g.__external = [];
+        electronApp.on('kainos-external' as 'ready', (url: unknown) => (g.__external as unknown[]).push(url));
+      });
+      await inService(app, 'whatsapp', `window.open(${JSON.stringify(`${room}/?invite=smoke`)}, '_blank'); 0`, true);
+      const joined = await poll(() => activeTab(page), (id) => id === 'streamroom', 5000);
+      const at = await poll(() => serviceUrl(app, 'streamroom'), (url) => url.includes('invite=smoke'), 30_000);
+      const external = await app.evaluate(() => (globalThis as Record<string, unknown>).__external as string[]);
+      check(joined === 'streamroom' && at.startsWith(`${room}/?invite=smoke`) && external.length === 0, 'a Streamroom link opened in WhatsApp wakes Streamroom on that link, not the browser', JSON.stringify({ joined, at, external }));
+      await poll(() => status(page, 'streamroom'), (value) => value === 'ready', 60_000);
+      await inService(app, 'whatsapp', `window.open('https://example.com/kainos-smoke', '_blank'); 0`, true);
+      const others = await poll(() => app.evaluate(() => (globalThis as Record<string, unknown>).__external as string[]), (list) => list.length > 0, 5000);
+      check(JSON.stringify(others) === '["https://example.com/kainos-smoke"]', '... while other links still go to the browser', JSON.stringify(others));
+
+      // Asleep again for the rest of the run.
+      await openMenu('Reload Streamroom');
+      await clickMenuItem(app, 'Hibernate');
+      await poll(() => status(page, 'streamroom'), (value) => value === 'hibernated', 5000);
+      await pressShortcut(app, page, 'dock', digit('whatsapp'));
+    }
+
+    // Rearranging the dock: dragging a tab, Alt+arrows, Move left and right, Hide from dock and
+    // back. On the floating dock at 1720×1440, dark (Bakelite); shots in desktop/.verify/dock-order/.
+    {
+      mkdirSync(join(verify, 'dock-order'), { recursive: true });
+      const [w0, h0] = await contentSize(app);
+      await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.setContentSize(1720, 1440));
+      await app.evaluate(({ nativeTheme }) => {
+        nativeTheme.themeSource = 'dark';
+      });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await pickTheme(app, page, 'Match system');
+      const toggleAlways = async () => {
+        await page.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
+        await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+        await clickMenuItem(app, 'Always show the dock');
+      };
+      await toggleAlways();
+      const [w, h] = await contentSize(app);
+      check((await tabOrder(page)) === 'inbox proton-mail discord whatsapp messenger streamroom', 'the dock starts in the services’ own order', await tabOrder(page));
+      await pressShortcut(app, page, 'dock', digit('whatsapp'));
+      await lowerDock(app, 'whatsapp');
+      await revealDock(app, page, 'whatsapp');
+
+      // A release outside the renderer may never deliver pointerup. Returning without the
+      // primary button must cancel both a pending press and an already active drag.
+      for (const started of [false, true]) {
+        await revealDock(app, page, 'whatsapp');
+        await page.evaluate((started) => {
+          const button = document.querySelector<HTMLButtonElement>('.tab[data-id="discord"]')!;
+          const box = button.getBoundingClientRect();
+          const init = { bubbles: true, pointerId: 71, isPrimary: true, button: 0, clientX: box.x + box.width / 2, clientY: box.y + box.height / 2 };
+          button.dispatchEvent(new PointerEvent('pointerdown', { ...init, buttons: 1 }));
+          if (started) document.dispatchEvent(new PointerEvent('pointermove', { ...init, buttons: 1, clientX: init.clientX + 15 }));
+          document.dispatchEvent(new PointerEvent('pointermove', { ...init, buttons: 0, clientX: init.clientX + 30 }));
+          // Later movement with the same pointer must not revive the cancelled press.
+          document.dispatchEvent(new PointerEvent('pointermove', { ...init, buttons: 1, clientX: init.clientX + 40 }));
+        }, started);
+        check(!(await page.evaluate(() => 'dragging' in document.getElementById('dock')!.dataset)), `a buttonless return cancels a ${started ? 'started drag' : 'pending press'}`);
+        check((await activeTab(page)) === 'whatsapp', 'a missed pointerup does not select the dragged service', await activeTab(page));
+        check(await lowerDock(app, 'whatsapp'), 'a missed pointerup does not hold the dock open');
+        await revealDock(app, page, 'whatsapp');
+        await tab(page, 'discord').click();
+        check((await poll(() => activeTab(page), (id) => id === 'discord', 3000)) === 'discord', 'a deliberate click after a missed pointerup still selects');
+        await pressShortcut(app, page, 'dock', digit('whatsapp'));
+      }
+      await revealDock(app, page, 'whatsapp');
+
+      // Escape cancels while the mouse is still held. Its later release still clicks the
+      // captured button in Chromium, but must not select it, even after the next task.
+      const cancelled = (await tab(page, 'discord').boundingBox())!;
+      await page.mouse.move(cancelled.x + cancelled.width / 2, cancelled.y + cancelled.height / 2);
+      await page.mouse.down();
+      check(await tab(page, 'discord').evaluate((button) => button.hasPointerCapture(1)), 'the tab captures the pointer on press, before a drag starts');
+      await page.mouse.move(cancelled.x + cancelled.width / 2 + 15, cancelled.y + cancelled.height / 2);
+      check(await page.evaluate(() => 'dragging' in document.getElementById('dock')!.dataset), 'the Escape regression starts with an active drag');
+      await page.keyboard.press('Escape');
+      await sleep(100);
+      check(!(await page.evaluate(() => 'dragging' in document.getElementById('dock')!.dataset)), 'Escape cancels the drag while the mouse is held');
+      await page.mouse.up();
+      await sleep(300);
+      check((await activeTab(page)) === 'whatsapp', 'releasing after Escape does not select the dragged service', await activeTab(page));
+      check((await tabOrder(page)) === 'inbox proton-mail discord whatsapp messenger streamroom', 'Escape leaves the service order unchanged');
+      // Escape counts as keyboard use. Click empty dock space to return to pointer use
+      // before checking that a stale drag hold cannot keep the dock open.
+      await page.mouse.click(1, 1);
+      check(await lowerDock(app, 'whatsapp'), 'Escape cancellation does not hold the dock open');
+      await revealDock(app, page, 'whatsapp');
+      await tab(page, 'discord').click();
+      check((await poll(() => activeTab(page), (id) => id === 'discord', 3000)) === 'discord', 'a deliberate click after Escape and release still selects');
+      await pressShortcut(app, page, 'dock', digit('whatsapp'));
+      await revealDock(app, page, 'whatsapp');
+
+      // Drag Discord along the dock, past WhatsApp.
+      const from = (await tab(page, 'discord').boundingBox())!;
+      const past = (await tab(page, 'whatsapp').boundingBox())!;
+      const y = from.y + from.height / 2;
+      await page.mouse.move(from.x + from.width / 2, y);
+      await page.mouse.down();
+      await page.mouse.move(from.x + from.width / 2 + 3, y);
+      check(!(await page.evaluate(() => 'dragging' in document.getElementById('dock')!.dataset)), 'a press that moves 3px is not a drag yet');
+      await page.mouse.move(past.x + past.width * 0.7, y, { steps: 8 });
+      const mid = await page.evaluate(() => {
+        const slot = document.querySelector<HTMLElement>('.tabs > .slot')!;
+        const whatsapp = document.querySelector<HTMLElement>('.tab[data-id="whatsapp"]')!.parentElement!;
+        return { dragging: 'dragging' in document.getElementById('dock')!.dataset, slot: !slot.hidden && slot.getBoundingClientRect().width > 0, whatsapp: whatsapp.style.transform };
+      });
+      check(mid.dragging && mid.slot && /^translateX\(-\d/.test(mid.whatsapp), 'dragging Discord past WhatsApp: a dashed slot shows where it lands and WhatsApp steps aside', JSON.stringify(mid));
+      // The dock loses the pointer and the page reports it up and away: the drag holds the dock
+      // up. (A synthetic mouseLeave would cancel the drag's pointer capture, which a real
+      // pressed pointer keeps, so the dock page reports the pointer gone itself.)
+      await page.evaluate(() => {
+        const g = window as unknown as { __dragEnds: string[] };
+        g.__dragEnds = [];
+        for (const type of ['pointercancel', 'lostpointercapture', 'blur']) addEventListener(type, () => g.__dragEnds.push(type), true);
+      });
+      await page.evaluate(() => (window as unknown as { kainos: { reportPointer(over: boolean): void } }).kainos.reportPointer(false));
+      await pointer(app, 'whatsapp', 'mouseMove', w / 2, h / 2);
+      await sleep(1200);
+      const held = await page.evaluate(() => ({ dragging: 'dragging' in document.getElementById('dock')!.dataset, ends: (window as unknown as { __dragEnds: string[] }).__dragEnds }));
+      check(held.dragging && (await raisedDock(page)) && (await dockBounds(app)) !== null, 'while a tab is dragged, the floating dock stays up with the pointer off it and the page reporting it away', JSON.stringify(held));
+      await screenshot(app, 'dock-order/1-dragging-dark');
+      await page.mouse.move(past.x + past.width * 0.75, y);
+      await page.mouse.up();
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom', 'dropping Discord after WhatsApp moves its tab there', await tabOrder(page));
+      await sleep(300);
+      check((await activeTab(page)) === 'whatsapp', 'dropping a tab does not select it', await activeTab(page));
+      const savedOrder = () => (JSON.parse(readFileSync(stateFile, 'utf8')) as { serviceOrder?: string[] }).serviceOrder?.join(' ');
+      check((await poll(async () => savedOrder(), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom', '... and the new order is saved at once', savedOrder());
+      check(/Discord moved to tab 4 of 6/.test(await announced(page)), '... and screen readers hear where it went', await announced(page));
+
+      // A click with no movement still selects.
+      await revealDock(app, page, 'whatsapp');
+      await tab(page, 'messenger').click();
+      check((await poll(() => activeTab(page), (id) => id === 'messenger', 3000)) === 'messenger' && (await tabOrder(page)) === 'inbox proton-mail whatsapp discord messenger streamroom', 'a click without movement still selects the service', await activeTab(page));
+
+      // Ctrl+digits follow the dock as it is now.
+      await pressShortcut(app, page, 'dock', 4);
+      check((await activeTab(page)) === 'discord', 'after the move, Ctrl+4 opens Discord, the fourth tab', await activeTab(page));
+      await pressShortcut(app, page, 'discord', 3);
+      check((await activeTab(page)) === 'whatsapp', '... and Ctrl+3 WhatsApp', await activeTab(page));
+
+      // Alt+Right and Alt+Left move the focused tab; plain arrows still only move focus.
+      await revealDock(app, page, 'whatsapp');
+      await tab(page, 'discord').focus();
+      await page.keyboard.press('Alt+ArrowRight');
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp messenger discord streamroom', 3000)) === 'inbox proton-mail whatsapp messenger discord streamroom', 'Alt+Right moves the focused Discord tab one place right', await tabOrder(page));
+      check((await dockFocus(page)) === 4, '... keeping keyboard focus on it', String(await dockFocus(page)));
+      check(/Discord moved to tab 5 of 6/.test(await poll(() => announced(page), (t) => /tab 5 of 6/.test(t), 2000)), '... and says its new place to screen readers', await announced(page));
+      await page.keyboard.press('Alt+ArrowRight');
+      await poll(() => tabOrder(page), (o) => o.endsWith('streamroom discord'), 3000);
+      await page.keyboard.press('Alt+ArrowRight');
+      check(/already the last tab/.test(await poll(() => announced(page), (t) => /last tab/.test(t), 2000)), 'Alt+Right on the last tab says it is already last', await announced(page));
+      await page.keyboard.press('Alt+ArrowLeft');
+      await poll(() => tabOrder(page), (o) => o.endsWith('discord streamroom'), 3000);
+      await page.keyboard.press('Alt+ArrowLeft');
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom', 'Alt+Left moves it back', await tabOrder(page));
+      await page.keyboard.press('ArrowLeft');
+      check((await dockFocus(page)) === 2 && (await tabOrder(page)) === 'inbox proton-mail whatsapp discord messenger streamroom', 'Left alone moves focus, not the tab', String(await dockFocus(page)));
+
+      // Move left and right from the tab's menu.
+      await tab(page, 'discord').click({ button: 'right' });
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Discord', 5000);
+      check(JSON.stringify(await menuItems(app)) === '["Reload Discord","Hibernate","Unmute notifications","Move left","Move right","Hide from dock","Sign out of Discord…"]', "Discord's menu has Hibernate, Move left, Move right and Hide from dock", JSON.stringify(await menuItems(app)));
+      await clickMenuItem(app, 'Move left');
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail discord whatsapp messenger streamroom', 3000)) === 'inbox proton-mail discord whatsapp messenger streamroom', 'Move left moves Discord one place left', await tabOrder(page));
+      await tab(page, 'discord').click({ button: 'right' });
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Discord', 5000);
+      await clickMenuItem(app, 'Move right');
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom', 'Move right moves it back', await tabOrder(page));
+      await tab(page, 'inbox').click({ button: 'right' });
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Texts', 5000);
+      check(JSON.stringify(await menuItems(app)) === '["Reload Texts","Mute notifications","(Move left)","Move right","Sign out of Texts…"]', 'the first tab cannot move left, and Texts cannot be hidden', JSON.stringify(await menuItems(app)));
+
+      // Hide from dock: the active Messenger hands over to Discord before it, not to the
+      // hibernating Streamroom after it.
+      await tab(page, 'messenger').click();
+      await poll(() => activeTab(page), (id) => id === 'messenger', 3000);
+      await lowerDock(app, 'messenger');
+      const full = (await revealDock(app, page, 'messenger'))!;
+      await page.locator('#dock-options').click();
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Theme"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
+      await tab(page, 'messenger').click({ button: 'right' });
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Messenger', 5000);
+      await clickMenuItem(app, 'Hide from dock');
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp discord streamroom', 3000)) === 'inbox proton-mail whatsapp discord streamroom', 'Hide from dock takes the Messenger tab out', await tabOrder(page));
+      check((await poll(() => activeTab(page), (id) => id === 'discord', 3000)) === 'discord', '... and, as Messenger was open, opens Discord, the awake tab before it', await activeTab(page));
+      check((await status(page, 'streamroom')) === 'hibernated', '... leaving the hibernating Streamroom asleep', String(await status(page, 'streamroom')));
+      check((await serviceUrl(app, 'messenger')).startsWith('https://'), '... while Messenger keeps running', await serviceUrl(app, 'messenger'));
+      await revealDock(app, page, 'discord');
+      const narrow = await poll(() => dockBounds(app), (b) => b !== null && b.width < full.width - 20, 3000);
+      check(narrow !== null && narrow.width < full.width - 20 && Math.abs(narrow.x + narrow.width / 2 - w / 2) <= 1, 'the floating dock narrows to the five tabs left, still centred', `${full.width} → ${narrow?.width}`);
+      // Off the islands, so no hover shows in the shot.
+      await page.mouse.move(2, 2);
+      await sleep(300);
+      await screenshot(app, 'dock-order/2-messenger-hidden-dark');
+      await pressShortcut(app, page, 'dock', 4);
+      check((await activeTab(page)) === 'discord', 'with Messenger hidden, Ctrl+4 is Discord, the fourth tab', await activeTab(page));
+
+      // Hidden services brings it back in its old place.
+      await page.locator('#dock-options').click();
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+      const hiddenItems = await submenuLabels(app, 'Hidden services');
+      check(JSON.stringify(hiddenItems) === '["Show Messenger"]', 'Hidden services lists Messenger', JSON.stringify(hiddenItems));
+      await clickMenuItem(app, 'Hidden services > Show Messenger');
+      check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom', 'Show Messenger puts its tab back where it was', await tabOrder(page));
+      await revealDock(app, page, 'discord');
+      const widened = await poll(() => dockBounds(app), (b) => b !== null && Math.abs(b.width - full.width) <= 1, 3000);
+      check(widened !== null && Math.abs(widened.width - full.width) <= 1, '... and the floating dock grows back to its full width (within a pixel of rounding)', `${widened?.width} (was ${full.width})`);
+
+      // Hidden again for the second launch.
+      await tab(page, 'messenger').click({ button: 'right' });
+      await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Messenger', 5000);
+      await clickMenuItem(app, 'Hide from dock');
+      await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail whatsapp discord streamroom', 3000);
+
+      await toggleAlways();
+      await pickTheme(app, page, 'Carbon');
+      await app.evaluate(({ nativeTheme }) => {
+        nativeTheme.themeSource = 'system';
+      });
+      await page.emulateMedia({ colorScheme: null });
+      await app.evaluate(({ BaseWindow }, [w1, h1]) => BaseWindow.getAllWindows()[0]!.setContentSize(w1!, h1!), [w0, h0]);
+      await sleep(500);
+    }
+
     // With a tray host, closing the window hides it to the tray instead of quitting.
     await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.close());
     const hidden = await poll(() => app.evaluate(({ BaseWindow }) => !BaseWindow.getAllWindows()[0]!.isVisible()), Boolean, 5000);
@@ -1379,6 +1694,8 @@ async function run(profile: string): Promise<void> {
   check(JSON.stringify(saved.bounds) === JSON.stringify({ x: 120, y: 90, width: 1100, height: 720 }), 'saves window size and position', JSON.stringify(saved.bounds));
   check(JSON.stringify(saved.mutedServiceIds) === '["discord"]', 'keeps the muted list', JSON.stringify(saved.mutedServiceIds));
   check(saved.theme === 'carbon', 'saves the picked theme', String(saved.theme));
+  check(JSON.stringify(saved.serviceOrder) === '["inbox","proton-mail","whatsapp","discord","messenger","streamroom"]' && JSON.stringify(saved.hiddenServiceIds) === '["messenger"]', 'saves the dock order and the hidden Messenger', JSON.stringify({ serviceOrder: saved.serviceOrder, hiddenServiceIds: saved.hiddenServiceIds }));
+  check(JSON.stringify(saved.hibernatedServiceIds) === '["streamroom"]', 'saves Streamroom as hibernating', JSON.stringify(saved.hibernatedServiceIds));
   check(saved.dockAlwaysShown === true && !('dockAlign' in saved) && !('barSide' in saved) && !('barAutoHide' in saved), 'saves Always show the dock, and nothing of the old alignment or side bar', JSON.stringify({ dockAlwaysShown: saved.dockAlwaysShown, dockAlign: saved.dockAlign, barSide: saved.barSide }));
 
   // Second launch, then the tray host goes away (a desktop with no tray): closing quits.
@@ -1389,6 +1706,8 @@ async function run(profile: string): Promise<void> {
     const page = await dockPage(app);
     bus!.setTrayHost(false);
     check((await activeIndex(page)) === nth('proton-mail'), 'second launch opens on Proton Mail');
+    check((await tabOrder(page)) === 'inbox proton-mail whatsapp discord streamroom', 'second launch keeps the dragged order, with Messenger still hidden', await tabOrder(page));
+    check((await status(page, 'streamroom')) === 'hibernated', 'second launch keeps Streamroom hibernating', String(await status(page, 'streamroom')));
     await stubMenusAndDialogs(app);
     await poll(() => status(page, 'proton-mail'), (value) => value === 'ready', 60_000);
     const [w, h] = await contentSize(app);

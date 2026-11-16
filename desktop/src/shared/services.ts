@@ -32,6 +32,18 @@ export interface ServiceDefinition {
   readonly clientMod?: 'vencord';
   /** A page of Kainos' own instead of a website; `url` is then only a label. */
   readonly localPage?: 'inbox';
+  /** A call app: its own pages may also share the screen and pick the speaker. */
+  readonly calls?: true;
+  /**
+   * Links to its hosts from the other services open in this tab instead of the browser, so an
+   * invite link sent in a chat joins from Kainos.
+   */
+  readonly claimsLinks?: true;
+  /**
+   * Starts hibernated the first time Kainos knows it, for a service used now and then that has
+   * nothing to notify about. Opening its tab wakes it.
+   */
+  readonly startsHibernated?: true;
 }
 
 export interface UnreadCounter {
@@ -138,10 +150,36 @@ export const SERVICES: readonly ServiceDefinition[] = [
     },
     unread: unreadFromTitlePrefix,
   },
+  {
+    id: 'streamroom',
+    name: 'Streamroom',
+    // The user's own screen-share and voice rooms, hosted on Cloudflare (the Streamroom project).
+    url: 'https://streamroom.adenkigo.workers.dev/',
+    hosts: ['streamroom.adenkigo.workers.dev'],
+    popupHosts: [],
+    iconHosts: [],
+    icon: {
+      // Streamroom's own velvet, lifted so the tile still reads on the darkest docks.
+      color: '#3D3670',
+      // Its favicon as a line drawing: the shared screen, and three seats in front of it.
+      paint: 'stroke',
+      glyph: 'M5 3.5h14A1.5 1.5 0 0 1 20.5 5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 13V5A1.5 1.5 0 0 1 5 3.5z M6 19.5a1 1 0 1 0 2 0a1 1 0 1 0-2 0z M11 19.5a1 1 0 1 0 2 0a1 1 0 1 0-2 0z M16 19.5a1 1 0 1 0 2 0a1 1 0 1 0-2 0z',
+    },
+    unread: unreadFromTitlePrefix,
+    calls: true,
+    claimsLinks: true,
+    // A room is opened for a call and left; it never notifies, so it need not run all day.
+    startsHibernated: true,
+  },
 ];
 
 export function findService(id: unknown): ServiceDefinition | undefined {
   return SERVICES.find((service) => service.id === id);
+}
+
+/** Kainos' own pages hold state in main and cost little; only websites can hibernate. */
+export function canHibernate(service: ServiceDefinition): boolean {
+  return service.localPage === undefined;
 }
 
 export function partitionFor(service: ServiceDefinition): string {

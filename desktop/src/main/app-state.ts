@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { normalizeHidden, normalizeOrder, visibleServices } from '../shared/dock-order.ts';
 import { parseThemeChoice, type ThemeChoice } from '../shared/theme.ts';
 
 export interface Rect {
@@ -20,13 +21,47 @@ export interface AppState {
   readonly dockAlwaysShown: boolean;
   /** The colour theme of the dock and the Texts page. */
   readonly theme: ThemeChoice;
+  /** Every service once, in the dock's order, hidden ones included. */
+  readonly serviceOrder: readonly string[];
+  /** Services with no tab in the dock; they keep running. */
+  readonly hiddenServiceIds: readonly string[];
+  /** Services whose page is closed to save memory until their tab is opened. Never the active one. */
+  readonly hibernatedServiceIds: readonly string[];
+}
+
+/** What the registry says about the services, for reading and defaulting the state. */
+export interface StateRules {
+  /** Services that always keep their tab (Texts). */
+  readonly unhideable?: readonly string[];
+  /** Services that never hibernate (Kainos' own pages). */
+  readonly sleepless?: readonly string[];
+  /** Services that start hibernated the first time the state knows them. */
+  readonly startHibernated?: readonly string[];
 }
 
 export const DEFAULT_SIZE = { width: 1280, height: 820 } as const;
 export const MIN_SIZE = { width: 640, height: 480 } as const;
 
-export function defaultState(serviceIds: readonly string[]): AppState {
-  return { bounds: undefined, maximized: false, activeServiceId: serviceIds[0] ?? '', mutedServiceIds: [], dockAlwaysShown: false, theme: 'system' };
+export function defaultState(serviceIds: readonly string[], rules: StateRules = {}): AppState {
+  const activeServiceId = serviceIds[0] ?? '';
+  return {
+    bounds: undefined,
+    maximized: false,
+    activeServiceId,
+    mutedServiceIds: [],
+    dockAlwaysShown: false,
+    theme: 'system',
+    serviceOrder: [...serviceIds],
+    hiddenServiceIds: [],
+    hibernatedServiceIds: normalizeHibernated(rules.startHibernated, serviceIds, rules, activeServiceId),
+  };
+}
+
+/** Known ids, once each, that may hibernate and are not the active service. */
+function normalizeHibernated(stored: unknown, serviceIds: readonly string[], rules: StateRules, activeServiceId: string): string[] {
+  if (!Array.isArray(stored)) return [];
+  const sleepless = rules.sleepless ?? [];
+  return [...new Set(stored.filter((id): id is string => typeof id === 'string' && serviceIds.includes(id) && !sleepless.includes(id) && id !== activeServiceId))];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -45,19 +80,32 @@ function parseRect(value: unknown): Rect | undefined {
 /**
  * Reads a saved state file. Bad or missing fields fall back to defaults one by one, and ids
  * of services that no longer exist are dropped, as are fields from older versions (the side
- * bar's `barSide` and `barAutoHide`, the dock's `dockAlign`).
+ * bar's `barSide` and `barAutoHide`, the dock's `dockAlign`). `unhideable` services (Texts)
+ * always keep their tab; a hidden service is not opened at launch, the first tab is. A service the
+ * saved order does not know yet (added in a later version) hibernates if it starts hibernated;
+ * the service opened at launch is always awake.
  */
-export function parseAppState(raw: unknown, serviceIds: readonly string[]): AppState {
-  const fallback = defaultState(serviceIds);
+export function parseAppState(raw: unknown, serviceIds: readonly string[], rules: StateRules = {}): AppState {
+  const fallback = defaultState(serviceIds, rules);
   if (!isRecord(raw)) return fallback;
+  const serviceOrder = normalizeOrder(raw.serviceOrder, serviceIds);
+  const hiddenServiceIds = normalizeHidden(raw.hiddenServiceIds, serviceIds, rules.unhideable);
   const known = (id: unknown): id is string => typeof id === 'string' && serviceIds.includes(id);
+  const shown = (id: unknown): id is string => known(id) && !hiddenServiceIds.includes(id);
+  const activeServiceId = shown(raw.activeServiceId) ? raw.activeServiceId : (visibleServices(serviceOrder, hiddenServiceIds)[0] ?? fallback.activeServiceId);
+  const savedOrder = Array.isArray(raw.serviceOrder) ? raw.serviceOrder : [];
+  const newcomers = (rules.startHibernated ?? []).filter((id) => !savedOrder.includes(id));
+  const savedHibernated = Array.isArray(raw.hibernatedServiceIds) ? raw.hibernatedServiceIds : [];
   return {
     bounds: parseRect(raw.bounds),
     maximized: raw.maximized === true,
-    activeServiceId: known(raw.activeServiceId) ? raw.activeServiceId : fallback.activeServiceId,
+    activeServiceId,
     mutedServiceIds: Array.isArray(raw.mutedServiceIds) ? [...new Set(raw.mutedServiceIds.filter(known))] : [],
     dockAlwaysShown: raw.dockAlwaysShown === true,
     theme: parseThemeChoice(raw.theme),
+    serviceOrder,
+    hiddenServiceIds,
+    hibernatedServiceIds: normalizeHibernated([...savedHibernated, ...newcomers], serviceIds, rules, activeServiceId),
   };
 }
 
@@ -85,11 +133,11 @@ export function fitToDisplays(bounds: Rect, workAreas: readonly Rect[]): Rect {
   return { x, y, width, height };
 }
 
-export function loadAppState(file: string, serviceIds: readonly string[]): AppState {
+export function loadAppState(file: string, serviceIds: readonly string[], rules: StateRules = {}): AppState {
   try {
-    return parseAppState(JSON.parse(readFileSync(file, 'utf8')), serviceIds);
+    return parseAppState(JSON.parse(readFileSync(file, 'utf8')), serviceIds, rules);
   } catch {
-    return defaultState(serviceIds);
+    return defaultState(serviceIds, rules);
   }
 }
 

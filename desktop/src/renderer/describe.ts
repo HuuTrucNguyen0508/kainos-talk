@@ -7,6 +7,7 @@ export function describe(service: ServiceSnapshot, phoneOffline = false): string
   if (service.unread.kind === 'marker') parts.push('new activity');
   if (service.status.kind === 'loading') parts.push('loading');
   if (service.status.kind === 'failed') parts.push('failed to load');
+  if (service.status.kind === 'hibernated') parts.push('hibernating, opens when selected');
   if (phoneOffline) parts.push('phone not connected');
   if (service.muted) parts.push('notifications muted');
   return parts.join(', ');

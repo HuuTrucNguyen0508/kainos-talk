@@ -1,8 +1,9 @@
 import { BaseWindow, Menu, clipboard, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { Channel, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
+import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
-import { SERVICES, findService, partitionFor } from '../shared/services.ts';
+import { moveService, successor, visibleServices } from '../shared/dock-order.ts';
+import { SERVICES, canHibernate, findService, partitionFor } from '../shared/services.ts';
 import { totalUnread, unreadLabel, windowTitle } from '../shared/unread.ts';
 import { markPng } from './app-icon.ts';
 import { DEFAULT_SIZE, MIN_SIZE, fitToDisplays, loadAppState, saveAppState, type AppState } from './app-state.ts';
@@ -14,6 +15,8 @@ import { startSmsSync } from './sms-sync.ts';
 import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
 
+import { claimingService } from './navigation.ts';
+import { openExternal } from './open-external.ts';
 import { createServiceRuntime, type ServiceRuntime } from './service-runtime.ts';
 import { shortcutFor } from './shortcuts.ts';
 import { trayHostPresent } from './tray-host.ts';
@@ -28,6 +31,13 @@ if (process.env.KAINOS_USER_DATA) app.setPath('userData', process.env.KAINOS_USE
 // Popups and workers use this too, so nothing a service sees names Electron.
 app.userAgentFallback = chromeUserAgent(process.platform, process.versions.chrome);
 if (process.platform === 'win32') app.setAppUserModelId('app.kainos.talk');
+// With Wayland colour management, Hyprland's HDR mode shows the whole window greyish (blacks
+// raised, colours faded) while other windows look right. Without it the window is treated as
+// plain SDR and converted like the rest. Kept alongside any --disable-features on the command line.
+if (process.platform === 'linux') {
+  const disabled = app.commandLine.getSwitchValue('disable-features');
+  app.commandLine.appendSwitch('disable-features', [disabled, 'WaylandWpColorManagerV1'].filter(Boolean).join(','));
+}
 // Never hand a TLS client certificate to a site: none of the services needs one, and without
 // this handler Electron sends the first matching certificate without asking.
 app.on('select-client-certificate', (event, _contents, _url, _list, callback) => {
@@ -50,8 +60,14 @@ if (app.requestSingleInstanceLock()) {
 async function start(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   const serviceIds = SERVICES.map((service) => service.id);
+  /** Kainos' own page (Texts) always keeps its tab. */
+  const unhideable = SERVICES.filter((service) => service.localPage).map((service) => service.id);
   const statePath = join(app.getPath('userData'), 'kainos-state.json');
-  let state: AppState = loadAppState(statePath, serviceIds);
+  let state: AppState = loadAppState(statePath, serviceIds, {
+    unhideable,
+    sleepless: SERVICES.filter((service) => !canHibernate(service)).map((service) => service.id),
+    startHibernated: SERVICES.filter((service) => service.startsHibernated).map((service) => service.id),
+  });
   /** The theme's --surface: behind the pages until they paint, so nothing flashes in another colour. */
   const themeBackground = () => resolveTheme(state.theme, nativeTheme.shouldUseDarkColors).surface;
   const icons = { plain: nativeImage.createFromBuffer(markPng(64, false)), lamp: nativeImage.createFromBuffer(markPng(64, true)) };
@@ -91,6 +107,7 @@ async function start(): Promise<void> {
     dir: join(app.getPath('userData'), 'vencord'),
     services: SERVICES.filter((service) => service.clientMod === 'vencord'),
     onFirstInstall: () => {
+      // A hibernating Discord stays asleep; it gets Vencord when it wakes.
       for (const runtime of runtimes) if (runtime.service.clientMod === 'vencord') runtime.reload();
     },
   });
@@ -98,7 +115,7 @@ async function start(): Promise<void> {
   let runtimesReady = false;
   // The Texts page: the phone's SMS and RCS conversations, over the local network. It starts
   // before the service views, so the page's first request finds it ready.
-  const smsView = () => runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view.webContents;
+  const smsView = () => runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view()?.webContents;
   /** Shows a desktop notification for a new text; a click opens that conversation. */
   function notifyFromInbox(key: string, title: string, body: string): void {
     const muted = state.mutedServiceIds.includes('inbox');
@@ -134,19 +151,50 @@ async function start(): Promise<void> {
     const picture = await sms.image(decodeURIComponent(new URL(request.url).pathname.slice(1)));
     return picture ? new Response(new Uint8Array(picture), { headers: { 'content-type': 'image/jpeg' } }) : new Response(null, { status: 404 });
   });
+  win.contentView.addChildView(chrome);
+  /** Pages made while the runtimes are being created; wired once everything they use exists. */
+  let unwiredPages: WebContents[] | undefined = [];
   const runtimes: ServiceRuntime[] = SERVICES.map((service) =>
     createServiceRuntime(service, {
       userAgent: app.userAgentFallback,
       preload: join(__dirname, 'preload-service.cjs'),
       localDir: __dirname,
       background: themeBackground(),
+      hibernated: state.hibernatedServiceIds.includes(service.id),
       onChange: render,
+      // Each page view goes into the window at startup and on every wake. Adding the dock page
+      // again moves it back on top. (Inserting at an index crashes Electron 45 on start.)
+      onViewCreated: (view) => {
+        view.setVisible(false);
+        win.contentView.addChildView(view);
+        win.contentView.addChildView(chrome);
+        if (unwiredPages) unwiredPages.push(view.webContents);
+        else wirePage(view.webContents);
+      },
+      onViewClosed: (view) => win.contentView.removeChildView(view),
+      openLink,
     }),
   );
   const runtimeById = (id: string) => runtimes.find((runtime) => runtime.service.id === id);
+  const runtimeOf = (contents: WebContents) => runtimes.find((runtime) => runtime.view()?.webContents === contents);
   runtimesReady = true;
-  for (const runtime of runtimes) win.contentView.addChildView(runtime.view);
-  win.contentView.addChildView(chrome);
+
+  /** A link leaving a service: a service that claims its host (Streamroom's invites) opens it, else the browser. */
+  function openLink(url: string): void {
+    const claimer = claimingService(SERVICES, url);
+    const runtime = claimer && runtimeById(claimer.id);
+    if (!runtime) {
+      openExternal(url);
+      return;
+    }
+    const { id } = runtime.service;
+    if (state.hiddenServiceIds.includes(id)) showInDock(id);
+    // Woken straight onto the link, not its start page first.
+    if (state.hibernatedServiceIds.includes(id)) updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((other) => other !== id) }, 0);
+    runtime.open(url);
+    showWindow();
+    activate(id);
+  }
   function paintThemeBackground(): void {
     win.setBackgroundColor(themeBackground());
     for (const runtime of runtimes) runtime.setBackground(themeBackground());
@@ -161,7 +209,8 @@ async function start(): Promise<void> {
     return {
       activeId: state.activeServiceId,
       phone: phone && { name: phone.name.slice(0, PHONE_NAME_MAX), connected: phone.connected === true },
-      services: runtimes.map((runtime) => ({
+      hiddenIds: state.hiddenServiceIds,
+      services: state.serviceOrder.map(runtimeById).filter((runtime) => runtime !== undefined).map((runtime) => ({
         id: runtime.service.id,
         name: runtime.service.name,
         color: runtime.service.icon.color,
@@ -181,15 +230,7 @@ async function start(): Promise<void> {
   const pagePointers = new Map<WebContents, PagePointer>();
   function clearPagePointer(contents: WebContents): void {
     pagePointers.delete(contents);
-    if (contents === runtimeById(state.activeServiceId)?.view.webContents) revealBy({ kind: 'page', at: 'away' });
-  }
-  for (const runtime of runtimes) {
-    const contents = runtime.view.webContents;
-    contents.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument) clearPagePointer(contents);
-    });
-    contents.on('render-process-gone', () => clearPagePointer(contents));
-    contents.on('destroyed', () => clearPagePointer(contents));
+    if (contents === runtimeById(state.activeServiceId)?.view()?.webContents) revealBy({ kind: 'page', at: 'away' });
   }
   /** The dock page's centred group, as it last measured it. */
   let group: DockSize | undefined;
@@ -213,7 +254,8 @@ async function start(): Promise<void> {
   function layout(): void {
     const [width = 0, height = 0] = win.getContentSize();
     const active = runtimeById(state.activeServiceId);
-    feed({ kind: 'page', at: active ? pagePointers.get(active.view.webContents) ?? 'away' : 'away' });
+    const activeContents = active?.view()?.webContents;
+    feed({ kind: 'page', at: activeContents ? pagePointers.get(activeContents) ?? 'away' : 'away' });
     // A service that is loading or failed stays hidden, so the dock page can show why.
     const activeReady = active?.status().kind === 'ready';
     // A page in HTML fullscreen (a video, a stream) covers the dock too.
@@ -221,8 +263,10 @@ async function start(): Promise<void> {
     feed({ kind: 'active', active: !state.dockAlwaysShown && activeReady && !activeFullscreen });
     const placed = layoutBar({ width, height, activeReady, activeFullscreen, pinned: state.dockAlwaysShown, onScreen: onScreen(reveal.phase), group });
     for (const runtime of runtimes) {
-      runtime.view.setBounds(placed.service);
-      runtime.view.setVisible(runtime === active && runtime.status().kind === 'ready');
+      const view = runtime.view();
+      if (!view) continue;
+      view.setBounds(placed.service);
+      view.setVisible(runtime === active && runtime.status().kind === 'ready');
     }
     // Bounds first, then the frame: the view is in place before the dock slides up into it,
     // and keeps its bounds (onScreen while leaving) until it has slid away.
@@ -240,7 +284,7 @@ async function start(): Promise<void> {
   /** Last told to the inbox page; it only marks the open conversation read while in sight. */
   let inboxShown: boolean | undefined;
   function tellInboxShown(): void {
-    const view = runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view;
+    const view = runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view();
     const shown = view !== undefined && view.getVisible() && win.isVisible() && !win.isMinimized();
     if (shown === inboxShown) return;
     inboxShown = shown;
@@ -264,7 +308,7 @@ async function start(): Promise<void> {
   function focusActiveService(): void {
     const runtime = runtimeById(state.activeServiceId);
     if (runtime?.status().kind !== 'ready') return;
-    if (win.isFocused()) runtime.view.webContents.focus();
+    if (win.isFocused()) runtime.view()?.webContents.focus();
     else focusOnWindowFocus = true;
   }
   win.on('focus', () => {
@@ -306,18 +350,50 @@ async function start(): Promise<void> {
     updateState({ bounds: win.getNormalBounds(), maximized: win.isMaximized() });
   };
 
+  /** Opens the service's tab, waking it if it hibernates: the active service is always awake. */
   function activate(serviceId: string): void {
     const runtime = runtimeById(serviceId);
     if (!runtime) return;
+    if (state.hibernatedServiceIds.includes(serviceId)) {
+      updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((id) => id !== serviceId) }, 0);
+      runtime.wake();
+    }
     if (state.activeServiceId !== serviceId) {
-      const previous = runtimeById(state.activeServiceId);
-      if (previous) clearPagePointer(previous.view.webContents);
+      const previous = runtimeById(state.activeServiceId)?.view();
+      if (previous) clearPagePointer(previous.webContents);
       updateState({ activeServiceId: serviceId });
-      clearPagePointer(runtime.view.webContents);
-      runtime.view.webContents.send(Channel.resetPagePointer);
+      const contents = runtime.view()?.webContents;
+      if (contents) {
+        clearPagePointer(contents);
+        contents.send(Channel.resetPagePointer);
+      }
     }
     render();
     focusActiveService();
+  }
+
+  /**
+   * Closes the service's page to free its memory; it stops notifying until it wakes. The
+   * active service hands over to the next tab first.
+   */
+  function hibernate(serviceId: string): void {
+    const runtime = runtimeById(serviceId);
+    if (!runtime || !canHibernate(runtime.service) || state.hibernatedServiceIds.includes(serviceId)) return;
+    if (state.activeServiceId === serviceId) {
+      const next = handOver(serviceId);
+      if (!next) return;
+      activate(next);
+    }
+    updateState({ hibernatedServiceIds: [...state.hibernatedServiceIds, serviceId] }, 0);
+    runtime.hibernate();
+  }
+
+  /** Wakes the service where it is, without opening its tab. */
+  function wake(serviceId: string): void {
+    if (!state.hibernatedServiceIds.includes(serviceId)) return;
+    updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((id) => id !== serviceId) }, 0);
+    runtimeById(serviceId)?.wake();
+    render();
   }
 
   function showWindow(): void {
@@ -354,13 +430,63 @@ async function start(): Promise<void> {
     }
   }
 
+  /** The services with a tab, in dock order; Ctrl+1..9 counts these. */
+  const dockTabs = () => visibleServices(state.serviceOrder, state.hiddenServiceIds);
+
+  /** Makes the service the tab at `index` among the dock's tabs, and saves the order. */
+  function moveInDock(serviceId: string, index: number): void {
+    const order = moveService(state.serviceOrder, serviceId, index, state.hiddenServiceIds);
+    if (order.join() !== state.serviceOrder.join()) updateState({ serviceOrder: order }, 0);
+    // Rendered even when nothing moved, so a dock page that moved the tab ahead of main is put right.
+    render();
+  }
+
+  /**
+   * The tab that opens when the open `serviceId` leaves: its neighbour along the dock, preferring
+   * one that is awake, so hiding or hibernating a service does not wake another.
+   */
+  function handOver(serviceId: string): string | undefined {
+    const asleep = state.hibernatedServiceIds.filter((id) => id !== serviceId);
+    return successor(state.serviceOrder, [...state.hiddenServiceIds, ...asleep], serviceId) ?? successor(state.serviceOrder, state.hiddenServiceIds, serviceId);
+  }
+
+  /** Takes the tab out of the dock; the service keeps running. The active one hands over to its neighbour. */
+  function hideFromDock(serviceId: string): void {
+    if (unhideable.includes(serviceId) || state.hiddenServiceIds.includes(serviceId) || dockTabs().length < 2) return;
+    const next = state.activeServiceId === serviceId ? handOver(serviceId) : undefined;
+    updateState({ hiddenServiceIds: [...state.hiddenServiceIds, serviceId] }, 0);
+    if (next) activate(next);
+    else render();
+  }
+
+  /** Gives a hidden service its tab back, in its old place. */
+  function showInDock(serviceId: string): void {
+    updateState({ hiddenServiceIds: state.hiddenServiceIds.filter((id) => id !== serviceId) }, 0);
+    render();
+  }
+
   /** Without `at` the menu opens at the pointer; a keyboard-opened menu passes its button's place. */
   function openServiceMenu(runtime: ServiceRuntime, at: MenuPoint | undefined): void {
     const { id, name } = runtime.service;
     const muted = state.mutedServiceIds.includes(id);
+    const tabs = dockTabs();
+    const place = tabs.indexOf(id);
+    const asleep = state.hibernatedServiceIds.includes(id);
     Menu.buildFromTemplate([
-      { label: `Reload ${name}`, click: () => runtime.reload() },
+      asleep
+        ? { label: `Wake ${name}`, click: () => wake(id) }
+        : {
+            label: `Reload ${name}`,
+            // The key reloads the open service, so it is shown only on that one's menu.
+            ...(id === state.activeServiceId && { accelerator: 'CmdOrCtrl+R', registerAccelerator: false }),
+            click: () => runtime.reload(),
+          },
+      ...(canHibernate(runtime.service) && !asleep ? [{ label: 'Hibernate', click: () => hibernate(id) }] : []),
       { label: muted ? 'Unmute notifications' : 'Mute notifications', click: () => setMuted(id, !muted) },
+      { type: 'separator' },
+      { label: 'Move left', enabled: place > 0, click: () => moveInDock(id, place - 1) },
+      { label: 'Move right', enabled: place >= 0 && place < tabs.length - 1, click: () => moveInDock(id, place + 1) },
+      ...(unhideable.includes(id) ? [] : [{ label: 'Hide from dock', click: () => hideFromDock(id) }]),
       { type: 'separator' },
       { label: `Sign out of ${name}…`, click: () => void confirmSignOut(runtime) },
     ]).popup(menuOptions(at));
@@ -386,6 +512,7 @@ async function start(): Promise<void> {
 
   function openBarMenu(at: MenuPoint | undefined): void {
     const choices: { id: ThemeChoice; name: string }[] = [{ id: 'system', name: 'Match system' }, ...THEMES];
+    const hidden = state.serviceOrder.filter((id) => state.hiddenServiceIds.includes(id)).map(runtimeById).filter((runtime) => runtime !== undefined);
     Menu.buildFromTemplate([
       {
         label: 'Always show the dock',
@@ -395,6 +522,11 @@ async function start(): Promise<void> {
           updateState({ dockAlwaysShown: !state.dockAlwaysShown }, 0);
           render();
         },
+      },
+      {
+        label: 'Hidden services',
+        enabled: hidden.length > 0,
+        submenu: hidden.map(({ service }) => ({ label: `Show ${service.name}`, click: () => showInDock(service.id) })),
       },
       {
         label: 'Theme',
@@ -441,21 +573,36 @@ async function start(): Promise<void> {
       return;
     }
     const runtime = runtimeById(state.activeServiceId);
-    if (runtime?.status().kind === 'ready') runtime.view.webContents.focus();
+    if (runtime?.status().kind === 'ready') runtime.view()?.webContents.focus();
   }
 
-  // Ctrl+1..9, Ctrl+Q and F6 work wherever focus is: the dock or any service page.
-  const handleShortcuts = (contents: WebContents) =>
+  // Ctrl+1..9, Ctrl+Q, F5/Ctrl+R and F6 work wherever focus is: the dock or any service page.
+  // The digits follow the tabs as the dock shows them.
+  function handleShortcuts(contents: WebContents): void {
     contents.on('before-input-event', (event, input) => {
-      const shortcut = shortcutFor(input, process.platform, runtimes.length);
+      const tabs = dockTabs();
+      const shortcut = shortcutFor(input, process.platform, tabs.length);
       if (!shortcut) return;
       event.preventDefault();
       if (shortcut.kind === 'quit') app.quit();
       else if (shortcut.kind === 'switch-pane') switchPane(contents);
-      else activate(runtimes[shortcut.index]!.service.id);
+      else if (shortcut.kind === 'reload') runtimeById(state.activeServiceId)?.reload(shortcut.ignoreCache);
+      else activate(tabs[shortcut.index]!);
     });
+  }
   handleShortcuts(dockContents);
-  for (const runtime of runtimes) handleShortcuts(runtime.view.webContents);
+
+  /** Hooks for each service page, set when its view is made (at startup and on each wake). */
+  function wirePage(contents: WebContents): void {
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) clearPagePointer(contents);
+    });
+    contents.on('render-process-gone', () => clearPagePointer(contents));
+    contents.on('destroyed', () => clearPagePointer(contents));
+    handleShortcuts(contents);
+  }
+  for (const contents of unwiredPages) wirePage(contents);
+  unwiredPages = undefined;
 
   // Dock IPC. Only the dock page may call it, and only with known service ids.
   const fromDock = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => event.sender === dockContents;
@@ -469,6 +616,13 @@ async function start(): Promise<void> {
   onDock(Channel.activate, (runtime) => activate(runtime.service.id));
   onDock(Channel.retry, (runtime) => runtime.restart());
   onDock(Channel.openServiceMenu, (runtime, at) => openServiceMenu(runtime, parseMenuPoint(at)));
+  onDock(Channel.moveService, (runtime, raw) => {
+    const index = parseDockIndex(raw);
+    if (index !== undefined) moveInDock(runtime.service.id, index);
+  });
+  ipcMain.on(Channel.dockDrag, (event, active: unknown) => {
+    if (fromDock(event)) revealBy({ kind: 'drag', active: active === true });
+  });
   ipcMain.on(Channel.openBarMenu, (event, at: unknown) => {
     if (fromDock(event)) openBarMenu(parseMenuPoint(at));
   });
@@ -495,9 +649,9 @@ async function start(): Promise<void> {
   // Only the page on screen moves the dock; the others are hidden and see no pointer.
   ipcMain.on(Channel.pagePointer, (event, raw: unknown) => {
     const at = parsePagePointer(raw);
-    if (!at || !runtimes.some((runtime) => runtime.view.webContents === event.sender)) return;
+    if (!at || !runtimeOf(event.sender)) return;
     pagePointers.set(event.sender, at);
-    if (event.sender === runtimeById(state.activeServiceId)?.view.webContents) revealBy({ kind: 'page', at });
+    if (event.sender === runtimeById(state.activeServiceId)?.view()?.webContents) revealBy({ kind: 'page', at });
   });
 
   const smsContents = smsView();
@@ -523,7 +677,7 @@ async function start(): Promise<void> {
   });
 
   forwardNotifications({
-    runtimeFor: (contents) => runtimes.find((runtime) => runtime.view.webContents === contents),
+    runtimeFor: runtimeOf,
     isMuted: (id) => state.mutedServiceIds.includes(id),
     focusService: (id) => {
       showWindow();
@@ -549,7 +703,10 @@ async function start(): Promise<void> {
 
   win.on('closed', () => {
     clearTimeout(revealTimer);
-    for (const runtime of runtimes) if (!runtime.view.webContents.isDestroyed()) runtime.view.webContents.close();
+    for (const runtime of runtimes) {
+      const contents = runtime.view()?.webContents;
+      if (contents && !contents.isDestroyed()) contents.close();
+    }
     if (!dockContents.isDestroyed()) dockContents.close();
   });
   win.on('resize', () => {
@@ -573,9 +730,12 @@ async function start(): Promise<void> {
     if (state.maximized) win.maximize();
     win.show();
   });
-  // A fresh dock page has missed the frames sent while it loaded.
+  // A dock page that crashed or reloaded drops any drag it had in progress.
+  dockContents.on('render-process-gone', () => revealBy({ kind: 'drag', active: false }));
+  // A fresh dock page has missed the frames sent while it loaded, and has no drag in progress.
   dockContents.on('did-finish-load', () => {
     sentFrame = '';
+    feed({ kind: 'drag', active: false });
     layout();
   });
 

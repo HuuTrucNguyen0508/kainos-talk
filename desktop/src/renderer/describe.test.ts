@@ -10,6 +10,7 @@ test('names the service and every state a sighted user sees on its tile', () => 
   assert.equal(describeService({ ...base, unread: { kind: 'count', count: 4 } }), 'Discord, 4 unread');
   assert.equal(describeService({ ...base, unread: { kind: 'marker' }, muted: true }), 'Discord, new activity, notifications muted');
   assert.equal(describeService({ ...base, status: { kind: 'loading' } }), 'Discord, loading');
+  assert.equal(describeService({ ...base, status: { kind: 'hibernated' }, muted: true }), 'Discord, hibernating, opens when selected, notifications muted');
   assert.equal(
     describeService({ ...base, status: { kind: 'failed', reason: 'x', host: 'discord.com' }, unread: { kind: 'count', count: 2 }, muted: true }),
     'Discord, 2 unread, failed to load, notifications muted',

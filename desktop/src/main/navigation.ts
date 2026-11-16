@@ -52,6 +52,15 @@ export function decidePopupNavigation(service: ServiceDefinition, url: string): 
   return isExternalSafe(url) ? 'external' : 'block';
 }
 
+/**
+ * The service that opens `url` in its own tab instead of the system browser: one that claims
+ * links (`claimsLinks`) and has the link's host among its own.
+ */
+export function claimingService<S extends ServiceDefinition>(services: readonly S[], url: string): S | undefined {
+  const parsed = parse(url);
+  return parsed ? services.find((service) => service.claimsLinks && onHosts(parsed, service.hosts)) : undefined;
+}
+
 /** A popup has no address bar, so its title names the host it shows. */
 export function popupTitle(url: string, pageTitle: string): string {
   const parsed = parse(url);

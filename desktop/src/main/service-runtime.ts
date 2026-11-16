@@ -6,19 +6,31 @@ import { NO_UNREAD, parseCounterReading, sameUnread, unreadFromPage, type Counte
 import { decideNavigation, decidePopupNavigation, decideWindowOpen, isExternalSafe, popupTitle, type PageNavigation } from './navigation.ts';
 import { openExternal } from './open-external.ts';
 import { allowPermission } from './permissions.ts';
+import { handleScreenShare } from './screen-share.ts';
 import { nextStatus, type PageEvent } from './service-status.ts';
 
 export interface ServiceRuntime {
   readonly service: ServiceDefinition;
-  readonly view: WebContentsView;
+  /** The page's view; none while the service hibernates. */
+  view(): WebContentsView | undefined;
   status(): ServiceStatus;
   unread(): Unread;
   /** Whether the page is in HTML fullscreen (a video or stream), so the view should cover the window. */
   fullscreen(): boolean;
-  /** Loads the start page again, from scratch. */
+  /** Loads the start page again, from scratch. Does nothing while hibernating. */
   restart(): void;
-  reload(): void;
-  /** Stops the page, closes its popups, clears its login, cookies, storage and cache, then restarts it. */
+  /** Does nothing while hibernating. `ignoreCache` fetches every file again (a hard reload). */
+  reload(ignoreCache?: boolean): void;
+  /** Closes the page and its popups, ending its renderer process; the login stays. */
+  hibernate(): void;
+  /** A new page on the start page. Does nothing unless hibernating. */
+  wake(): void;
+  /** Shows `url`, one of the service's own pages, waking the service first if needed. */
+  open(url: string): void;
+  /**
+   * Stops the page, closes its popups, clears its login, cookies, storage and cache, then
+   * restarts it. A hibernating service is wiped and stays asleep.
+   */
   signOut(): Promise<void>;
   /** The colour behind the page while it paints: the sidebar's, so a dark theme never flashes white. */
   setBackground(color: string): void;
@@ -30,7 +42,15 @@ export interface RuntimeOptions {
   /** Folder of the built local pages and their preloads (dist/). */
   readonly localDir: string;
   readonly background: string;
+  /** Start without a page; the service wakes when asked. */
+  readonly hibernated: boolean;
   readonly onChange: () => void;
+  /** A new page view to place in the window: at startup, and each time the service wakes. */
+  readonly onViewCreated: (view: WebContentsView) => void;
+  /** The page view is closing (the service hibernates); take it out of the window. */
+  readonly onViewClosed: (view: WebContentsView) => void;
+  /** A link leaving the service: another service may claim it, else it goes to the browser. */
+  readonly openLink: (url: string) => void;
 }
 
 /** One service page: its own login partition, browser rules and load status. */
@@ -50,15 +70,16 @@ export function createServiceRuntime(service: ServiceDefinition, options: Runtim
       mediaTypes: details.mediaType && details.mediaType !== 'unknown' ? [details.mediaType] : [],
     }),
   );
+  if (service.calls) handleScreenShare(ses, (origin) => allowPermission(service, { permission: 'display-capture', origin, mediaTypes: [] }));
 
-  let status: ServiceStatus = { kind: 'loading' };
+  let status: ServiceStatus = options.hibernated ? { kind: 'hibernated' } : { kind: 'loading' };
   let titleUnread: Unread = NO_UNREAD;
   let counter: CounterReading | undefined;
   let unread: Unread = NO_UNREAD;
   let fullscreen = false;
   /** Recomputes the unread count; a page that is not running has none. */
   const refreshUnread = () => {
-    const next = status.kind === 'failed' ? NO_UNREAD : unreadFromPage(titleUnread, counter);
+    const next = status.kind === 'failed' || status.kind === 'hibernated' ? NO_UNREAD : unreadFromPage(titleUnread, counter);
     if (sameUnread(next, unread)) return false;
     unread = next;
     return true;
@@ -73,48 +94,111 @@ export function createServiceRuntime(service: ServiceDefinition, options: Runtim
 
   const popups = new Set<BrowserWindow>();
   let background = options.background;
+  let view: WebContentsView | undefined;
 
-  const view = new WebContentsView({
-    webPreferences: {
-      partition,
-      preload: service.localPage ? join(options.localDir, `preload-${service.localPage}.cjs`) : options.preload,
-      // Tells the preload which service it is in (for its unread counter).
-      additionalArguments: [`--kainos-service=${service.id}`],
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      // Hidden services must keep their connections alive so notifications keep arriving.
-      backgroundThrottling: false,
-      spellcheck: true,
-    },
-  });
-  view.setBackgroundColor(background);
-  const contents = view.webContents;
-  contents.on('did-start-navigation', (details) => {
-    // A new document brings its own counter; until its preload reports, the title decides.
-    if (details.isMainFrame && !details.isSameDocument) counter = undefined;
-    apply({ kind: 'start-navigation', url: details.url, isMainFrame: details.isMainFrame, isSameDocument: details.isSameDocument });
-  });
-  contents.on('dom-ready', () => apply({ kind: 'dom-ready' }));
-  contents.on('did-stop-loading', () => apply({ kind: 'stop-loading' }));
-  contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => apply({ kind: 'fail-load', code, description, url, isMainFrame }));
-  contents.on('render-process-gone', (_event, details) => apply({ kind: 'gone', reason: details.reason, host: new URL(service.url).host }));
-  contents.on('page-title-updated', (_event, title) => {
-    titleUnread = service.unread(title);
-    if (refreshUnread()) options.onChange();
-  });
-  contents.ipc.on(Channel.unreadCounter, (_event, raw: unknown) => {
-    counter = parseCounterReading(raw);
-    if (refreshUnread()) options.onChange();
-  });
-  // A page's "unsaved changes" prompt must not block Reload or Sign out; the app has no way to show it.
-  contents.on('will-prevent-unload', (event) => event.preventDefault());
-  const setFullscreen = (on: boolean) => {
-    fullscreen = on;
-    options.onChange();
+  /** A page view with the service's rules. Its events count only while it is the service's view. */
+  const createView = (): WebContentsView => {
+    const created = new WebContentsView({
+      webPreferences: {
+        partition,
+        preload: service.localPage ? join(options.localDir, `preload-${service.localPage}.cjs`) : options.preload,
+        // Tells the preload which service it is in (for its unread counter).
+        additionalArguments: [`--kainos-service=${service.id}`],
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        // Hidden services must keep their connections alive so notifications keep arriving.
+        backgroundThrottling: false,
+        spellcheck: true,
+      },
+    });
+    created.setBackgroundColor(background);
+    const contents = created.webContents;
+    const live = () => view === created;
+    const applyLive = (event: PageEvent) => {
+      if (live()) apply(event);
+    };
+    contents.on('did-start-navigation', (details) => {
+      // A new document brings its own counter; until its preload reports, the title decides.
+      if (live() && details.isMainFrame && !details.isSameDocument) counter = undefined;
+      applyLive({ kind: 'start-navigation', url: details.url, isMainFrame: details.isMainFrame, isSameDocument: details.isSameDocument });
+    });
+    contents.on('dom-ready', () => applyLive({ kind: 'dom-ready' }));
+    contents.on('did-stop-loading', () => applyLive({ kind: 'stop-loading' }));
+    contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => applyLive({ kind: 'fail-load', code, description, url, isMainFrame }));
+    contents.on('render-process-gone', (_event, details) => applyLive({ kind: 'gone', reason: details.reason, host: new URL(service.url).host }));
+    contents.on('page-title-updated', (_event, title) => {
+      if (!live()) return;
+      titleUnread = service.unread(title);
+      if (refreshUnread()) options.onChange();
+    });
+    contents.ipc.on(Channel.unreadCounter, (_event, raw: unknown) => {
+      if (!live()) return;
+      counter = parseCounterReading(raw);
+      if (refreshUnread()) options.onChange();
+    });
+    // A page's "unsaved changes" prompt must not block Reload, Sign out or Hibernate; the app has no way to show it.
+    contents.on('will-prevent-unload', (event) => event.preventDefault());
+    const setFullscreen = (on: boolean) => {
+      if (!live()) return;
+      fullscreen = on;
+      options.onChange();
+    };
+    contents.on('enter-html-full-screen', () => setFullscreen(true));
+    contents.on('leave-html-full-screen', () => setFullscreen(false));
+
+    guardNavigation(contents, (url) => decideNavigation(service, url));
+
+    contents.setWindowOpenHandler(({ url, frameName }) => {
+      // Vencord's QuickCSS editor: a blank popup it fills itself, with its editor from the extension.
+      if (service.clientMod === 'vencord' && url === 'about:blank' && frameName === 'VencordQuickCss') {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 1000,
+            height: 760,
+            autoHideMenuBar: true,
+            backgroundColor: '#1e1e1e',
+            webPreferences: { partition, contextIsolation: true, sandbox: true, nodeIntegration: false },
+          },
+        };
+      }
+      const decision = decideWindowOpen(service, url);
+      if (decision === 'external') options.openLink(url);
+      if (decision !== 'popup') return { action: 'deny' };
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 720,
+          autoHideMenuBar: true,
+          backgroundColor: options.background,
+          webPreferences: { partition, contextIsolation: true, sandbox: true, nodeIntegration: false },
+        },
+      };
+    });
+    contents.on('did-create-window', (popup: BrowserWindow) => {
+      popups.add(popup);
+      popup.once('closed', () => popups.delete(popup));
+      popup.setMenu(null);
+      const popupContents = popup.webContents;
+      const showHost = (title = popupContents.getTitle()) => popup.setTitle(popupTitle(popupContents.getURL(), title));
+      popupContents.on('page-title-updated', (event, title) => {
+        event.preventDefault();
+        showHost(title);
+      });
+      popupContents.on('did-navigate', () => showHost());
+      popupContents.on('will-prevent-unload', (event) => event.preventDefault());
+      // A popup that heads anywhere else has done its job: the page opens in the browser instead.
+      guardNavigation(popupContents, (url) => decidePopupNavigation(service, url), () => setImmediate(() => popup.close()));
+      popupContents.setWindowOpenHandler(({ url }) => {
+        if (decideWindowOpen(service, url) !== 'block') options.openLink(url);
+        return { action: 'deny' };
+      });
+    });
+    contents.on('context-menu', (_event, params) => showPageMenu(contents, params));
+    return created;
   };
-  contents.on('enter-html-full-screen', () => setFullscreen(true));
-  contents.on('leave-html-full-screen', () => setFullscreen(false));
 
   const guardNavigation = (target: WebContents, decide: (url: string) => PageNavigation, onExternal = () => {}) => {
     const onNavigate = (event: { preventDefault(): void; url: string; isMainFrame: boolean }) => {
@@ -123,85 +207,81 @@ export function createServiceRuntime(service: ServiceDefinition, options: Runtim
       if (decision === 'stay') return;
       event.preventDefault();
       if (decision === 'external') {
-        openExternal(event.url);
+        options.openLink(event.url);
         onExternal();
       }
     };
     target.on('will-navigate', onNavigate);
     target.on('will-redirect', onNavigate);
   };
-  guardNavigation(contents, (url) => decideNavigation(service, url));
 
-  contents.setWindowOpenHandler(({ url, frameName }) => {
-    // Vencord's QuickCSS editor: a blank popup it fills itself, with its editor from the extension.
-    if (service.clientMod === 'vencord' && url === 'about:blank' && frameName === 'VencordQuickCss') {
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 1000,
-          height: 760,
-          autoHideMenuBar: true,
-          backgroundColor: '#1e1e1e',
-          webPreferences: { partition, contextIsolation: true, sandbox: true, nodeIntegration: false },
-        },
-      };
-    }
-    const decision = decideWindowOpen(service, url);
-    if (decision === 'external') openExternal(url);
-    if (decision !== 'popup') return { action: 'deny' };
-    return {
-      action: 'allow',
-      overrideBrowserWindowOptions: {
-        width: 520,
-        height: 720,
-        autoHideMenuBar: true,
-        backgroundColor: options.background,
-        webPreferences: { partition, contextIsolation: true, sandbox: true, nodeIntegration: false },
-      },
-    };
-  });
-  contents.on('did-create-window', (popup: BrowserWindow) => {
-    popups.add(popup);
-    popup.once('closed', () => popups.delete(popup));
-    popup.setMenu(null);
-    const popupContents = popup.webContents;
-    const showHost = (title = popupContents.getTitle()) => popup.setTitle(popupTitle(popupContents.getURL(), title));
-    popupContents.on('page-title-updated', (event, title) => {
-      event.preventDefault();
-      showHost(title);
-    });
-    popupContents.on('did-navigate', () => showHost());
-    popupContents.on('will-prevent-unload', (event) => event.preventDefault());
-    // A popup that heads anywhere else has done its job: the page opens in the browser instead.
-    guardNavigation(popupContents, (url) => decidePopupNavigation(service, url), () => setImmediate(() => popup.close()));
-    popupContents.setWindowOpenHandler(({ url }) => {
-      if (decideWindowOpen(service, url) !== 'block') openExternal(url);
-      return { action: 'deny' };
-    });
-  });
-  contents.on('context-menu', (_event, params) => showPageMenu(contents, params));
-  const restart = () => {
+  /** Loads `url` (a website's start page by default) into the page there is. */
+  const load = (url?: string) => {
+    const contents = view?.webContents;
+    if (!contents) return;
     apply({ kind: 'restart' });
-    const load = service.localPage ? contents.loadFile(join(options.localDir, 'renderer', `${service.localPage}.html`)) : contents.loadURL(service.url);
-    load.catch(() => {
+    const loading = service.localPage ? contents.loadFile(join(options.localDir, 'renderer', `${service.localPage}.html`)) : contents.loadURL(url ?? service.url);
+    loading.catch(() => {
       // did-fail-load already reported it.
     });
   };
-  restart();
+  const restart = () => load();
+  /** Set while sign-out wipes the login; a page asked for meanwhile opens once it is done. */
+  let wiping = false;
+  let afterWipe: { url: string | undefined } | undefined;
+  const wake = (url?: string) => {
+    if (view) return;
+    if (wiping) {
+      afterWipe = { url };
+      return;
+    }
+    view = createView();
+    options.onViewCreated(view);
+    load(url);
+  };
+  if (!options.hibernated) wake();
 
   return {
     service,
-    view,
+    view: () => view,
     status: () => status,
     unread: () => unread,
     fullscreen: () => fullscreen,
     restart,
-    reload: () => (status.kind === 'ready' ? contents.reload() : restart()),
+    reload: (ignoreCache = false) => {
+      if (!view) return;
+      if (status.kind !== 'ready') restart();
+      else if (ignoreCache) view.webContents.reloadIgnoringCache();
+      else view.webContents.reload();
+    },
+    hibernate() {
+      const closing = view;
+      if (!closing) return;
+      view = undefined;
+      for (const popup of popups) popup.destroy();
+      options.onViewClosed(closing);
+      // Closing the page ends its renderer process, which is where nearly all its memory is.
+      if (!closing.webContents.isDestroyed()) closing.webContents.close({ waitForBeforeUnload: false });
+      status = { kind: 'hibernated' };
+      titleUnread = NO_UNREAD;
+      counter = undefined;
+      fullscreen = false;
+      refreshUnread();
+      options.onChange();
+    },
+    wake: () => wake(),
+    open(url) {
+      if (wiping) afterWipe = { url };
+      else if (view) load(url);
+      else wake(url);
+    },
     async signOut() {
+      wiping = true;
       // Stop everything that could write the login back (unload handlers, timers, popups)
       // before wiping, or a page can restore its token after the wipe.
       for (const popup of popups) popup.destroy();
-      await contents.loadURL('about:blank').catch(() => {});
+      const page = view;
+      if (page) await page.webContents.loadURL('about:blank').catch(() => {});
       titleUnread = NO_UNREAD;
       counter = undefined;
       refreshUnread();
@@ -210,13 +290,18 @@ export function createServiceRuntime(service: ServiceDefinition, options: Runtim
         await ses.clearCache();
         await ses.clearAuthCache();
       } finally {
-        // Even after a failed wipe, bring the service back rather than leave a blank page.
-        restart();
+        wiping = false;
+        const next = afterWipe;
+        afterWipe = undefined;
+        // Even after a failed wipe, bring the service back rather than leave a blank page; a
+        // service asked to wake or open a link during the wipe does so now, signed out.
+        if (view && (view === page || next)) load(next?.url);
+        else if (!view && next) wake(next.url);
       }
     },
     setBackground: (color) => {
       background = color;
-      view.setBackgroundColor(color);
+      view?.setBackgroundColor(color);
     },
   };
 }

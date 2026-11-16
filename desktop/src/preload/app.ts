@@ -21,6 +21,8 @@ const api: KainosApi = {
   reportPointer: (over) => ipcRenderer.send(Channel.dockPointer, over === true),
   reportKeyboard: (focused) => ipcRenderer.send(Channel.dockKeyboard, focused === true),
   dismiss: () => ipcRenderer.send(Channel.dismissDock),
+  moveService: (serviceId, index) => ipcRenderer.send(Channel.moveService, serviceId, index),
+  reportDrag: (active) => ipcRenderer.send(Channel.dockDrag, active === true),
 };
 
 contextBridge.exposeInMainWorld('kainos', api);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { SERVICES, partitionFor } from './services.ts';
+import { SERVICES, canHibernate, findService, partitionFor } from './services.ts';
 
-test('registry has the inbox and four websites, with unique ids and https start pages', () => {
-  assert.deepEqual(SERVICES.map((s) => s.id), ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger']);
+test('registry has the inbox and five websites, with unique ids and https start pages', () => {
+  assert.deepEqual(SERVICES.map((s) => s.id), ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger', 'streamroom']);
   for (const service of SERVICES.filter((s) => !s.localPage)) {
     const start = new URL(service.url);
     assert.equal(start.protocol, 'https:');
@@ -14,7 +14,19 @@ test('registry has the inbox and four websites, with unique ids and https start 
 test('the phone texts page is the Texts service, drawn as a line icon among filled brand logos', () => {
   const texts = SERVICES[0]!;
   assert.deepEqual({ id: texts.id, name: texts.name, localPage: texts.localPage, paint: texts.icon.paint }, { id: 'inbox', name: 'Texts', localPage: 'inbox', paint: 'stroke' });
-  assert.deepEqual(SERVICES.slice(1).map((s) => s.icon.paint), ['fill', 'fill', 'fill', 'fill']);
+  assert.deepEqual(SERVICES.slice(1, 5).map((s) => s.icon.paint), ['fill', 'fill', 'fill', 'fill']);
+});
+
+test('Streamroom, which has no brand logo to borrow, is a line icon; it alone makes calls, claims its links and starts hibernated', () => {
+  const room = findService('streamroom')!;
+  assert.equal(room.icon.paint, 'stroke');
+  assert.deepEqual(SERVICES.filter((s) => s.calls).map((s) => s.id), ['streamroom']);
+  assert.deepEqual(SERVICES.filter((s) => s.claimsLinks).map((s) => s.id), ['streamroom']);
+  assert.deepEqual(SERVICES.filter((s) => s.startsHibernated).map((s) => s.id), ['streamroom']);
+});
+
+test('every website can hibernate; Texts, kept in the app itself, cannot', () => {
+  assert.deepEqual(SERVICES.filter((s) => !canHibernate(s)).map((s) => s.id), ['inbox']);
 });
 
 test('each service gets its own persistent login partition', () => {
@@ -25,6 +37,7 @@ test('each service gets its own persistent login partition', () => {
     'persist:service-discord',
     'persist:service-whatsapp',
     'persist:service-messenger',
+    'persist:service-streamroom',
   ]);
 });
 

@@ -91,6 +91,11 @@ export function forwardNotifications(host: NotificationHost): void {
     const sender = contents.id;
     book.begin(sender, request.id);
     const icon = (await loadIcon(contents.session, runtime.service.iconHosts, request.icon)) ?? host.fallbackIcon;
+    // The page closed while its icon loaded (its service hibernated, or was signed out).
+    if (contents.isDestroyed() || !host.runtimeFor(contents)) {
+      book.abandon(sender, request.id);
+      return;
+    }
     const notification = new Notification({ title: request.title, body: request.body, silent: request.silent, icon });
     const item = {
       close: () => {
