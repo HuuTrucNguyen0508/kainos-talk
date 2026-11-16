@@ -136,7 +136,9 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   services are kept with the window state. The service opened at launch is always awake, and
   Texts cannot hibernate (its texts live in the app itself, not in a page).
 - **Streamroom** opens `streamroom.adenkigo.workers.dev`, the Streamroom project's rooms for
-  screen sharing and voice. It starts hibernated the first time Kainos knows it, since a room is
+  screen sharing and voice. That deployment is private: starting a room needs its owner's
+  passphrase, so the address alone lets nobody use it. Others only join through an invite link the
+  owner sends, and an idle invite expires after an hour. It starts hibernated the first time Kainos knows it, since a room is
   opened for a call and then left; its tab wakes it. It may use the microphone, share the screen
   and pick the speaker. Sharing goes through the system's picker: on Linux under Wayland the
   desktop portal (`xdg-desktop-portal`) asks what to share, on macOS the system picker does, and
