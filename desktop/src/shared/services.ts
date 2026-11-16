@@ -1,3 +1,4 @@
+import { DEFAULT_LOCAL_PORT, localServer } from './streamroom.ts';
 import { unreadFromTitlePrefix, type Unread } from './unread.ts';
 
 /**
@@ -153,9 +154,10 @@ export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: 'streamroom',
     name: 'Streamroom',
-    // The user's own screen-share and voice rooms, hosted on Cloudflare (the Streamroom project).
-    url: 'https://streamroom.adenkigo.workers.dev/',
-    hosts: ['streamroom.adenkigo.workers.dev'],
+    // Screen-share and voice rooms from the Streamroom project. Which server it uses is a choice
+    // in its menu (shared/streamroom.ts): this computer until the user adds their own address.
+    url: `${localServer(DEFAULT_LOCAL_PORT)}/`,
+    hosts: ['localhost'],
     popupHosts: [],
     iconHosts: [],
     icon: {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SERVICES, findService } from '../shared/services.ts';
+import { withServers } from '../shared/streamroom.ts';
 import { claimingService, decideNavigation, decidePopupNavigation, decideWindowOpen, popupTitle } from './navigation.ts';
 
 const proton = findService('proton-mail')!;
@@ -67,9 +68,19 @@ test('a popup title names the host it shows', () => {
 });
 
 test('a Streamroom invite sent in another service opens in the Streamroom tab; other links do not', () => {
-  assert.equal(claimingService(SERVICES, 'https://streamroom.adenkigo.workers.dev/r/abc123#key')?.id, 'streamroom');
-  assert.equal(decideNavigation(findService('discord')!, 'https://streamroom.adenkigo.workers.dev/r/abc123'), 'external', 'it leaves Discord first');
-  for (const url of ['https://web.whatsapp.com/', 'http://streamroom.adenkigo.workers.dev/r/a', 'https://streamroom.adenkigo.workers.dev.evil.com/', 'not a url']) {
-    assert.equal(claimingService(SERVICES, url), undefined, url);
+  const services = SERVICES.map((s) => (s.id === 'streamroom' ? withServers(s, { current: 'https://rooms.example.org', saved: ['https://rooms.example.org', 'https://pc.tail1234.ts.net'], localPort: 8080 }) : s));
+  assert.equal(claimingService(services, 'https://rooms.example.org/r/abc123#key')?.id, 'streamroom');
+  assert.equal(claimingService(services, 'https://pc.tail1234.ts.net/?invite=x')?.id, 'streamroom', 'any saved server');
+  assert.equal(decideNavigation(findService('discord')!, 'https://rooms.example.org/r/abc123'), 'external', 'it leaves Discord first');
+  for (const url of ['https://web.whatsapp.com/', 'http://rooms.example.org/r/a', 'https://rooms.example.org.evil.com/', 'http://localhost:8080/r/a', 'not a url']) {
+    assert.equal(claimingService(services, url), undefined, url);
   }
+});
+
+test('Streamroom on this PC keeps its plain-http pages in the tab and claims their invites', () => {
+  const local = findService('streamroom')!;
+  assert.equal(decideNavigation(local, 'http://localhost:8080/r/abc'), 'stay');
+  assert.equal(decideNavigation(local, 'http://127.0.0.1:8080/'), 'external', 'another name for this PC is another host');
+  assert.equal(claimingService(SERVICES, 'http://localhost:8080/?invite=x')?.id, 'streamroom');
+  assert.equal(decideNavigation(findService('discord')!, 'http://localhost:8080/'), 'external', 'other services never trust plain http');
 });

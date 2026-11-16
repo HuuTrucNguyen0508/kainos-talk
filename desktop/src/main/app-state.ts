@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { normalizeHidden, normalizeOrder, visibleServices } from '../shared/dock-order.ts';
+import { DEFAULT_SERVERS, parseServers, type StreamroomServers } from '../shared/streamroom.ts';
 import { parseThemeChoice, type ThemeChoice } from '../shared/theme.ts';
 
 export interface Rect {
@@ -27,6 +28,8 @@ export interface AppState {
   readonly hiddenServiceIds: readonly string[];
   /** Services whose page is closed to save memory until their tab is opened. Never the active one. */
   readonly hibernatedServiceIds: readonly string[];
+  /** The Streamroom server the tab uses, and the addresses added to its menu. */
+  readonly streamroom: StreamroomServers;
 }
 
 /** What the registry says about the services, for reading and defaulting the state. */
@@ -54,6 +57,7 @@ export function defaultState(serviceIds: readonly string[], rules: StateRules = 
     serviceOrder: [...serviceIds],
     hiddenServiceIds: [],
     hibernatedServiceIds: normalizeHibernated(rules.startHibernated, serviceIds, rules, activeServiceId),
+    streamroom: DEFAULT_SERVERS,
   };
 }
 
@@ -106,6 +110,7 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
     serviceOrder,
     hiddenServiceIds,
     hibernatedServiceIds: normalizeHibernated([...savedHibernated, ...newcomers], serviceIds, rules, activeServiceId),
+    streamroom: isRecord(raw.streamroom) ? parseServers(raw.streamroom) : DEFAULT_SERVERS,
   };
 }
 

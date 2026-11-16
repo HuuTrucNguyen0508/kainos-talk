@@ -1,4 +1,4 @@
-import { BaseWindow, Menu, clipboard, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
+import { BaseWindow, Menu, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
@@ -14,6 +14,8 @@ import { startVencord } from './vencord.ts';
 import { startSmsSync } from './sms-sync.ts';
 import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
+import { STREAMROOM_ID, parseServer, serverChoices, serverLabel, thisPc, withCurrent, withLocalPort, withServers, withoutServer, type StreamroomServers } from '../shared/streamroom.ts';
+import { askServerAddress, type ServerDialogMode } from './server-dialog.ts';
 
 import { claimingService } from './navigation.ts';
 import { openExternal } from './open-external.ts';
@@ -154,8 +156,10 @@ async function start(): Promise<void> {
   win.contentView.addChildView(chrome);
   /** Pages made while the runtimes are being created; wired once everything they use exists. */
   let unwiredPages: WebContents[] | undefined = [];
+  /** Streamroom points at the server chosen in its menu; the other services are as registered. */
+  const configured = (service: (typeof SERVICES)[number]) => (service.id === STREAMROOM_ID ? withServers(service, state.streamroom) : service);
   const runtimes: ServiceRuntime[] = SERVICES.map((service) =>
-    createServiceRuntime(service, {
+    createServiceRuntime(configured(service), {
       userAgent: app.userAgentFallback,
       preload: join(__dirname, 'preload-service.cjs'),
       localDir: __dirname,
@@ -181,13 +185,16 @@ async function start(): Promise<void> {
 
   /** A link leaving a service: a service that claims its host (Streamroom's invites) opens it, else the browser. */
   function openLink(url: string): void {
-    const claimer = claimingService(SERVICES, url);
+    const claimer = claimingService(runtimes.map((runtime) => runtime.service), url);
     const runtime = claimer && runtimeById(claimer.id);
     if (!runtime) {
       openExternal(url);
       return;
     }
     const { id } = runtime.service;
+    // An invite from another of the user's Streamroom servers switches the tab to that server.
+    const server = id === STREAMROOM_ID ? parseServer(url) : undefined;
+    if (server && server !== state.streamroom.current) useServers(withCurrent(state.streamroom, server), false);
     if (state.hiddenServiceIds.includes(id)) showInDock(id);
     // Woken straight onto the link, not its start page first.
     if (state.hibernatedServiceIds.includes(id)) updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((other) => other !== id) }, 0);
@@ -465,6 +472,69 @@ async function start(): Promise<void> {
     render();
   }
 
+  /**
+   * Saves Streamroom's server choice and points the tab at it. `reload` loads the new server's
+   * start page if the tab is awake; a link being opened passes false, since it loads the link.
+   */
+  function useServers(servers: StreamroomServers, reload = true): void {
+    updateState({ streamroom: servers }, 0);
+    const runtime = runtimeById(STREAMROOM_ID);
+    if (!runtime) return;
+    runtime.retarget(withServers(runtime.service, servers));
+    if (reload) runtime.restart();
+    render();
+  }
+
+  /** Streamroom's Server submenu: this PC, the added addresses, adding another and this PC's port. */
+  function serverMenu(): MenuItemConstructorOptions[] {
+    const servers = state.streamroom;
+    const ask = (mode: ServerDialogMode) =>
+      askServerAddress({
+        mode,
+        parent: win,
+        localDir: __dirname,
+        background: themeBackground(),
+        onOpen: (contents) => (serverDialog = contents),
+        onClose: () => (serverDialog = undefined),
+      });
+    /** Switches the tab to `next` and shows it, as the window's button says. */
+    const openOn = (next: StreamroomServers) => {
+      useServers(next);
+      activate(STREAMROOM_ID);
+    };
+    return [
+      ...serverChoices(servers).map(
+        (origin): MenuItemConstructorOptions => ({
+          label: serverLabel(origin, servers),
+          type: 'radio',
+          checked: origin === servers.current,
+          click: () => {
+            if (origin !== state.streamroom.current) useServers(withCurrent(state.streamroom, origin));
+          },
+        }),
+      ),
+      { type: 'separator' },
+      { label: 'Add an address…', click: () => ask({ kind: 'address', onChoose: (origin) => openOn(withCurrent(state.streamroom, origin)) }) },
+      {
+        label: "Change this PC's port…",
+        click: () =>
+          ask({
+            kind: 'port',
+            port: state.streamroom.localPort,
+            onChoose: (port) => {
+              const moved = withLocalPort(state.streamroom, port);
+              openOn(withCurrent(moved, thisPc(moved)));
+            },
+          }),
+      },
+      ...(servers.current === thisPc(servers)
+        ? []
+        : [{ label: `Forget ${serverLabel(servers.current, servers)}`, click: () => useServers(withoutServer(state.streamroom, servers.current)) }]),
+    ];
+  }
+  /** The open Add an address window, themed like Kainos' other pages. */
+  let serverDialog: WebContents | undefined;
+
   /** Without `at` the menu opens at the pointer; a keyboard-opened menu passes its button's place. */
   function openServiceMenu(runtime: ServiceRuntime, at: MenuPoint | undefined): void {
     const { id, name } = runtime.service;
@@ -483,6 +553,7 @@ async function start(): Promise<void> {
           },
       ...(canHibernate(runtime.service) && !asleep ? [{ label: 'Hibernate', click: () => hibernate(id) }] : []),
       { label: muted ? 'Unmute notifications' : 'Mute notifications', click: () => setMuted(id, !muted) },
+      ...(id === STREAMROOM_ID ? [{ label: 'Server', submenu: serverMenu() }] : []),
       { type: 'separator' },
       { label: 'Move left', enabled: place > 0, click: () => moveInDock(id, place - 1) },
       { label: 'Move right', enabled: place >= 0 && place < tabs.length - 1, click: () => moveInDock(id, place + 1) },
@@ -503,7 +574,7 @@ async function start(): Promise<void> {
   }
 
   /** Kainos' own pages: the dock and the Texts page. Service pages keep their own colours. */
-  const themedPages = () => [dockContents, smsView()].filter((contents) => contents !== undefined);
+  const themedPages = () => [dockContents, smsView(), serverDialog].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
   function chooseTheme(theme: ThemeChoice): void {
     updateState({ theme }, 0);
     paintThemeBackground();

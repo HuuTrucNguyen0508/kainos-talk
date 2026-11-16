@@ -10,6 +10,7 @@ import { handleScreenShare } from './screen-share.ts';
 import { nextStatus, type PageEvent } from './service-status.ts';
 
 export interface ServiceRuntime {
+  /** The service as it is now: Streamroom's address follows the server chosen in its menu. */
   readonly service: ServiceDefinition;
   /** The page's view; none while the service hibernates. */
   view(): WebContentsView | undefined;
@@ -32,6 +33,11 @@ export interface ServiceRuntime {
    * restarts it. A hibernating service is wiped and stays asleep.
    */
   signOut(): Promise<void>;
+  /**
+   * Points the service at a new definition with the same id (Streamroom on another server). Its
+   * rules apply at once; the page keeps what it shows until it loads again (restart, wake).
+   */
+  retarget(next: ServiceDefinition): void;
   /** The colour behind the page while it paints: the sidebar's, so a dark theme never flashes white. */
   setBackground(color: string): void;
 }
@@ -54,7 +60,8 @@ export interface RuntimeOptions {
 }
 
 /** One service page: its own login partition, browser rules and load status. */
-export function createServiceRuntime(service: ServiceDefinition, options: RuntimeOptions): ServiceRuntime {
+export function createServiceRuntime(initial: ServiceDefinition, options: RuntimeOptions): ServiceRuntime {
+  let service = initial;
   const partition = partitionFor(service);
   const ses = session.fromPartition(partition);
   ses.setUserAgent(options.userAgent);
@@ -242,7 +249,9 @@ export function createServiceRuntime(service: ServiceDefinition, options: Runtim
   if (!options.hibernated) wake();
 
   return {
-    service,
+    get service() {
+      return service;
+    },
     view: () => view,
     status: () => status,
     unread: () => unread,
@@ -298,6 +307,10 @@ export function createServiceRuntime(service: ServiceDefinition, options: Runtim
         if (view && (view === page || next)) load(next?.url);
         else if (!view && next) wake(next.url);
       }
+    },
+    retarget(next) {
+      if (next.id !== service.id) throw new Error(`retarget: ${next.id} is not ${service.id}`);
+      service = next;
     },
     setBackground: (color) => {
       background = color;

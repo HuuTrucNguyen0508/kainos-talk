@@ -2,6 +2,7 @@
   "name": "kainos-talk",
   "private": true,
   "description": "One app for Proton Mail, Discord and WhatsApp.",
+  "license": "MIT",
   "packageManager": "pnpm@12.19.0",
   "scripts": {
     "build": "pnpm --filter desktop build",

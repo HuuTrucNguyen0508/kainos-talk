@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -6,6 +7,20 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.room)
     alias(libs.plugins.roborazzi)
+}
+
+// Release signing comes from android/signing.properties (git-ignored) or KAINOS_SIGNING_*
+// environment variables: storeFile, storePassword, keyAlias, keyPassword. Without them a
+// release build is unsigned; with only some of them it fails, so it never ships a wrong key.
+val signingFile = Properties().apply {
+    rootProject.file("signing.properties").takeIf { it.isFile }?.inputStream()?.use(::load)
+}
+val signingValues = listOf("storeFile", "storePassword", "keyAlias", "keyPassword").associateWith { key ->
+    providers.environmentVariable("KAINOS_SIGNING_" + key.uppercase()).orNull ?: signingFile.getProperty(key)
+}
+val missingSigning = signingValues.filterValues { it == null }.keys
+if (missingSigning.isNotEmpty() && missingSigning.size < signingValues.size) {
+    throw GradleException("Release signing is missing $missingSigning (android/signing.properties or KAINOS_SIGNING_*)")
 }
 
 android {
@@ -22,9 +37,19 @@ android {
         testInstrumentationRunner = "app.kainos.talk.KainosTestRunner"
     }
 
+    if (missingSigning.isEmpty()) {
+        signingConfigs.create("release") {
+            storeFile = file(signingValues.getValue("storeFile")!!)
+            storePassword = signingValues.getValue("storePassword")
+            keyAlias = signingValues.getValue("keyAlias")
+            keyPassword = signingValues.getValue("keyPassword")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

@@ -2,6 +2,7 @@
   "name": "desktop",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Kainos Talk desktop app",
   "main": "dist/main.cjs",
   "desktopName": "kainos-talk.desktop",
@@ -13,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
     "smoke": "pnpm build && node test/smoke.ts",
-    "install-launcher": "node scripts/install-launcher.ts"
+    "install-launcher": "node scripts/install-launcher.ts",
+    "package": "pnpm build && node scripts/package-icon.ts && electron-builder --linux AppImage --publish never"
   },
   "devDependencies": {
     "@fontsource/atkinson-hyperlegible": "^5.3.0",
@@ -21,10 +23,38 @@
     "bonjour-service": "^1.4.4",
     "dbus-next": "^0.10.2",
     "electron": "^45.3.0",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "fflate": "^0.8.3",
     "playwright": "^1.65.0",
     "selfsigned": "^5.5.0",
     "typescript": "^7.0.2"
+  },
+  "build": {
+    "appId": "app.kainos.talk",
+    "productName": "Kainos Talk",
+    "executableName": "kainos-talk",
+    "artifactName": "Kainos-Talk-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Network",
+      "icon": "build/icon.png",
+      "synopsis": "Proton Mail, Discord, WhatsApp, Messenger, Streamroom and your phone's texts in one window",
+      "desktop": {
+        "entry": {
+          "StartupWMClass": "kainos-talk"
+        }
+      }
+    }
   }
 }

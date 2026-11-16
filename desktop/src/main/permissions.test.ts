@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { findService } from '../shared/services.ts';
+import { withServers } from '../shared/streamroom.ts';
 import { allowPermission } from './permissions.ts';
 
 const discord = findService('discord')!;
@@ -35,14 +36,24 @@ test('denies other origins, other permissions and unknown media types', () => {
   assert.equal(ask('notifications', ''), false);
 });
 
-const room = findService('streamroom')!;
-const askRoom = (permission: string, origin = 'https://streamroom.adenkigo.workers.dev') => allowPermission(room, { permission, origin, mediaTypes: [] });
+const room = withServers(findService('streamroom')!, { current: 'https://rooms.example.org', saved: ['https://rooms.example.org'], localPort: 8080 });
+const askRoom = (permission: string, origin = 'https://rooms.example.org') => allowPermission(room, { permission, origin, mediaTypes: [] });
 
 test('a call app may also share the screen and pick the speaker, on its own pages only', () => {
   assert.equal(askRoom('display-capture'), true);
   assert.equal(askRoom('speaker-selection'), true);
-  assert.equal(allowPermission(room, { permission: 'media', origin: 'https://streamroom.adenkigo.workers.dev/r/abc', mediaTypes: ['audio'] }), true);
+  assert.equal(allowPermission(room, { permission: 'media', origin: 'https://rooms.example.org/r/abc', mediaTypes: ['audio'] }), true);
   assert.equal(askRoom('display-capture', 'https://evil.workers.dev'), false);
-  assert.equal(askRoom('display-capture', 'http://streamroom.adenkigo.workers.dev'), false);
+  assert.equal(askRoom('display-capture', 'http://rooms.example.org'), false);
   for (const permission of ['geolocation', 'clipboard-read', 'midi', 'hid']) assert.equal(askRoom(permission), false, permission);
+});
+
+test('Streamroom on this PC gets the same permissions over plain http, and only there', () => {
+  const local = findService('streamroom')!;
+  const ask = (origin: string, permission = 'display-capture') => allowPermission(local, { permission, origin, mediaTypes: [] });
+  assert.equal(ask('http://localhost:8080'), true);
+  assert.equal(ask('http://localhost:8080', 'speaker-selection'), true);
+  assert.equal(ask('http://192.168.1.20:8080'), false, 'a LAN address is not this PC');
+  assert.equal(ask('http://localhost.evil.com:8080'), false);
+  assert.equal(allowPermission(findService('discord')!, { permission: 'notifications', origin: 'http://localhost', mediaTypes: [] }), false);
 });

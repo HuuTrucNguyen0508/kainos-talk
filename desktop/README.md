@@ -4,7 +4,7 @@ Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger and Streamro
 page for the phone's SMS and RCS. A dock that slides up from the bottom of the window switches between them; each
 service runs in its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
 The websites load at startup and stay loaded, so they keep notifying, unless you hibernate one;
-Streamroom starts hibernated.
+Streamroom starts hibernated, and opens the Streamroom server picked in its menu.
 
 ## Commands
 
@@ -53,6 +53,8 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `test/fake-phone.ts` | A protocol-speaking stand-in for the phone, used by the unit and smoke tests. |
 | `src/main/service-runtime.ts` | One service view: session, user agent, permissions, navigation rules, load status. |
 | `src/main/navigation.ts` | Which links stay in a service, open as a popup, open in a service that claims them (Streamroom), or go to the system browser. |
+| `src/shared/streamroom.ts` | Streamroom's servers: reading an address, the saved choice, and the service pointed at it. |
+| `src/main/server-dialog.ts` | The Add a Streamroom address window (`src/renderer/server.ts`, `src/preload/server.ts`). |
 | `src/main/screen-share.ts` | Screen sharing for a call app (Streamroom): the system's picker, or a menu of screens and windows. |
 | `src/main/permissions.ts` | Notifications and mic/camera for the service's own origin, plus screen sharing and speaker choice for a call app; everything else denied. |
 | `src/main/notifications.ts` | Turns page notifications into native ones; mute and click-to-focus. |
@@ -135,17 +137,33 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   tab next to it opens, preferring one that is awake; hiding a tab does the same. Hibernating
   services are kept with the window state. The service opened at launch is always awake, and
   Texts cannot hibernate (its texts live in the app itself, not in a page).
-- **Streamroom** opens `streamroom.adenkigo.workers.dev`, the Streamroom project's rooms for
-  screen sharing and voice. That deployment is private: starting a room needs its owner's
-  passphrase, so the address alone lets nobody use it. Others only join through an invite link the
-  owner sends, and an idle invite expires after an hour. It starts hibernated the first time Kainos knows it, since a room is
-  opened for a call and then left; its tab wakes it. It may use the microphone, share the screen
-  and pick the speaker. Sharing goes through the system's picker: on Linux under Wayland the
-  desktop portal (`xdg-desktop-portal`) asks what to share, on macOS the system picker does, and
-  elsewhere a menu lists the screens and windows. Electron captures system sound with the screen
-  only on Windows. A Streamroom link opened in any other service (an invite sent in Discord or
-  WhatsApp) opens in the Streamroom tab, waking it, instead of the browser. Files sent in a room
-  ask where to save them.
+- **Streamroom** is the [Streamroom](https://github.com/HuuTrucNguyen0508/streamroom) project's
+  rooms for screen sharing and voice. Kainos holds no Streamroom server of its own: **Server**, in
+  the tab's menu, picks which one the tab opens.
+  - **This PC (localhost:8080)**, the default, is Streamroom run on this computer with
+    `pnpm start` (Streamroom's `docs/local.md`). Browsers allow the microphone and screen sharing
+    on plain http only for `localhost`, so Kainos trusts plain http there and nowhere else.
+    **Change this PC's port…** opens the same small window for a port, for a server started with
+    `PORT=8090 pnpm start`; **Use this port** moves This PC there and opens it.
+  - **Add an address…** opens a small window for any other server: your own Streamroom deployed
+    to Cloudflare from that project's code (`streamroom.your-name.workers.dev`, see its
+    `docs/cloudflare.md`), a Tailscale address (`https://your-pc.your-tailnet.ts.net`) for calls with
+    friends on your tailnet, or a second server on this PC (`localhost:8090`). A bare host means
+    https; a room or invite link gives its server. The line under the field reads back what will
+    open, and **Add and open** switches the tab to it.
+  - The added addresses stay in the menu, the current one checked; **Forget** drops the current one
+    and goes back to this PC. The choice is saved with the window state, not in the code.
+  - Each server keeps its own host login, since logins belong to an address. A deployment with
+    a host passphrase asks for it before a room can be started; invite links need none.
+
+  It starts hibernated the first time Kainos knows it, since a room is opened for a call and
+  then left; its tab wakes it. It may use the microphone, share the screen and pick the speaker.
+  Sharing goes through the system's picker: on Linux under Wayland the desktop portal
+  (`xdg-desktop-portal`) asks what to share, on macOS the system picker does, and elsewhere a
+  menu lists the screens and windows. Electron captures system sound with the screen only on
+  Windows. A Streamroom link to any added server opened in another service (an invite sent in
+  Discord or WhatsApp) opens in the Streamroom tab, waking it and switching it to that server,
+  instead of the browser. Files sent in a room ask where to save them.
 - **Messenger** opens `www.messenger.com`. Sign-in and security checks may pass through
   `www.facebook.com`, which stays inside the view.
 - **Texts** is not a website. Google refuses its sign-in inside Kainos ("This browser or app may not
@@ -203,7 +221,8 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   Sign out.
 - **Saved state** lives in `kainos-state.json` in Electron's userData folder: window bounds,
   maximised, last active service, muted services, whether the dock is always shown, the theme,
-  the dock's service order and hidden services, and the hibernating services.
+  the dock's service order and hidden services, the hibernating services, and Streamroom's
+  server, added addresses and this PC's port.
 - **Close** hides the window to the tray when a tray is running. On Linux that means a
   StatusNotifierItem host such as a panel or waybar; with none (common on Wayland compositors),
   closing quits.
@@ -213,13 +232,13 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
     Shift.
   - Ctrl+Q (Cmd+Q) quits.
   - F5 or Ctrl+R (Cmd+R) reloads the open service, which picks up a new version of the site
-    (Streamroom after a deploy). Shift+F5, Ctrl+F5 or Ctrl+Shift+R fetch every file again,
+    (Streamroom after a deploy or a restart of its local server). Shift+F5, Ctrl+F5 or Ctrl+Shift+R fetch every file again,
     past the cache.
   - F6 moves keyboard focus from the page to its tab in the dock (bringing a hidden dock up), and
     back. Left and right arrows move between the tabs, Alt+Left and Alt+Right move the focused
     tab (its new place is announced to screen readers); Escape goes back to the page.
   - On a dock tab, the Menu key or Shift+F10 opens the service menu (Reload or Wake, Hibernate,
-    Mute, Move left, Move right, Hide from dock, Sign out) at the tab.
+    Mute, Server for Streamroom, Move left, Move right, Hide from dock, Sign out) at the tab.
 
 ## After you sign in
 

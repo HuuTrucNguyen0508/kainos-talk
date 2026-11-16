@@ -1,4 +1,4 @@
-import { hostMatches } from '../shared/hosts.ts';
+import { isOwnPage } from '../shared/hosts.ts';
 import type { ServiceDefinition } from '../shared/services.ts';
 
 function parse(url: string): URL | undefined {
@@ -9,9 +9,7 @@ function parse(url: string): URL | undefined {
   }
 }
 
-function onHosts(url: URL, patterns: readonly string[]): boolean {
-  return url.protocol === 'https:' && patterns.some((pattern) => hostMatches(pattern, url.hostname));
-}
+const onHosts = isOwnPage;
 
 /** Schemes we hand to the operating system. Everything else is dropped. */
 export function isExternalSafe(url: string): boolean {

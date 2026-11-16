@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Add a Streamroom address</title>
+    <link rel="stylesheet" href="server.css" />
+    <script src="server.js" defer></script>
+  </head>
+  <body>
+    <form id="add" novalidate>
+      <h1 id="title">Add a Streamroom address</h1>
+      <p class="lead" id="lead">Your own Streamroom on Cloudflare, or a Tailscale address for calls on your tailnet.</p>
+      <label for="address" id="label">Address</label>
+      <div class="field">
+        <input id="address" name="address" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="streamroom.your-name.workers.dev" aria-describedby="reading" required autofocus />
+      </div>
+      <p id="reading" class="reading" aria-live="polite"></p>
+      <div class="actions">
+        <button type="button" id="cancel" class="secondary">Cancel</button>
+        <button type="submit" id="submit" class="primary">Add and open</button>
+      </div>
+    </form>
+  </body>
+</html>

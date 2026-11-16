@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SERVICES, canHibernate, findService, partitionFor } from './services.ts';
 
-test('registry has the inbox and five websites, with unique ids and https start pages', () => {
+test('registry has the inbox and five websites, with unique ids and secure start pages', () => {
   assert.deepEqual(SERVICES.map((s) => s.id), ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger', 'streamroom']);
   for (const service of SERVICES.filter((s) => !s.localPage)) {
     const start = new URL(service.url);
-    assert.equal(start.protocol, 'https:');
+    // Streamroom starts on a server on this computer, which browsers treat as secure.
+    assert.equal(start.protocol, service.id === 'streamroom' ? 'http:' : 'https:');
     assert.ok(service.hosts.includes(start.hostname), `${service.id} start page must be one of its hosts`);
   }
 });

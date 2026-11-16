@@ -5,7 +5,9 @@
 // browser. Screenshots land in desktop/.verify/ (or KAINOS_VERIFY_DIR).
 import { _electron, type ElectronApplication, type Page } from 'playwright';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -179,10 +181,13 @@ async function privateBus(): Promise<PrivateBus> {
 
 let bus: PrivateBus | undefined;
 
+/** KAINOS_SMOKE_APP runs a packaged build (release/linux-unpacked/kainos-talk) instead of this checkout. */
+const packaged = process.env.KAINOS_SMOKE_APP;
+
 function launch(profile: string): Promise<ElectronApplication> {
   return _electron.launch({
-    executablePath: electronPath,
-    args: ['--ozone-platform=headless', '--ozone-override-screen-size=1400,900', '--disable-gpu', '--mute-audio', desktop],
+    executablePath: packaged ?? electronPath,
+    args: ['--ozone-platform=headless', '--ozone-override-screen-size=1400,900', '--disable-gpu', '--mute-audio', ...(packaged ? [] : [desktop])],
     env: offDesktop({
       KAINOS_USER_DATA: profile,
       KAINOS_BLOCK_EXTERNAL: '1',
@@ -548,13 +553,36 @@ function nextAppEvent<T>(app: ElectronApplication, event: string): Promise<T> {
   ) as Promise<T>;
 }
 
+/**
+ * A stand-in Streamroom server on this computer, so the run never depends on anyone's real
+ * deployment: every path answers a page titled `title`. Resolves to its origin.
+ */
+async function standInRoom(title: string, servers: Server[]): Promise<string> {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html><title>${title}</title><h1>${title}</h1>`);
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return `http://localhost:${(server.address() as AddressInfo).port}`;
+}
+/** The stand-in Streamroom the run starts on, a second added from its Server menu, and a third that This PC's port is moved to. */
+let room = '';
+let otherRoom = '';
+let pcRoom = '';
+
 async function main(): Promise<void> {
   mkdirSync(verify, { recursive: true });
   bus = await privateBus();
+  const servers: Server[] = [];
   const profile = mkdtempSync(join(tmpdir(), 'kainos-smoke-'));
   try {
+    room = await standInRoom('Streamroom stand-in', servers);
+    otherRoom = await standInRoom('Second Streamroom', servers);
+    pcRoom = await standInRoom('Streamroom on this PC', servers);
     await run(profile);
   } finally {
+    for (const server of servers) server.close();
     rmSync(profile, { recursive: true, force: true });
   }
 }
@@ -583,7 +611,8 @@ async function run(profile: string): Promise<void> {
   }
   // Saved state from a "previous session" of older versions: WhatsApp was open, Discord was
   // muted, the side bar sat on the right, auto-hidden, and the dock's services on the right.
-  writeFileSync(stateFile, JSON.stringify({ activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true, dockAlign: 'end' }));
+  // Streamroom points at the stand-in server, as if the user had added it from its menu.
+  writeFileSync(stateFile, JSON.stringify({ activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true, dockAlign: 'end', streamroom: { current: room } }));
 
   let app = await launch(profile);
   let quitByKey = false;
@@ -1373,7 +1402,6 @@ async function run(profile: string): Promise<void> {
     // brings it back without opening it, and an invite link sent in another service opens in
     // its tab instead of the browser.
     {
-      const room = 'https://streamroom.adenkigo.workers.dev';
       const pageViews = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.contentView.children.length - 1);
       const roomPages = () =>
         app.evaluate(({ webContents, session }) => webContents.getAllWebContents().filter((c) => !c.isDestroyed() && c.session === session.fromPartition('persist:service-streamroom')).length);
@@ -1395,7 +1423,7 @@ async function run(profile: string): Promise<void> {
       check(woke === 'ready' && (await activeTab(page)) === 'streamroom', 'opening its tab wakes Streamroom and shows it', `${woke}, active ${await activeTab(page)}`);
       check((await pageViews()) === SERVICE_IDS.length && (await tabState(page, 'streamroom')) === ':', '... with a page of its own again and no moon', `${await pageViews()} views`);
       check(!savedAsleep().includes('streamroom'), '... and is saved as awake', savedAsleep());
-      live(/Streamroom/i.test(await inService<string>(app, 'streamroom', 'document.title + document.body.innerText')), 'Streamroom shows its start page (live site)', await serviceUrl(app, 'streamroom'));
+      check((await inService<string>(app, 'streamroom', 'document.title')) === 'Streamroom stand-in', 'Streamroom shows its server, on this PC over plain http', await serviceUrl(app, 'streamroom'));
       await sleep(1500);
       await screenshot(app, '06-streamroom-awake');
 
@@ -1420,7 +1448,7 @@ async function run(profile: string): Promise<void> {
 
       check(await openMenu('Reload Streamroom'), "Streamroom's menu opens");
       check(
-        JSON.stringify(await menuItems(app)) === '["Reload Streamroom","Hibernate","Mute notifications","Move left","(Move right)","Hide from dock","Sign out of Streamroom…"]',
+        JSON.stringify(await menuItems(app)) === '["Reload Streamroom","Hibernate","Mute notifications","Server","Move left","(Move right)","Hide from dock","Sign out of Streamroom…"]',
         "an awake website's menu offers Hibernate",
         JSON.stringify(await menuItems(app)),
       );
@@ -1454,6 +1482,81 @@ async function run(profile: string): Promise<void> {
       await inService(app, 'whatsapp', `window.open('https://example.com/kainos-smoke', '_blank'); 0`, true);
       const others = await poll(() => app.evaluate(() => (globalThis as Record<string, unknown>).__external as string[]), (list) => list.length > 0, 5000);
       check(JSON.stringify(others) === '["https://example.com/kainos-smoke"]', '... while other links still go to the browser', JSON.stringify(others));
+
+      // The Server submenu lists this PC and the added addresses. Add an address… opens a window
+      // that reads back what will open, refuses plain http off this PC, and switches the tab.
+      {
+        const host = new URL(room).host;
+        const otherHost = new URL(otherRoom).host;
+        const savedRooms = () => JSON.stringify((JSON.parse(readFileSync(stateFile, 'utf8')) as { streamroom?: unknown }).streamroom);
+        await pressShortcut(app, page, 'dock', digit('streamroom'));
+        check(await openMenu('Reload Streamroom'), "Streamroom's menu opens with its server list");
+        const listed = JSON.stringify(await submenuLabels(app, 'Server'));
+        check(listed === JSON.stringify(['This PC (localhost:8080)', `*${host}`, '', 'Add an address…', "Change this PC's port…", `Forget ${host}`]), '... this PC, then the added address, checked', listed);
+        await clickMenuItem(app, 'Server > Add an address…');
+        const dialog = await poll(async () => app.windows().find((w) => w.url().includes('/renderer/server.html?mode=address')), Boolean, 10_000);
+        check(dialog !== undefined, 'Add an address… opens its window');
+        if (dialog) {
+          await dialog.waitForSelector('#address');
+          const theme = (JSON.parse(readFileSync(stateFile, 'utf8')) as { theme?: string }).theme;
+          const shown = await poll(() => dialog.evaluate(() => document.documentElement.getAttribute('data-theme')), (t) => t === (theme === 'system' ? null : theme), 3000);
+          check(shown === (theme === 'system' ? null : theme), '... in the theme of the dock', `${shown} for ${theme}`);
+          check(await dialog.locator('#submit').isDisabled(), '... and Add and open waits for an address');
+          await dialog.fill('#address', 'http://192.168.1.20:8080');
+          await dialog.press('#address', 'Enter');
+          const refused = await poll(() => dialog.locator('#reading').innerText(), (t) => /this PC/.test(t), 3000);
+          check(/only works for a server on this PC/.test(refused) && !dialog.isClosed(), 'plain http on another computer is refused, with the reason', refused);
+          await dialog.fill('#address', `localhost:${new URL(otherRoom).port}`);
+          const reads = await dialog.locator('#reading').innerText();
+          check(reads === `Opens ${otherRoom}`, '... and a typed address reads back what will open', reads);
+          await dialog.screenshot({ path: join(verify, '07-add-streamroom-address.png') });
+          // The window closes while the key is still being pressed, which is the point.
+          await dialog.press('#address', 'Enter').catch(() => {});
+          const gone = await poll(async () => dialog.isClosed(), Boolean, 5000);
+          const moved = await poll(() => serviceUrl(app, 'streamroom'), (url) => url.startsWith(otherRoom), 15_000);
+          check(gone && moved.startsWith(otherRoom), 'Add and open closes the window and opens the new server in the tab', moved);
+          check(savedRooms() === JSON.stringify({ current: otherRoom, saved: [room, otherRoom], localPort: 8080 }), '... and saves it after the first', savedRooms());
+        }
+        check(await openMenu('Reload Streamroom'), "Streamroom's menu lists the new server");
+        const relisted = JSON.stringify(await submenuLabels(app, 'Server'));
+        check(relisted === JSON.stringify(['This PC (localhost:8080)', host, `*${otherHost}`, '', 'Add an address…', "Change this PC's port…", `Forget ${otherHost}`]), '... checked, after the first', relisted);
+        await clickMenuItem(app, `Server > ${host}`);
+        const back = await poll(() => serviceUrl(app, 'streamroom'), (url) => url.startsWith(room), 15_000);
+        const backTitle = await poll(() => inService<string>(app, 'streamroom', 'document.title'), (t) => t === 'Streamroom stand-in', 10_000);
+        check(back.startsWith(room) && backTitle === 'Streamroom stand-in', 'picking a server in the menu reloads the tab on it', back);
+        check(savedRooms() === JSON.stringify({ current: room, saved: [room, otherRoom], localPort: 8080 }), '... and saves the choice', savedRooms());
+
+        // Change this PC's port…: the same window for a port, which moves This PC and opens it.
+        const pcPort = new URL(pcRoom).port;
+        check(await openMenu('Reload Streamroom'), "Streamroom's menu opens for the port");
+        await clickMenuItem(app, "Server > Change this PC's port…");
+        const portDialog = await poll(async () => app.windows().find((w) => w.url().includes('/renderer/server.html') && w.url().includes('mode=port')), Boolean, 10_000);
+        check(portDialog !== undefined, "Change this PC's port… opens the window for a port");
+        if (portDialog) {
+          await portDialog.waitForSelector('#address');
+          const opened = { title: await portDialog.locator('h1').innerText(), value: await portDialog.inputValue('#address'), button: await portDialog.locator('#submit').innerText() };
+          check(JSON.stringify(opened) === JSON.stringify({ title: "Change this PC's port", value: '8080', button: 'Use this port' }), '... titled for it, holding the current port', JSON.stringify(opened));
+          await portDialog.fill('#address', '99999');
+          await portDialog.press('#address', 'Enter');
+          const refused = await poll(() => portDialog.locator('#reading').innerText(), (t) => /65535/.test(t), 3000);
+          check(/from 1 to 65535/.test(refused), '... refuses a port out of range, with the reason', refused);
+          await portDialog.fill('#address', pcPort);
+          const reads = await portDialog.locator('#reading').innerText();
+          check(reads === `Opens ${pcRoom}`, '... and reads back the address it will open', reads);
+          await portDialog.screenshot({ path: join(verify, '08-change-this-pc-port.png') });
+          await portDialog.press('#address', 'Enter').catch(() => {});
+          await poll(async () => portDialog.isClosed(), Boolean, 5000);
+          const onPc = await poll(() => inService<string>(app, 'streamroom', 'document.title'), (t) => t === 'Streamroom on this PC', 15_000);
+          check(onPc === 'Streamroom on this PC', 'Use this port opens This PC on the new port', await serviceUrl(app, 'streamroom'));
+          check(savedRooms() === JSON.stringify({ current: pcRoom, saved: [room, otherRoom], localPort: Number(pcPort) }), '... and saves the port', savedRooms());
+          check(await openMenu('Reload Streamroom'), "Streamroom's menu shows the new port");
+          const moved = JSON.stringify((await submenuLabels(app, 'Server')).slice(0, 3));
+          check(moved === JSON.stringify([`*This PC (localhost:${pcPort})`, host, otherHost]), '... as This PC, checked', moved);
+          await clickMenuItem(app, `Server > ${host}`);
+          await poll(() => serviceUrl(app, 'streamroom'), (url) => url.startsWith(room), 15_000);
+        }
+        await pressShortcut(app, page, 'dock', digit('whatsapp'));
+      }
 
       // Asleep again for the rest of the run.
       await openMenu('Reload Streamroom');

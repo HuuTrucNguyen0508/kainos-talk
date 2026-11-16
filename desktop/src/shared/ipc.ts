@@ -38,6 +38,10 @@ export const Channel = {
   theme: 'kainos:theme',
   /** Dock to main: move a service to a place among the dock's tabs (id, index from parseDockIndex). */
   moveService: 'kainos:move-service',
+  /** Add a Streamroom address window to main: the typed address; answers undefined or the problem. */
+  serverAdd: 'kainos:server-add',
+  /** Add a Streamroom address window to main: Cancel or Escape. */
+  serverCancel: 'kainos:server-cancel',
   /** Dock to main: a tab drag started (true) or ended (false). */
   dockDrag: 'kainos:dock-drag',
 } as const;

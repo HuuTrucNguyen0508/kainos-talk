@@ -1,5 +1,5 @@
 import type { ServiceDefinition } from '../shared/services.ts';
-import { hostMatches } from '../shared/hosts.ts';
+import { isOwnPage } from '../shared/hosts.ts';
 
 export interface PermissionAsk {
   readonly permission: string;
@@ -9,7 +9,7 @@ export interface PermissionAsk {
   readonly mediaTypes: readonly string[];
 }
 
-/** Granted to the service's own https pages without asking. */
+/** Granted to the service's own pages (https, or http on this computer) without asking. */
 const OWN_PAGE_PERMISSIONS = new Set([
   'notifications',
   // navigator.clipboard.writeText behind the page's Copy buttons. Reading stays denied.
@@ -20,12 +20,12 @@ const OWN_PAGE_PERMISSIONS = new Set([
   'persistent-storage',
 ]);
 
-/** Also granted to a call app's own https pages (`calls` in the registry). */
+/** Also granted to a call app's own pages (`calls` in the registry). */
 const CALL_PERMISSIONS = new Set(['display-capture', 'speaker-selection']);
 
 /**
  * Notifications, copy, fullscreen, persistent storage and microphone/camera are allowed for
- * the service's own https pages, and screen sharing and speaker choice for a call app's. Every other permission, and any request from another origin,
+ * the service's own pages, and screen sharing and speaker choice for a call app's. Every other permission, and any request from another origin,
  * is denied.
  */
 export function allowPermission(service: ServiceDefinition, ask: PermissionAsk): boolean {
@@ -35,8 +35,7 @@ export function allowPermission(service: ServiceDefinition, ask: PermissionAsk):
   } catch {
     return false;
   }
-  const own = origin.protocol === 'https:' && service.hosts.some((pattern) => hostMatches(pattern, origin.hostname));
-  if (!own) return false;
+  if (!isOwnPage(origin, service.hosts)) return false;
   if (OWN_PAGE_PERMISSIONS.has(ask.permission)) return true;
   if (ask.permission === 'media') return ask.mediaTypes.every((type) => type === 'audio' || type === 'video');
   // A call app shares the screen (the system's own picker chooses what) and plays the call on
