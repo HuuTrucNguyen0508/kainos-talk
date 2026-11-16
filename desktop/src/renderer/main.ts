@@ -379,7 +379,7 @@ list.addEventListener(
 function renderPhone(snapshot: Snapshot): void {
   const link = snapshot.phone;
   const key = link ? `${link.name}:${link.connected}` : '';
-  phone.hidden = false;
+  phone.hidden = !snapshot.texts;
   if (phone.dataset.key === key) return;
   phone.dataset.key = key;
   phone.toggleAttribute('data-off', link !== null && !link.connected);

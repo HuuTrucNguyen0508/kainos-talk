@@ -25,6 +25,17 @@ export function unreadFromTitlePrefix(title: string): Unread {
   return NO_UNREAD;
 }
 
+/**
+ * Gmail's title, "Inbox (3) - name@gmail.com - Gmail": the count follows the folder's name.
+ * Another folder ("Sent Mail - …") has no count, and neither does an empty inbox.
+ */
+export function unreadFromGmailTitle(title: string): Unread {
+  const counted = /^[^()-]*?\((\d{1,3}(?:[,. \u00a0\u202f]\d{3})+|\d{1,7})(\+)?\)/.exec(title);
+  if (!counted) return NO_UNREAD;
+  const count = Number(counted[1]!.replace(/\D/g, '')) + (counted[2] ? 1 : 0);
+  return count > 0 ? { kind: 'count', count } : NO_UNREAD;
+}
+
 /** What the service preload saw of the page's own unread counter. */
 export interface CounterReading {
   /** Whether the element the counter belongs to (Proton's Inbox link) is on the page. */

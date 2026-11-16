@@ -7,6 +7,7 @@ import { decideNavigation, decidePopupNavigation, decideWindowOpen, isExternalSa
 import { openExternal } from './open-external.ts';
 import { allowPermission } from './permissions.ts';
 import { handleScreenShare } from './screen-share.ts';
+import { firefoxUserAgent } from './user-agent.ts';
 import { nextStatus, type PageEvent } from './service-status.ts';
 
 export interface ServiceRuntime {
@@ -77,6 +78,17 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       mediaTypes: details.mediaType && details.mediaType !== 'unknown' ? [details.mediaType] : [],
     }),
   );
+  // Google refuses to sign in inside an app it takes for an embedded Chrome. Its sign-in pages
+  // get Firefox's user agent, without Chrome's client hints; the preload does the same in the page.
+  if (service.googleSignIn) {
+    const firefox = firefoxUserAgent(process.platform, new Date());
+    ses.webRequest.onBeforeSendHeaders({ urls: ['https://accounts.google.com/*'] }, (details, callback) => {
+      const headers: Record<string, string | string[]> = {};
+      for (const [name, value] of Object.entries(details.requestHeaders)) if (!/^sec-ch-ua/i.test(name)) headers[name] = value;
+      headers['User-Agent'] = firefox;
+      callback({ requestHeaders: headers });
+    });
+  }
   if (service.calls) handleScreenShare(ses, (origin) => allowPermission(service, { permission: 'display-capture', origin, mediaTypes: [] }));
 
   let status: ServiceStatus = options.hibernated ? { kind: 'hibernated' } : { kind: 'loading' };
@@ -110,7 +122,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
         partition,
         preload: service.localPage ? join(options.localDir, `preload-${service.localPage}.cjs`) : options.preload,
         // Tells the preload which service it is in (for its unread counter).
-        additionalArguments: [`--kainos-service=${service.id}`],
+        additionalArguments: [`--kainos-service=${service.id}`, ...(service.googleSignIn ? [`--kainos-firefox=${firefoxUserAgent(process.platform, new Date())}`] : [])],
         contextIsolation: true,
         sandbox: true,
         nodeIntegration: false,

@@ -7,7 +7,7 @@ import { _electron, type ElectronApplication, type Page } from 'playwright';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -584,6 +584,102 @@ async function main(): Promise<void> {
   } finally {
     for (const server of servers) server.close();
     rmSync(profile, { recursive: true, force: true });
+  }
+  const fresh = mkdtempSync(join(tmpdir(), 'kainos-smoke-welcome-'));
+  try {
+    await welcome(fresh);
+  } finally {
+    rmSync(fresh, { recursive: true, force: true });
+  }
+}
+
+/** Whether something accepts TCP connections on this PC's `port` (the phone sync, while Texts is on). */
+function listening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: '127.0.0.1', port });
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+/**
+ * First launch on a new profile: Kainos opens on Choose your apps with nothing on and nothing
+ * loaded; the choice makes the dock, survives a restart, and can be changed from the dock's menu.
+ */
+async function welcome(profile: string): Promise<void> {
+  const stateFile = join(profile, 'kainos-state.json');
+  const saved = () => JSON.parse(readFileSync(stateFile, 'utf8')) as { enabledServiceIds?: string[]; welcomed?: boolean };
+  const findPage = (app: ElectronApplication, part: string) => poll(async () => app.windows().find((w) => w.url().includes(part)), Boolean, 20_000);
+  const views = (app: ElectronApplication) => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.contentView.children.length);
+  // The main run ends with no tray host; with none at startup Electron's tray falls back to GTK and crashes off screen.
+  bus!.setTrayHost(true);
+  let app = await launch(profile);
+  try {
+    await stubMenusAndDialogs(app);
+    const choose = await findPage(app, '/renderer/apps.html');
+    check(choose !== undefined, 'first launch opens on Choose your apps');
+    if (!choose) return;
+    await choose.waitForSelector('.app');
+    const first = {
+      title: await choose.locator('h1').innerText(),
+      cancel: await choose.locator('#cancel').isVisible(),
+      start: await choose.locator('#save').isDisabled(),
+      status: await choose.locator('#status').innerText(),
+      on: await choose.locator('.switch:checked').count(),
+    };
+    check(JSON.stringify(first) === JSON.stringify({ title: 'Choose your apps', cancel: false, start: true, status: 'Pick at least one app.', on: 0 }), '... with nothing on, no Cancel, and Start waiting for a choice', JSON.stringify(first));
+    const names = await choose.locator('.name').allInnerTexts();
+    check(JSON.stringify(names) === JSON.stringify(['Texts', 'Proton Mail', 'Discord', 'WhatsApp', 'Messenger', 'Streamroom', 'Gmail']), '... listing every app, Gmail included', JSON.stringify(names));
+    check((await views(app)) === 2, '... while no service page loads behind it (only the dock and this page)', String(await views(app)));
+    check(!(await listening(syncPort)), '... and nothing listens for the phone yet');
+    await choose.locator('.app', { hasText: 'Texts' }).click();
+    await choose.locator('.app', { hasText: 'Proton Mail' }).click();
+    const ready = { button: await choose.locator('#save').innerText(), dock: await choose.locator('#dock .tile').count() };
+    check(JSON.stringify(ready) === JSON.stringify({ button: 'Start with 2 apps', dock: 2 }), 'switching apps on fills the dock preview and names the count on Start', JSON.stringify(ready));
+    await choose.screenshot({ path: join(verify, '09-choose-your-apps.png') });
+    await choose.locator('#save').click();
+    const gone = await poll(async () => choose.isClosed() || !(await choose.locator('#save').isVisible().catch(() => false)), Boolean, 5000);
+    check(gone, 'Start closes Choose your apps');
+    const dock = await findPage(app, '/renderer/index.html');
+    const order = dock ? await poll(() => tabOrder(dock), (o) => o === 'inbox proton-mail', 10_000) : '';
+    check(order === 'inbox proton-mail', '... and the dock has exactly the apps chosen', order);
+    check(JSON.stringify(saved().enabledServiceIds) === '["inbox","proton-mail"]' && saved().welcomed === true, '... saved as chosen', JSON.stringify(saved()));
+    check(await poll(() => listening(syncPort), Boolean, 10_000), 'Texts on starts listening for the phone');
+
+    // Later: Choose apps… in the dock options menu, with Cancel, switching Texts off and Messenger on.
+    if (dock) {
+      await dock.evaluate(() => (window as unknown as { kainos: { openBarMenu(): void } }).kainos.openBarMenu());
+      await poll(() => menus(app), (all) => all.length > 0, 5000);
+      check(await clickMenuItem(app, 'Choose apps…'), 'the dock options menu has Choose apps…');
+      const again = await findPage(app, '/renderer/apps.html');
+      if (again) {
+        await again.waitForSelector('.app');
+        const later = { title: await again.locator('h1').innerText(), cancel: await again.locator('#cancel').isVisible(), on: await again.locator('.switch:checked').count() };
+        check(JSON.stringify(later) === JSON.stringify({ title: 'Your apps', cancel: true, on: 2 }), '... which opens Your apps, with the current choice and a Cancel', JSON.stringify(later));
+        await again.locator('.app', { hasText: 'Texts' }).click();
+        await again.locator('.app', { hasText: 'Messenger' }).click();
+        await again.locator('#save').click();
+        const changed = await poll(() => tabOrder(dock), (o) => o === 'proton-mail messenger', 10_000);
+        check(changed === 'proton-mail messenger', 'saving switches Texts off and Messenger on in the dock', changed);
+        check(await dock.locator('#phone').isHidden(), '... with no phone island once Texts is off');
+        check(!(await poll(() => listening(syncPort), (on) => !on, 10_000)), '... and nothing listening for the phone any more');
+      }
+    }
+  } finally {
+    await shutdown(app);
+  }
+
+  app = await launch(profile);
+  try {
+    const dock = await findPage(app, '/renderer/index.html');
+    const order = dock ? await poll(() => tabOrder(dock), (o) => o === 'proton-mail messenger', 20_000) : '';
+    check(order === 'proton-mail messenger', 'the next launch keeps the chosen apps and skips the welcome', order);
+    check(app.windows().every((w) => !w.url().includes('/renderer/apps.html')), '... with no Choose your apps page');
+  } finally {
+    await shutdown(app);
   }
 }
 
@@ -1312,7 +1408,7 @@ async function run(profile: string): Promise<void> {
     await revealDock(app, page, 'whatsapp');
     await page.locator('#dock-options').click();
     const dockMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000)).at(-1);
-    check(JSON.stringify(dockMenu?.labels) === '["Always show the dock","Hidden services","Theme"]', 'the Kainos mark opens the dock options: Always show the dock, Hidden services, Theme', JSON.stringify(dockMenu?.labels));
+    check(JSON.stringify(dockMenu?.labels) === '["Always show the dock","Hidden services","Choose apps…","Theme"]', 'the Kainos mark opens the dock options: Always show the dock, Hidden services, Choose apps…, Theme', JSON.stringify(dockMenu?.labels));
     const themeItems = await submenuLabels(app, 'Theme');
     check(JSON.stringify(themeItems) === '["*Match system","Switchboard","Daylight","Bakelite","Carbon","Aubergine"]', 'Theme offers Match system (picked) and the five themes', JSON.stringify(themeItems));
     await clickMenuItem(app, 'Always show the dock');
@@ -1492,7 +1588,8 @@ async function run(profile: string): Promise<void> {
         await pressShortcut(app, page, 'dock', digit('streamroom'));
         check(await openMenu('Reload Streamroom'), "Streamroom's menu opens with its server list");
         const listed = JSON.stringify(await submenuLabels(app, 'Server'));
-        check(listed === JSON.stringify(['This PC (localhost:8080)', `*${host}`, '', 'Add an address…', "Change this PC's port…", `Forget ${host}`]), '... this PC, then the added address, checked', listed);
+        const guides = ['', 'Run Streamroom on this PC…', 'Deploy your own on Cloudflare…'];
+        check(listed === JSON.stringify(['This PC (localhost:8080)', `*${host}`, '', 'Add an address…', "Change this PC's port…", `Forget ${host}`, ...guides]), '... this PC, then the added address, checked', listed);
         await clickMenuItem(app, 'Server > Add an address…');
         const dialog = await poll(async () => app.windows().find((w) => w.url().includes('/renderer/server.html?mode=address')), Boolean, 10_000);
         check(dialog !== undefined, 'Add an address… opens its window');
@@ -1519,7 +1616,14 @@ async function run(profile: string): Promise<void> {
         }
         check(await openMenu('Reload Streamroom'), "Streamroom's menu lists the new server");
         const relisted = JSON.stringify(await submenuLabels(app, 'Server'));
-        check(relisted === JSON.stringify(['This PC (localhost:8080)', host, `*${otherHost}`, '', 'Add an address…', "Change this PC's port…", `Forget ${otherHost}`]), '... checked, after the first', relisted);
+        check(relisted === JSON.stringify(['This PC (localhost:8080)', host, `*${otherHost}`, '', 'Add an address…', "Change this PC's port…", `Forget ${otherHost}`, ...guides]), '... checked, after the first', relisted);
+        // The guides open in the browser (reported, not opened, in this run): the invite check's
+        // listener records them, into a fresh list.
+        await app.evaluate(() => ((globalThis as Record<string, unknown>).__external = []));
+        await clickMenuItem(app, 'Server > Run Streamroom on this PC…');
+        const guide = await poll(() => app.evaluate(() => (globalThis as Record<string, unknown>).__external as string[]), (list) => list.length > 0, 5000);
+        check(JSON.stringify(guide) === '["https://github.com/HuuTrucNguyen0508/streamroom/blob/main/docs/local.md"]', 'Run Streamroom on this PC… opens the Streamroom guide in the browser', JSON.stringify(guide));
+        check(await openMenu('Reload Streamroom'), "Streamroom's menu opens again");
         await clickMenuItem(app, `Server > ${host}`);
         const back = await poll(() => serviceUrl(app, 'streamroom'), (url) => url.startsWith(room), 15_000);
         const backTitle = await poll(() => inService<string>(app, 'streamroom', 'document.title'), (t) => t === 'Streamroom stand-in', 10_000);
@@ -1672,7 +1776,7 @@ async function run(profile: string): Promise<void> {
       await sleep(300);
       check((await activeTab(page)) === 'whatsapp', 'dropping a tab does not select it', await activeTab(page));
       const savedOrder = () => (JSON.parse(readFileSync(stateFile, 'utf8')) as { serviceOrder?: string[] }).serviceOrder?.join(' ');
-      check((await poll(async () => savedOrder(), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom', '... and the new order is saved at once', savedOrder());
+      check((await poll(async () => savedOrder(), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom gmail', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom gmail', '... and the new order is saved at once, Gmail (off) still last', savedOrder());
       check(/Discord moved to tab 4 of 6/.test(await announced(page)), '... and screen readers hear where it went', await announced(page));
 
       // A click with no movement still selects.
@@ -1726,7 +1830,7 @@ async function run(profile: string): Promise<void> {
       const full = (await revealDock(app, page, 'messenger'))!;
       await page.locator('#dock-options').click();
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
-      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Theme"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
+      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Choose apps…","Theme"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
       await tab(page, 'messenger').click({ button: 'right' });
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Messenger', 5000);
       await clickMenuItem(app, 'Hide from dock');
@@ -1797,7 +1901,7 @@ async function run(profile: string): Promise<void> {
   check(JSON.stringify(saved.bounds) === JSON.stringify({ x: 120, y: 90, width: 1100, height: 720 }), 'saves window size and position', JSON.stringify(saved.bounds));
   check(JSON.stringify(saved.mutedServiceIds) === '["discord"]', 'keeps the muted list', JSON.stringify(saved.mutedServiceIds));
   check(saved.theme === 'carbon', 'saves the picked theme', String(saved.theme));
-  check(JSON.stringify(saved.serviceOrder) === '["inbox","proton-mail","whatsapp","discord","messenger","streamroom"]' && JSON.stringify(saved.hiddenServiceIds) === '["messenger"]', 'saves the dock order and the hidden Messenger', JSON.stringify({ serviceOrder: saved.serviceOrder, hiddenServiceIds: saved.hiddenServiceIds }));
+  check(JSON.stringify(saved.serviceOrder) === '["inbox","proton-mail","whatsapp","discord","messenger","streamroom","gmail"]' && JSON.stringify(saved.hiddenServiceIds) === '["messenger"]', 'saves the dock order and the hidden Messenger', JSON.stringify({ serviceOrder: saved.serviceOrder, hiddenServiceIds: saved.hiddenServiceIds }));
   check(JSON.stringify(saved.hibernatedServiceIds) === '["streamroom"]', 'saves Streamroom as hibernating', JSON.stringify(saved.hibernatedServiceIds));
   check(saved.dockAlwaysShown === true && !('dockAlign' in saved) && !('barSide' in saved) && !('barAutoHide' in saved), 'saves Always show the dock, and nothing of the old alignment or side bar', JSON.stringify({ dockAlwaysShown: saved.dockAlwaysShown, dockAlign: saved.dockAlign, barSide: saved.barSide }));
 

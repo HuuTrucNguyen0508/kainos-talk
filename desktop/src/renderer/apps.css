@@ -1,0 +1,273 @@
+@import './tokens.css';
+
+/* Choose your apps: a list of switches, and the dock they make, growing along the bottom. */
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 15px/1.45 'Atkinson Hyperlegible', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+h1,
+p,
+ul {
+  margin: 0;
+}
+ul {
+  padding: 0;
+  list-style: none;
+}
+fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 20px;
+  width: min(100% - 32px, 640px);
+  height: 100%;
+  margin: 0 auto;
+  padding: 40px 0 0;
+}
+.mark {
+  width: 40px;
+  height: 40px;
+  margin-bottom: 14px;
+  fill: none;
+  stroke: var(--mark);
+  stroke-width: 2;
+}
+h1 {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.lead {
+  max-width: 34em;
+  margin-top: 8px;
+  color: var(--ink-soft);
+}
+
+fieldset {
+  overflow-y: auto;
+  margin-inline: -8px;
+  padding-inline: 8px;
+}
+#list {
+  display: grid;
+  gap: 2px;
+  padding-block: 2px;
+}
+.app {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  cursor: pointer;
+}
+.app:hover {
+  background: var(--rail);
+}
+.app:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.name {
+  font-weight: 700;
+}
+.about {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.app[data-off] .tile {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+
+/* The tiles are the dock's own: brand colour, white glyph. */
+.tile {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--brand);
+  color: #fff;
+}
+.tile > svg {
+  width: 24px;
+  height: 24px;
+}
+.glyph-stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.glyph-fill {
+  fill: currentColor;
+}
+
+/* The switch: a native checkbox drawn as a track and knob, so the keyboard and screen readers get the real thing. */
+.switch {
+  appearance: none;
+  position: relative;
+  width: 44px;
+  height: 26px;
+  margin: 0;
+  border: 1.5px solid var(--outline);
+  border-radius: 13px;
+  background: var(--raised);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--ink-soft);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.switch:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.switch:checked::after {
+  background: var(--accent-ink);
+  transform: translateX(18px);
+}
+.switch:focus-visible {
+  outline: none;
+}
+
+footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  align-items: center;
+  padding: 16px 0 24px;
+  border-top: 1px solid var(--rail-edge);
+}
+.preview {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+.preview-label {
+  flex: none;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.dock {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  min-height: 46px;
+  padding: 7px;
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--rail);
+  box-shadow: var(--shadow-island);
+}
+.dock:empty::before {
+  content: 'Empty';
+  align-self: center;
+  padding-inline: 8px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.dock .tile {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  animation: arrive 160ms ease-out;
+}
+.dock .tile > svg {
+  width: 19px;
+  height: 19px;
+}
+@keyframes arrive {
+  from {
+    transform: translateY(6px) scale(0.85);
+    opacity: 0;
+  }
+}
+.status {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.actions {
+  display: flex;
+  gap: 12px;
+}
+.actions button {
+  height: 46px;
+  padding: 0 20px;
+  border-radius: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.secondary {
+  border: 1.5px solid var(--outline);
+  background: none;
+}
+.primary {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.primary:disabled {
+  background: var(--raised);
+  color: var(--ink-soft);
+  cursor: default;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch::after {
+    transition: none;
+  }
+  .dock .tile {
+    animation: none;
+  }
+}

@@ -1,9 +1,9 @@
 # Kainos Talk desktop
 
-Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger and Streamroom in one window, plus a Texts
-page for the phone's SMS and RCS. A dock that slides up from the bottom of the window switches between them; each
+Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger, Streamroom and Gmail in one window, plus a
+Texts page for the phone's SMS and RCS, each switched on or off on Choose your apps. A dock that slides up from the bottom of the window switches between them; each
 service runs in its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
-The websites load at startup and stay loaded, so they keep notifying, unless you hibernate one;
+The websites that are on load at startup and stay loaded, so they keep notifying, unless you hibernate one;
 Streamroom starts hibernated, and opens the Streamroom server picked in its menu.
 
 ## Commands
@@ -54,6 +54,7 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `src/main/service-runtime.ts` | One service view: session, user agent, permissions, navigation rules, load status. |
 | `src/main/navigation.ts` | Which links stay in a service, open as a popup, open in a service that claims them (Streamroom), or go to the system browser. |
 | `src/shared/streamroom.ts` | Streamroom's servers: reading an address, the saved choice, and the service pointed at it. |
+| `src/main/apps-page.ts` | Choose your apps (`src/renderer/apps.ts`, `src/preload/apps.ts`): every service with a switch. |
 | `src/main/server-dialog.ts` | The Add a Streamroom address window (`src/renderer/server.ts`, `src/preload/server.ts`). |
 | `src/main/screen-share.ts` | Screen sharing for a call app (Streamroom): the system's picker, or a menu of screens and windows. |
 | `src/main/permissions.ts` | Notifications and mic/camera for the service's own origin, plus screen sharing and speaker choice for a call app; everything else denied. |
@@ -141,13 +142,16 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   rooms for screen sharing and voice. Kainos holds no Streamroom server of its own: **Server**, in
   the tab's menu, picks which one the tab opens.
   - **This PC (localhost:8080)**, the default, is Streamroom run on this computer with
-    `pnpm start` (Streamroom's `docs/local.md`). Browsers allow the microphone and screen sharing
+    `pnpm start`, as the Streamroom project's guide
+    [Run Streamroom on your own computer](https://github.com/HuuTrucNguyen0508/streamroom/blob/main/docs/local.md)
+    says; **Run Streamroom on this PC…**, at the bottom of the Server menu, opens that guide. Browsers allow the microphone and screen sharing
     on plain http only for `localhost`, so Kainos trusts plain http there and nowhere else.
     **Change this PC's port…** opens the same small window for a port, for a server started with
     `PORT=8090 pnpm start`; **Use this port** moves This PC there and opens it.
   - **Add an address…** opens a small window for any other server: your own Streamroom deployed
-    to Cloudflare from that project's code (`streamroom.your-name.workers.dev`, see its
-    `docs/cloudflare.md`), a Tailscale address (`https://your-pc.your-tailnet.ts.net`) for calls with
+    to Cloudflare from that project's code (`streamroom.your-name.workers.dev`; its
+    [Cloudflare guide](https://github.com/HuuTrucNguyen0508/streamroom/blob/main/docs/cloudflare.md)
+    opens from **Deploy your own on Cloudflare…** in the same menu), a Tailscale address (`https://your-pc.your-tailnet.ts.net`) for calls with
     friends on your tailnet, or a second server on this PC (`localhost:8090`). A bare host means
     https; a room or invite link gives its server. The line under the field reads back what will
     open, and **Add and open** switches the tab to it.
@@ -164,6 +168,22 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   Windows. A Streamroom link to any added server opened in another service (an invite sent in
   Discord or WhatsApp) opens in the Streamroom tab, waking it and switching it to that server,
   instead of the browser. Files sent in a room ask where to save them.
+- **Choose your apps.** The first launch opens on Choose your apps, a page over the whole
+  window listing every service with a switch and one line on what it is; nothing loads and
+  nothing listens for the phone until **Start**. The dock preview along its bottom fills with the
+  tiles of the apps switched on. Later, **Choose apps…** in the Kainos mark's menu opens the same
+  page as Your apps, with Cancel. A service switched off has no tab, no page, no notifications
+  and no place in Hidden services, and its invite links go to the browser; its login stays, so
+  switching it back on finds it signed in. Texts off stops the phone sync altogether: no port
+  48090, no mDNS record, and no phone island in the dock. At least one app stays on. A state from
+  before this page keeps every service it had on, and a service added later that is marked opt-in
+  (Gmail) stays off until it is picked here.
+- **Gmail** opens `mail.google.com`. It is opt-in, so an update never adds it to an existing set
+  of apps. Google refuses to sign in inside apps it recognises as an embedded Chrome ("This browser
+  or app may not be secure"), as it did for Google Messages, so Google's sign-in pages
+  (`accounts.google.com`) in the Gmail tab see Firefox: its user agent in the requests, without
+  Chrome's `Sec-CH-UA` client hints, and in the page's `navigator`. Whether Google accepts that
+  can only be checked by signing in; if it still refuses, Gmail cannot be used in Kainos.
 - **Messenger** opens `www.messenger.com`. Sign-in and security checks may pass through
   `www.facebook.com`, which stays inside the view.
 - **Texts** is not a website. Google refuses its sign-in inside Kainos ("This browser or app may not
@@ -221,8 +241,9 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   Sign out.
 - **Saved state** lives in `kainos-state.json` in Electron's userData folder: window bounds,
   maximised, last active service, muted services, whether the dock is always shown, the theme,
-  the dock's service order and hidden services, the hibernating services, and Streamroom's
-  server, added addresses and this PC's port.
+  the dock's service order and hidden services, the hibernating services, Streamroom's
+  server, added addresses and this PC's port, the apps switched on, and whether they have been
+  chosen.
 - **Close** hides the window to the tray when a tray is running. On Linux that means a
   StatusNotifierItem host such as a panel or waybar; with none (common on Wayland compositors),
   closing quits.

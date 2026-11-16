@@ -30,6 +30,13 @@ export interface AppState {
   readonly hibernatedServiceIds: readonly string[];
   /** The Streamroom server the tab uses, and the addresses added to its menu. */
   readonly streamroom: StreamroomServers;
+  /**
+   * The services the user chose to use. The others have no tab, no page and no notifications,
+   * and Texts off means no phone sync at all.
+   */
+  readonly enabledServiceIds: readonly string[];
+  /** Whether the user has chosen their apps; until then Kainos opens on Choose your apps. */
+  readonly welcomed: boolean;
 }
 
 /** What the registry says about the services, for reading and defaulting the state. */
@@ -40,6 +47,8 @@ export interface StateRules {
   readonly sleepless?: readonly string[];
   /** Services that start hibernated the first time the state knows them. */
   readonly startHibernated?: readonly string[];
+  /** Services an update never turns on: off for a state saved before apps could be chosen. */
+  readonly optIn?: readonly string[];
 }
 
 export const DEFAULT_SIZE = { width: 1280, height: 820 } as const;
@@ -58,6 +67,8 @@ export function defaultState(serviceIds: readonly string[], rules: StateRules = 
     hiddenServiceIds: [],
     hibernatedServiceIds: normalizeHibernated(rules.startHibernated, serviceIds, rules, activeServiceId),
     streamroom: DEFAULT_SERVERS,
+    enabledServiceIds: [],
+    welcomed: false,
   };
 }
 
@@ -95,8 +106,13 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
   const serviceOrder = normalizeOrder(raw.serviceOrder, serviceIds);
   const hiddenServiceIds = normalizeHidden(raw.hiddenServiceIds, serviceIds, rules.unhideable);
   const known = (id: unknown): id is string => typeof id === 'string' && serviceIds.includes(id);
-  const shown = (id: unknown): id is string => known(id) && !hiddenServiceIds.includes(id);
-  const activeServiceId = shown(raw.activeServiceId) ? raw.activeServiceId : (visibleServices(serviceOrder, hiddenServiceIds)[0] ?? fallback.activeServiceId);
+  // A state from before apps could be chosen: everything it had stays on, opt-in services stay off.
+  const enabledServiceIds = Array.isArray(raw.enabledServiceIds)
+    ? serviceIds.filter((id) => (raw.enabledServiceIds as unknown[]).includes(id))
+    : serviceIds.filter((id) => !(rules.optIn ?? []).includes(id));
+  const offDock = [...hiddenServiceIds, ...serviceIds.filter((id) => !enabledServiceIds.includes(id))];
+  const shown = (id: unknown): id is string => known(id) && !offDock.includes(id);
+  const activeServiceId = shown(raw.activeServiceId) ? raw.activeServiceId : (visibleServices(serviceOrder, offDock)[0] ?? fallback.activeServiceId);
   const savedOrder = Array.isArray(raw.serviceOrder) ? raw.serviceOrder : [];
   const newcomers = (rules.startHibernated ?? []).filter((id) => !savedOrder.includes(id));
   const savedHibernated = Array.isArray(raw.hibernatedServiceIds) ? raw.hibernatedServiceIds : [];
@@ -111,6 +127,9 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
     hiddenServiceIds,
     hibernatedServiceIds: normalizeHibernated([...savedHibernated, ...newcomers], serviceIds, rules, activeServiceId),
     streamroom: isRecord(raw.streamroom) ? parseServers(raw.streamroom) : DEFAULT_SERVERS,
+    enabledServiceIds,
+    // A state saved before the welcome existed belongs to someone who already set Kainos up.
+    welcomed: Array.isArray(raw.enabledServiceIds) ? raw.welcomed === true : true,
   };
 }
 

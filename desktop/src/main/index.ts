@@ -11,10 +11,11 @@ import { layoutBar } from './bar.ts';
 import { REVEAL_TIMING, initialReveal, onScreen, raised, stepReveal, type RevealEvent, type RevealPhase, type RevealState } from './dock-reveal.ts';
 import { forwardNotifications } from './notifications.ts';
 import { startVencord } from './vencord.ts';
-import { startSmsSync } from './sms-sync.ts';
+import { startSmsSync, type SmsSync } from './sms-sync.ts';
+import { openAppsPage, type AppsPage } from './apps-page.ts';
 import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
-import { STREAMROOM_ID, parseServer, serverChoices, serverLabel, thisPc, withCurrent, withLocalPort, withServers, withoutServer, type StreamroomServers } from '../shared/streamroom.ts';
+import { CLOUDFLARE_GUIDE, LOCAL_GUIDE, STREAMROOM_ID, parseServer, serverChoices, serverLabel, thisPc, withCurrent, withLocalPort, withServers, withoutServer, type StreamroomServers } from '../shared/streamroom.ts';
 import { askServerAddress, type ServerDialogMode } from './server-dialog.ts';
 
 import { claimingService } from './navigation.ts';
@@ -69,7 +70,12 @@ async function start(): Promise<void> {
     unhideable,
     sleepless: SERVICES.filter((service) => !canHibernate(service)).map((service) => service.id),
     startHibernated: SERVICES.filter((service) => service.startsHibernated).map((service) => service.id),
+    optIn: SERVICES.filter((service) => service.optIn).map((service) => service.id),
   });
+  /** A service the user chose on Choose your apps. One that is off has no tab and no page. */
+  const isOn = (serviceId: string) => state.enabledServiceIds.includes(serviceId);
+  /** Services with no tab: hidden ones, and the ones switched off. */
+  const offDock = () => [...state.hiddenServiceIds, ...state.serviceOrder.filter((id) => !isOn(id))];
   /** The theme's --surface: behind the pages until they paint, so nothing flashes in another colour. */
   const themeBackground = () => resolveTheme(state.theme, nativeTheme.shouldUseDarkColors).surface;
   const icons = { plain: nativeImage.createFromBuffer(markPng(64, false)), lamp: nativeImage.createFromBuffer(markPng(64, true)) };
@@ -104,17 +110,22 @@ async function start(): Promise<void> {
   dockContents.on('will-navigate', (event) => event.preventDefault());
   dockContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
+  /** Set once every service runtime exists; callbacks that arrive earlier have nothing to update. */
+  let runtimesReady = false;
+  /** Choose your apps, while it is open over the window. */
+  let apps: AppsPage | undefined;
   // Before the service pages start loading, or Discord's first load runs without Vencord.
   await startVencord({
     dir: join(app.getPath('userData'), 'vencord'),
     services: SERVICES.filter((service) => service.clientMod === 'vencord'),
     onFirstInstall: () => {
-      // A hibernating Discord stays asleep; it gets Vencord when it wakes.
+      // Pages made after this already load with Vencord. A hibernating Discord stays asleep;
+      // it gets Vencord when it wakes.
+      if (!runtimesReady) return;
       for (const runtime of runtimes) if (runtime.service.clientMod === 'vencord') runtime.reload();
     },
   });
 
-  let runtimesReady = false;
   // The Texts page: the phone's SMS and RCS conversations, over the local network. It starts
   // before the service views, so the page's first request finds it ready.
   const smsView = () => runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view()?.webContents;
@@ -134,23 +145,43 @@ async function start(): Promise<void> {
     notification.show();
     app.emit('kainos-notification', { serviceId: 'inbox', muted, notification });
   }
-  const sms = await startSmsSync({
-    dir: join(app.getPath('userData'), 'sms-sync'),
-    ...(process.env.KAINOS_SYNC_PORT && { port: Number(process.env.KAINOS_SYNC_PORT) }),
-    advertise: process.env.KAINOS_SYNC_MDNS !== '0',
-    onChange: () => {
-      smsView()?.send(SmsChannel.state, sms.state());
-      // The window title and tray lamp follow the inbox.
-      if (runtimesReady) render();
-    },
-    onIncoming: (conversation, message) => {
-      const who = conversation.isGroup && message.sender ? `${message.sender} in ${conversation.title}` : conversation.title;
-      notifyFromInbox(conversation.key, who, message.text || 'Picture or attachment');
-    },
-  });
+  /** The phone sync, running only while Texts is on: off, nothing listens on the network. */
+  let sms: SmsSync | undefined;
+  let smsStarting: Promise<void> | undefined;
+  function startSms(): Promise<void> {
+    if (sms) return Promise.resolve();
+    smsStarting ??= startSmsSync({
+      dir: join(app.getPath('userData'), 'sms-sync'),
+      ...(process.env.KAINOS_SYNC_PORT && { port: Number(process.env.KAINOS_SYNC_PORT) }),
+      advertise: process.env.KAINOS_SYNC_MDNS !== '0',
+      onChange: () => {
+        if (sms) smsView()?.send(SmsChannel.state, sms.state());
+        // The window title and tray lamp follow the inbox.
+        if (runtimesReady) render();
+      },
+      onIncoming: (conversation, message) => {
+        const who = conversation.isGroup && message.sender ? `${message.sender} in ${conversation.title}` : conversation.title;
+        notifyFromInbox(conversation.key, who, message.text || 'Picture or attachment');
+      },
+    })
+      .then((started) => {
+        sms = started;
+      })
+      .finally(() => {
+        smsStarting = undefined;
+      });
+    return smsStarting;
+  }
+  async function stopSms(): Promise<void> {
+    await smsStarting?.catch(() => {});
+    const running = sms;
+    sms = undefined;
+    await running?.stop();
+  }
+  if (isOn('inbox')) await startSms();
   // Pictures stay as bytes in main; the inbox page shows them by URL, and no other session can.
   session.fromPartition(partitionFor(SERVICES.find((service) => service.localPage === 'inbox')!)).protocol.handle(IMAGE_SCHEME, async (request) => {
-    const picture = await sms.image(decodeURIComponent(new URL(request.url).pathname.slice(1)));
+    const picture = (await sms?.image(decodeURIComponent(new URL(request.url).pathname.slice(1)))) ?? null;
     return picture ? new Response(new Uint8Array(picture), { headers: { 'content-type': 'image/jpeg' } }) : new Response(null, { status: 404 });
   });
   win.contentView.addChildView(chrome);
@@ -164,7 +195,7 @@ async function start(): Promise<void> {
       preload: join(__dirname, 'preload-service.cjs'),
       localDir: __dirname,
       background: themeBackground(),
-      hibernated: state.hibernatedServiceIds.includes(service.id),
+      hibernated: !isOn(service.id) || state.hibernatedServiceIds.includes(service.id),
       onChange: render,
       // Each page view goes into the window at startup and on every wake. Adding the dock page
       // again moves it back on top. (Inserting at an index crashes Electron 45 on start.)
@@ -172,6 +203,8 @@ async function start(): Promise<void> {
         view.setVisible(false);
         win.contentView.addChildView(view);
         win.contentView.addChildView(chrome);
+        // Choose your apps stays over everything while it is open.
+        if (apps) win.contentView.addChildView(apps.view);
         if (unwiredPages) unwiredPages.push(view.webContents);
         else wirePage(view.webContents);
       },
@@ -185,7 +218,7 @@ async function start(): Promise<void> {
 
   /** A link leaving a service: a service that claims its host (Streamroom's invites) opens it, else the browser. */
   function openLink(url: string): void {
-    const claimer = claimingService(runtimes.map((runtime) => runtime.service), url);
+    const claimer = claimingService(runtimes.filter((runtime) => isOn(runtime.service.id)).map((runtime) => runtime.service), url);
     const runtime = claimer && runtimeById(claimer.id);
     if (!runtime) {
       openExternal(url);
@@ -212,12 +245,14 @@ async function start(): Promise<void> {
   let quitting = false;
 
   function snapshot(): Snapshot {
-    const phone = sms.state().phone;
+    const phone = sms?.state().phone;
     return {
       activeId: state.activeServiceId,
-      phone: phone && { name: phone.name.slice(0, PHONE_NAME_MAX), connected: phone.connected === true },
+      phone: phone ? { name: phone.name.slice(0, PHONE_NAME_MAX), connected: phone.connected === true } : null,
       hiddenIds: state.hiddenServiceIds,
-      services: state.serviceOrder.map(runtimeById).filter((runtime) => runtime !== undefined).map((runtime) => ({
+      texts: isOn('inbox'),
+      // Services switched off are left out altogether: they have no tab to hide or show.
+      services: state.serviceOrder.filter(isOn).map(runtimeById).filter((runtime) => runtime !== undefined).map((runtime) => ({
         id: runtime.service.id,
         name: runtime.service.name,
         color: runtime.service.icon.color,
@@ -279,6 +314,7 @@ async function start(): Promise<void> {
     // and keeps its bounds (onScreen while leaving) until it has slid away.
     if (placed.chrome) chrome.setBounds(placed.chrome);
     chrome.setVisible(placed.chrome !== undefined);
+    apps?.view.setBounds({ x: 0, y: 0, width, height });
     const frame: DockFrame = { kind: placed.frame, raised: placed.frame !== 'float' || raised(reveal.phase), room: width };
     const key = JSON.stringify(frame);
     if (key !== sentFrame) {
@@ -360,7 +396,7 @@ async function start(): Promise<void> {
   /** Opens the service's tab, waking it if it hibernates: the active service is always awake. */
   function activate(serviceId: string): void {
     const runtime = runtimeById(serviceId);
-    if (!runtime) return;
+    if (!runtime || !isOn(serviceId)) return;
     if (state.hibernatedServiceIds.includes(serviceId)) {
       updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((id) => id !== serviceId) }, 0);
       runtime.wake();
@@ -397,7 +433,7 @@ async function start(): Promise<void> {
 
   /** Wakes the service where it is, without opening its tab. */
   function wake(serviceId: string): void {
-    if (!state.hibernatedServiceIds.includes(serviceId)) return;
+    if (!state.hibernatedServiceIds.includes(serviceId) || !isOn(serviceId)) return;
     updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((id) => id !== serviceId) }, 0);
     runtimeById(serviceId)?.wake();
     render();
@@ -438,11 +474,11 @@ async function start(): Promise<void> {
   }
 
   /** The services with a tab, in dock order; Ctrl+1..9 counts these. */
-  const dockTabs = () => visibleServices(state.serviceOrder, state.hiddenServiceIds);
+  const dockTabs = () => visibleServices(state.serviceOrder, offDock());
 
   /** Makes the service the tab at `index` among the dock's tabs, and saves the order. */
   function moveInDock(serviceId: string, index: number): void {
-    const order = moveService(state.serviceOrder, serviceId, index, state.hiddenServiceIds);
+    const order = moveService(state.serviceOrder, serviceId, index, offDock());
     if (order.join() !== state.serviceOrder.join()) updateState({ serviceOrder: order }, 0);
     // Rendered even when nothing moved, so a dock page that moved the tab ahead of main is put right.
     render();
@@ -454,7 +490,7 @@ async function start(): Promise<void> {
    */
   function handOver(serviceId: string): string | undefined {
     const asleep = state.hibernatedServiceIds.filter((id) => id !== serviceId);
-    return successor(state.serviceOrder, [...state.hiddenServiceIds, ...asleep], serviceId) ?? successor(state.serviceOrder, state.hiddenServiceIds, serviceId);
+    return successor(state.serviceOrder, [...offDock(), ...asleep], serviceId) ?? successor(state.serviceOrder, offDock(), serviceId);
   }
 
   /** Takes the tab out of the dock; the service keeps running. The active one hands over to its neighbour. */
@@ -530,8 +566,63 @@ async function start(): Promise<void> {
       ...(servers.current === thisPc(servers)
         ? []
         : [{ label: `Forget ${serverLabel(servers.current, servers)}`, click: () => useServers(withoutServer(state.streamroom, servers.current)) }]),
+      { type: 'separator' },
+      // The Streamroom project's guides, in the browser: Kainos only opens a server, it runs none.
+      { label: 'Run Streamroom on this PC…', click: () => openExternal(LOCAL_GUIDE) },
+      { label: 'Deploy your own on Cloudflare…', click: () => openExternal(CLOUDFLARE_GUIDE) },
     ];
   }
+  function showApps(): void {
+    if (apps) {
+      apps.view.webContents.focus();
+      return;
+    }
+    apps = openAppsPage({
+      win,
+      localDir: __dirname,
+      background: themeBackground(),
+      choices: () => ({
+        firstRun: !state.welcomed || state.enabledServiceIds.length === 0,
+        services: state.serviceOrder.map(runtimeById).filter((runtime) => runtime !== undefined).map(({ service }) => ({
+          id: service.id,
+          name: service.name,
+          about: service.about,
+          icon: service.icon,
+          on: isOn(service.id),
+        })),
+      }),
+      onSave: chooseApps,
+      onClose: () => {
+        apps = undefined;
+        render();
+        focusActiveService();
+      },
+    });
+    layout();
+  }
+
+  /**
+   * Turns on the chosen services and off the rest. One turned off closes its page (and Texts
+   * stops the phone sync); one turned on gets its tab back and wakes, unless it was hibernating.
+   */
+  function chooseApps(ids: readonly string[]): void {
+    const turnedOn = ids.filter((id) => !isOn(id));
+    const turnedOff = state.enabledServiceIds.filter((id) => !ids.includes(id));
+    updateState({ enabledServiceIds: [...ids], welcomed: true, hiddenServiceIds: state.hiddenServiceIds.filter((id) => !turnedOn.includes(id)) }, 0);
+    for (const id of turnedOff) runtimeById(id)?.hibernate();
+    if (turnedOff.includes('inbox')) void stopSms();
+    void (async () => {
+      if (turnedOn.includes('inbox')) await startSms().catch((error: unknown) => console.warn('Could not start the phone sync:', error));
+      for (const id of turnedOn) if (!state.hibernatedServiceIds.includes(id)) runtimeById(id)?.wake();
+      if (!dockTabs().includes(state.activeServiceId)) {
+        const tabs = dockTabs();
+        const next = tabs.find((id) => !state.hibernatedServiceIds.includes(id)) ?? tabs[0];
+        if (next) activate(next);
+      }
+      render();
+    })();
+  }
+
   /** The open Add an address window, themed like Kainos' other pages. */
   let serverDialog: WebContents | undefined;
 
@@ -574,7 +665,7 @@ async function start(): Promise<void> {
   }
 
   /** Kainos' own pages: the dock and the Texts page. Service pages keep their own colours. */
-  const themedPages = () => [dockContents, smsView(), serverDialog].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
+  const themedPages = () => [dockContents, smsView(), serverDialog, apps?.view.webContents].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
   function chooseTheme(theme: ThemeChoice): void {
     updateState({ theme }, 0);
     paintThemeBackground();
@@ -583,7 +674,7 @@ async function start(): Promise<void> {
 
   function openBarMenu(at: MenuPoint | undefined): void {
     const choices: { id: ThemeChoice; name: string }[] = [{ id: 'system', name: 'Match system' }, ...THEMES];
-    const hidden = state.serviceOrder.filter((id) => state.hiddenServiceIds.includes(id)).map(runtimeById).filter((runtime) => runtime !== undefined);
+    const hidden = state.serviceOrder.filter((id) => state.hiddenServiceIds.includes(id) && isOn(id)).map(runtimeById).filter((runtime) => runtime !== undefined);
     Menu.buildFromTemplate([
       {
         label: 'Always show the dock',
@@ -599,6 +690,7 @@ async function start(): Promise<void> {
         enabled: hidden.length > 0,
         submenu: hidden.map(({ service }) => ({ label: `Show ${service.name}`, click: () => showInDock(service.id) })),
       },
+      { label: 'Choose apps…', click: () => showApps() },
       {
         label: 'Theme',
         submenu: choices.map(({ id, name }) => ({ label: name, type: 'radio', checked: state.theme === id, click: () => chooseTheme(id) })),
@@ -615,13 +707,13 @@ async function start(): Promise<void> {
       message: `Forget ${name}?`,
       detail: 'Its texts leave this computer, and you will need to connect it again.',
     });
-    if (response === 0) sms.forgetPhone();
+    if (response === 0) sms?.forgetPhone();
   }
 
   /** The phone island: a menu once a phone is paired; before that it leads to the Texts page's setup. */
   function openPhoneMenu(at: MenuPoint | undefined): void {
     const inbox = runtimes.find((runtime) => runtime.service.localPage === 'inbox')!;
-    const phone = sms.state().phone;
+    const phone = sms?.state().phone;
     if (!phone) {
       activate(inbox.service.id);
       return;
@@ -727,24 +819,24 @@ async function start(): Promise<void> {
 
   const smsContents = smsView();
   const fromSms = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => smsContents !== undefined && event.sender === smsContents;
-  ipcMain.handle(SmsChannel.getState, (event) => (fromSms(event) ? sms.state() : undefined));
+  ipcMain.handle(SmsChannel.getState, (event) => (fromSms(event) ? sms?.state() : undefined));
   ipcMain.on(SmsChannel.reply, (event, key: unknown, text: unknown) => {
-    if (fromSms(event) && typeof key === 'string' && typeof text === 'string' && text.trim() && text.length <= 5000) sms.reply(key, text);
+    if (fromSms(event) && typeof key === 'string' && typeof text === 'string' && text.trim() && text.length <= 5000) sms?.reply(key, text);
   });
   ipcMain.on(SmsChannel.markRead, (event, key: unknown) => {
-    if (fromSms(event) && typeof key === 'string') sms.markRead(key);
+    if (fromSms(event) && typeof key === 'string') sms?.markRead(key);
   });
   ipcMain.on(SmsChannel.answerPairing, (event, accept: unknown) => {
-    if (fromSms(event)) sms.answerPairing(accept === true);
+    if (fromSms(event)) sms?.answerPairing(accept === true);
   });
   ipcMain.on(SmsChannel.forgetPhone, (event) => {
-    if (fromSms(event)) sms.forgetPhone();
+    if (fromSms(event)) sms?.forgetPhone();
   });
   ipcMain.on(SmsChannel.copyCode, (event, code: unknown) => {
     if (fromSms(event) && isCopyableCode(code)) clipboard.writeText(code);
   });
   ipcMain.on(SmsChannel.send, (event, to: unknown, text: unknown) => {
-    if (fromSms(event) && typeof to === 'string' && typeof text === 'string' && text.length <= 5000) sms.send(to, text);
+    if (fromSms(event) && typeof to === 'string' && typeof text === 'string' && text.length <= 5000) sms?.send(to, text);
   });
 
   forwardNotifications({
@@ -818,5 +910,7 @@ async function start(): Promise<void> {
   });
 
   dockContents.loadFile(join(__dirname, 'renderer', 'index.html')).catch((error: unknown) => console.error(error));
+  // First launch, or nothing left on: Kainos opens on Choose your apps.
+  if (!state.welcomed || state.enabledServiceIds.length === 0) showApps();
   render();
 }

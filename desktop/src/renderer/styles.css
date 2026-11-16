@@ -76,6 +76,10 @@ ul {
   background: var(--rail);
   box-shadow: var(--shadow-island);
 }
+/* The phone island, with Texts off. */
+.island[hidden] {
+  display: none;
+}
 .services {
   flex: 0 1 auto;
   min-width: 0;

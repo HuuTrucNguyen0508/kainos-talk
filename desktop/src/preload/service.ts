@@ -122,8 +122,26 @@ function installNotificationShim(bridge: Bridge): void {
 
 contextBridge.executeInMainWorld({ func: installNotificationShim, args: [bridge] });
 
-/** Main passes the service id as --kainos-service=<id>. */
+/** Main passes the service id as --kainos-service=<id>, and Firefox's user agent for Google's sign-in. */
 const serviceId = process.argv.find((arg) => arg.startsWith('--kainos-service='))?.slice('--kainos-service='.length);
+const firefox = process.argv.find((arg) => arg.startsWith('--kainos-firefox='))?.slice('--kainos-firefox='.length);
+
+/**
+ * Runs in the page's own world. Makes Google's sign-in page see Firefox, as its requests already
+ * do (main rewrites their headers): the user agent, and no Chrome-only userAgentData.
+ */
+function presentAsFirefox(userAgent: string): void {
+  const nav = Navigator.prototype;
+  const define = (name: string, value: unknown) => Object.defineProperty(nav, name, { get: () => value, configurable: true });
+  define('userAgent', userAgent);
+  define('appVersion', userAgent.slice('Mozilla/'.length));
+  define('vendor', '');
+  define('userAgentData', undefined);
+}
+if (firefox && findService(serviceId)?.googleSignIn && location.hostname === 'accounts.google.com') {
+  contextBridge.executeInMainWorld({ func: presentAsFirefox, args: [firefox] });
+}
+
 const counter = findService(serviceId)?.unreadCounter;
 if (counter) {
   let last = '';

@@ -4,6 +4,11 @@ import type { ServiceDefinition } from './services.ts';
 /** The Streamroom tab's service id. */
 export const STREAMROOM_ID = 'streamroom';
 
+/** The Streamroom project's guides: running it on this PC, and deploying your own to Cloudflare. */
+export const STREAMROOM_REPO = 'https://github.com/HuuTrucNguyen0508/streamroom';
+export const LOCAL_GUIDE = `${STREAMROOM_REPO}/blob/main/docs/local.md`;
+export const CLOUDFLARE_GUIDE = `${STREAMROOM_REPO}/blob/main/docs/cloudflare.md`;
+
 /** The port Streamroom's `pnpm start` listens on unless PORT says otherwise (its docs/local.md). */
 export const DEFAULT_LOCAL_PORT = 8080;
 

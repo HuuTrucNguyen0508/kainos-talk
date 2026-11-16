@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SERVICES, canHibernate, findService, partitionFor } from './services.ts';
 
-test('registry has the inbox and five websites, with unique ids and secure start pages', () => {
-  assert.deepEqual(SERVICES.map((s) => s.id), ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger', 'streamroom']);
+test('registry has the inbox and six websites, with unique ids and secure start pages', () => {
+  assert.deepEqual(SERVICES.map((s) => s.id), ['inbox', 'proton-mail', 'discord', 'whatsapp', 'messenger', 'streamroom', 'gmail']);
   for (const service of SERVICES.filter((s) => !s.localPage)) {
     const start = new URL(service.url);
     // Streamroom starts on a server on this computer, which browsers treat as secure.
@@ -39,6 +39,7 @@ test('each service gets its own persistent login partition', () => {
     'persist:service-whatsapp',
     'persist:service-messenger',
     'persist:service-streamroom',
+    'persist:service-gmail',
   ]);
 });
 
@@ -54,4 +55,18 @@ test('tile colours keep white glyphs at 3:1 contrast or better', () => {
     const ratio = 1.05 / (luminance(service.icon.color) + 0.05);
     assert.ok(ratio >= 3, `${service.id} contrast ${ratio.toFixed(2)}`);
   }
+});
+
+test('Gmail is opt-in: an update never turns it on; it signs in to Google as Firefox and owns its sign-in hosts', () => {
+  const gmail = findService('gmail')!;
+  assert.deepEqual(SERVICES.filter((s) => s.optIn).map((s) => s.id), ['gmail']);
+  assert.deepEqual(SERVICES.filter((s) => s.googleSignIn).map((s) => s.id), ['gmail']);
+  assert.ok(gmail.hosts.includes('accounts.google.com') && gmail.hosts.includes('mail.google.com'));
+  assert.deepEqual(gmail.unread('Inbox (12) - someone@gmail.com - Gmail'), { kind: 'count', count: 12 });
+  assert.deepEqual(gmail.unread('Inbox - someone@gmail.com - Gmail'), { kind: 'none' });
+  assert.deepEqual(gmail.unread('Sent Mail - someone@gmail.com - Gmail'), { kind: 'none' });
+});
+
+test('every service says in one line what it is, for Choose your apps', () => {
+  for (const service of SERVICES) assert.ok(service.about.length > 10 && service.about.length < 90, service.id);
 });

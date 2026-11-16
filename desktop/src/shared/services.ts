@@ -1,5 +1,5 @@
 import { DEFAULT_LOCAL_PORT, localServer } from './streamroom.ts';
-import { unreadFromTitlePrefix, type Unread } from './unread.ts';
+import { unreadFromGmailTitle, unreadFromTitlePrefix, type Unread } from './unread.ts';
 
 /**
  * Every service Kainos Talk hosts. Adding a service means adding one entry here.
@@ -10,6 +10,8 @@ export interface ServiceDefinition {
   /** Stable id: names the login partition (persist:service-<id>) and the saved state. */
   readonly id: string;
   readonly name: string;
+  /** One line on the Choose your apps page: what the user gets. */
+  readonly about: string;
   /** The page the service opens on. */
   readonly url: string;
   /** Top-level pages that stay inside the service view, including its sign-in pages. */
@@ -45,6 +47,16 @@ export interface ServiceDefinition {
    * nothing to notify about. Opening its tab wakes it.
    */
   readonly startsHibernated?: true;
+  /**
+   * Added after people had already chosen their apps: an update never turns it on for them, so
+   * it waits off until they pick it on the Choose your apps page.
+   */
+  readonly optIn?: true;
+  /**
+   * Google's sign-in pages (accounts.google.com) see Firefox instead of Chrome. Google refuses
+   * to sign in inside an app it recognises as an embedded Chrome, and lets Firefox through.
+   */
+  readonly googleSignIn?: true;
 }
 
 export interface UnreadCounter {
@@ -71,6 +83,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
     // The id stays 'inbox': it names the login partition and the saved state.
     id: 'inbox',
     name: 'Texts',
+    about: "Your phone's texts (SMS and RCS), through the Kainos phone app on your network.",
     // Kainos' own page: the phone's SMS and RCS conversations, synced over the local network
     // (sms-sync.ts).
     url: 'kainos:inbox',
@@ -90,6 +103,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: 'proton-mail',
     name: 'Proton Mail',
+    about: 'Encrypted email from Proton.',
     url: 'https://mail.proton.me',
     hosts: ['mail.proton.me', 'account.proton.me'],
     popupHosts: ['account.proton.me', 'verify.proton.me'],
@@ -110,6 +124,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: 'discord',
     name: 'Discord',
+    about: "Servers, friends and calls, with Vencord's plugins and themes.",
     url: 'https://discord.com/app',
     hosts: ['discord.com'],
     popupHosts: ['hcaptcha.com', '*.hcaptcha.com'],
@@ -125,6 +140,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: 'whatsapp',
     name: 'WhatsApp',
+    about: "Chats from your phone's WhatsApp, linked by QR code.",
     url: 'https://web.whatsapp.com',
     hosts: ['web.whatsapp.com'],
     popupHosts: [],
@@ -139,6 +155,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: 'messenger',
     name: 'Messenger',
+    about: 'Facebook Messenger chats.',
     url: 'https://www.messenger.com/',
     // Sign-in and security checks can pass through Facebook's own pages.
     hosts: ['www.messenger.com', 'messenger.com', 'www.facebook.com'],
@@ -154,6 +171,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: 'streamroom',
     name: 'Streamroom',
+    about: 'Rooms for screen sharing and voice, on a Streamroom server you choose.',
     // Screen-share and voice rooms from the Streamroom project. Which server it uses is a choice
     // in its menu (shared/streamroom.ts): this computer until the user adds their own address.
     url: `${localServer(DEFAULT_LOCAL_PORT)}/`,
@@ -172,6 +190,26 @@ export const SERVICES: readonly ServiceDefinition[] = [
     claimsLinks: true,
     // A room is opened for a call and left; it never notifies, so it need not run all day.
     startsHibernated: true,
+  },
+  {
+    id: 'gmail',
+    name: 'Gmail',
+    about: 'Email from Google. Google may still refuse to sign in inside an app.',
+    url: 'https://mail.google.com/mail/u/0/',
+    // Signing in passes through Google's account pages, and YouTube's for the shared login.
+    hosts: ['mail.google.com', 'accounts.google.com', 'accounts.youtube.com'],
+    // Gmail opens a message or a draft in a window of its own; that window shares the login.
+    popupHosts: ['mail.google.com', 'accounts.google.com'],
+    iconHosts: ['*.googleusercontent.com', 'mail.google.com'],
+    icon: {
+      // Google's red, darkened so the white envelope keeps 3:1.
+      color: '#C5221F',
+      paint: 'fill',
+      glyph: 'M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z',
+    },
+    unread: unreadFromGmailTitle,
+    optIn: true,
+    googleSignIn: true,
   },
 ];
 

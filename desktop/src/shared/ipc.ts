@@ -115,6 +115,8 @@ export interface Snapshot {
   readonly hiddenIds: readonly string[];
   /** Null until a phone is paired. */
   readonly phone: PhoneLink | null;
+  /** Whether Texts is on; off, the dock has no phone island. */
+  readonly texts: boolean;
 }
 
 /** The only API the dock page gets, exposed as window.kainos. */

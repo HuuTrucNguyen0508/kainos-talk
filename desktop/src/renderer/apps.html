@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Choose your apps</title>
+    <link rel="stylesheet" href="apps.css" />
+    <script src="apps.js" defer></script>
+  </head>
+  <body>
+    <form id="apps" novalidate>
+      <header>
+        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="3.2" /></svg>
+        <h1 id="title">Choose your apps</h1>
+        <p id="lead" class="lead">Kainos Talk opens only the apps you pick here. Change them any time from Choose apps, in the Kainos mark's menu on the dock.</p>
+      </header>
+      <fieldset>
+        <legend class="sr-only">Apps</legend>
+        <ul id="list"></ul>
+      </fieldset>
+      <footer>
+        <div class="preview" aria-hidden="true">
+          <span class="preview-label">Your dock</span>
+          <span id="dock" class="dock"></span>
+        </div>
+        <p id="status" class="status" role="status"></p>
+        <div class="actions">
+          <button type="button" id="cancel" class="secondary">Cancel</button>
+          <button type="submit" id="save" class="primary">Save</button>
+        </div>
+      </footer>
+    </form>
+  </body>
+</html>

@@ -15,9 +15,22 @@ Download both apps from the [latest release](https://github.com/HuuTrucNguyen050
 - **Phone (Android 13 or newer):** `Kainos-Talk-<version>.apk`. Open it on the phone and allow
   installing from that source. Then pair it with the PC from the Texts page.
 
+On first launch the PC app asks which apps you want; change them any time with **Choose apps…**
+in the Kainos mark's menu on the dock.
+
 The PC and the phone find each other on the local network; the PC's firewall must allow
-48090/tcp and 5353/udp from it (see [desktop/README.md](desktop/README.md)). The Streamroom tab
-opens a Streamroom server you choose in its menu: one on this PC, or your own address.
+48090/tcp and 5353/udp from it (see [desktop/README.md](desktop/README.md)).
+
+The Streamroom tab opens a [Streamroom](https://github.com/HuuTrucNguyen0508/streamroom) server you
+choose under **Server** in its tab's menu. Kainos runs none itself:
+
+- **On this PC:** follow Streamroom's
+  [Run Streamroom on your own computer](https://github.com/HuuTrucNguyen0508/streamroom/blob/main/docs/local.md)
+  (`pnpm build && pnpm start`, port 8080 by default), then pick **This PC**. If it uses another
+  port, set it with **Change this PC's port…**.
+- **Your own deployment:** deploy Streamroom to Cloudflare with its
+  [Cloudflare guide](https://github.com/HuuTrucNguyen0508/streamroom/blob/main/docs/cloudflare.md),
+  then add its address with **Add an address…**.
 
 ## Requirements
 
