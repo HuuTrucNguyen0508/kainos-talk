@@ -5,3 +5,6 @@ packages:
 # Electron 45 has no install script any more: desktop's own postinstall fetches its binary.
 allowBuilds:
   esbuild: true
+  # Not needed: Squirrel installers (Kainos builds NSIS), and dbus-next's optional abstract-socket addon.
+  electron-winstaller: false
+  usocket: false
