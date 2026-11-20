@@ -230,6 +230,7 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
         color = c.soft,
     )
     SmsAccess(onGranted = onSmsAccess)
+    CallAccess(onGranted = onSmsAccess)
     Text(
         "If the computer gets a new address on your Wi-Fi, this phone finds it again by itself.",
         style = MaterialTheme.typography.bodyMedium,
@@ -263,6 +264,44 @@ private fun SmsAccess(onGranted: () -> Unit) {
         color = c.ink,
     )
     LinkButton("Allow texts and contacts", onClick = { ask.launch(SMS_PERMISSIONS) })
+}
+
+private val CALL_PERMISSIONS = arrayOf(
+    Manifest.permission.READ_PHONE_STATE,
+    Manifest.permission.READ_CALL_LOG,
+    Manifest.permission.ANSWER_PHONE_CALLS,
+    Manifest.permission.CALL_PHONE,
+    Manifest.permission.READ_CONTACTS,
+)
+
+/**
+ * Offers calls on the computer: what rings and who, the call log, and its Answer, End and Call
+ * buttons. The sound goes to the computer when this phone is connected to it over Bluetooth.
+ */
+@Composable
+private fun CallAccess(onGranted: () -> Unit) {
+    val context = LocalContext.current
+    val c = MaterialTheme.switchboard
+    val needed = CALL_PERMISSIONS.take(4)
+    var granted by remember { mutableStateOf(needed.all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) }
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+        granted = needed.all { results[it] == true || context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        onGranted()
+    }
+    if (granted) {
+        Text(
+            "Calls show on the computer, and you can answer, end and make them there. Connect this phone to the computer over Bluetooth to hear them on it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = c.soft,
+        )
+        return
+    }
+    Text(
+        "Answer and make calls on the computer? Kainos Talk then sees who is calling and your call log, and presses Answer, End and Call for you.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = c.ink,
+    )
+    LinkButton("Allow calls", onClick = { ask.launch(CALL_PERMISSIONS) })
 }
 
 private val PairingSaver = androidx.compose.runtime.saveable.Saver<Pairing, String>(

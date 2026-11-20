@@ -52,8 +52,99 @@ ol {
 .texts {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr) 440px;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100%;
+}
+
+/* The phone's call: a lit line across the top, its lamp pulsing while it rings. The one place
+   the page moves on its own, because a ringing call is the one thing that should pull the eye. */
+.call-bar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  align-items: center;
+  padding: 12px 24px;
+  background: var(--well);
+  box-shadow: inset 0 -1px var(--rail-edge);
+}
+.call-bar:empty {
+  display: none;
+}
+.call-lamp {
+  width: 14px;
+  height: 14px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.call-bar[data-phase='ringing'] .call-lamp {
+  animation: ring 1.3s ease-in-out infinite;
+}
+@keyframes ring {
+  50% {
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+.call-who {
+  min-width: 0;
+}
+.call-who h2 {
+  overflow: hidden;
+  font-size: 20px;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.call-detail {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+.call-clock {
+  color: var(--ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.call-actions {
+  display: flex;
+  gap: 10px;
+}
+.call-answer,
+.call-end {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  height: 46px;
+  padding: 0 20px 0 16px;
+  border: 0;
+  border-radius: 23px;
+  font-weight: 700;
+}
+.call-answer {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.call-end {
+  background: var(--alert);
+  color: var(--alert-ink);
+}
+.call-answer:disabled,
+.call-end:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.call-problem {
+  grid-column: 2 / -1;
+  color: var(--alert);
+  font-size: 14px;
+}
+.call-bar[data-phase='failed'] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  background: var(--alert-wash);
+}
+.call-bar[data-phase='failed'] .call-problem {
+  grid-column: auto;
 }
 
 /* The phone is not connected: a bar across the top of the page. */
@@ -81,7 +172,7 @@ ol {
 .side {
   display: flex;
   flex-direction: column;
-  grid-row: 2;
+  grid-row: 3;
   min-height: 0;
   background: var(--rail);
 }
@@ -170,9 +261,9 @@ ol {
   cursor: default;
 }
 
-/* Narrow windows: People and Notices as two tabs in one column. */
+/* The left column's lists. Notices is a tab only in narrow windows; wide, it has its own column. */
 .seg {
-  display: none;
+  display: flex;
   gap: 4px;
   margin: 12px 16px 4px;
   padding: 4px;
@@ -195,6 +286,17 @@ ol {
   background: var(--well);
   color: var(--ink);
   font-weight: 700;
+}
+.seg button[data-tab='notices'] {
+  display: none;
+}
+.texts:not([data-tab='calls']) .call-rows,
+.texts[data-tab='calls'] .people-rows,
+.texts[data-tab='calls'] .people .notices-body {
+  display: none;
+}
+.row-text[data-missed] {
+  color: var(--alert);
 }
 
 .rows {
@@ -407,7 +509,7 @@ ol {
 /* ---------- The middle pane: a conversation, or the new-text form ---------- */
 
 .middle {
-  grid-row: 2;
+  grid-row: 3;
   min-width: 0;
   min-height: 0;
 }
@@ -423,6 +525,17 @@ ol {
   height: 64px;
   padding: 0 28px;
   border-bottom: 1px solid var(--rail-edge);
+}
+.call-button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  height: 36px;
+  margin-left: auto;
+}
+.call-button svg.ic {
+  width: 18px;
+  height: 18px;
 }
 .thread-head h1 {
   font-size: 18px;
@@ -456,6 +569,26 @@ ol {
   color: var(--ink-soft);
   font-size: 13px;
   font-weight: 700;
+}
+/* A call in the thread: a quiet line between the texts, red when it was missed. */
+.call-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  align-self: center;
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--rail);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.call-line svg.ic {
+  width: 16px;
+  height: 16px;
+}
+.call-line[data-missed] {
+  color: var(--alert);
 }
 .bubble {
   align-self: flex-start;
@@ -648,11 +781,10 @@ ol {
   .texts {
     grid-template-columns: 360px minmax(0, 1fr);
   }
-  .notices,
-  .people-head {
+  .notices {
     display: none;
   }
-  .seg {
+  .seg button[data-tab='notices'] {
     display: flex;
   }
   .texts[data-tab='people'] .notices-body,
@@ -813,6 +945,9 @@ ol {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .call-bar[data-phase='ringing'] .call-lamp {
+    animation: none;
+  }
   .signal::after {
     width: 100%;
     opacity: 0.45;

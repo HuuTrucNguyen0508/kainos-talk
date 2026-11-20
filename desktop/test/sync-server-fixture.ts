@@ -1,6 +1,7 @@
 // The PC's real SMS sync server, driven over stdin/stdout by the phone's interop test
 // (android/app/src/test/java/app/kainos/talk/sync/SyncInteropTest.kt).
 //   argv: <port> <dir>        stdin: "accept" | "reply <key> <text>" | "read <key>" | "send <number> <text>"
+//                                    | "answer" | "hangup" | "dial <number>" | "dialkey <key>"
 //                                    | "drop" (ends every connection) | "traffic" | "state" | "quit"
 //   stdout: "ready", then "state <json>" on every change (and on "state").
 //   "traffic" prints `traffic {"in":{"conversation":2,…},"inBytes":n,"out":{…},"outBytes":n}`, the frames
@@ -56,6 +57,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   else if (command === 'reply') console.log(`replied ${sync.reply(key!, rest.join(' '))}`);
   else if (command === 'read') sync.markRead(key!);
   else if (command === 'send') console.log(`sent ${sync.send(key!, rest.join(' '))}`);
+  else if (command === 'answer') console.log(`answered ${sync.answer()}`);
+  else if (command === 'hangup') console.log(`hungup ${sync.hangUp()}`);
+  else if (command === 'dial') console.log(`dialled ${sync.dial({ number: [key, ...rest].join(' ') })}`);
+  else if (command === 'dialkey') console.log(`dialled ${sync.dial({ key: key! })}`);
   else if (command === 'image') {
     const picture = await sync.image(key!);
     console.log(`image ${picture ? `data:image/jpeg;base64,${picture.toString('base64')}` : 'null'}`);

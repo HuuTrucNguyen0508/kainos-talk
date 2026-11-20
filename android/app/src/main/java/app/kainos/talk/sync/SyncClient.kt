@@ -89,7 +89,7 @@ interface SyncControl {
     /** While pairing: the user compared the codes; true when they match, false to cancel. */
     fun confirmCode(matches: Boolean)
 
-    /** Reads the SMS inbox again, after the user granted access to it. */
+    /** Reads the SMS inbox and the call log again, after the user granted access to them. */
     fun refreshInbox()
 }
 
@@ -113,10 +113,15 @@ class SyncClient(
     private val lanAvailable: Flow<Boolean> = lanAvailability(context),
     /** How long to wait for Wi-Fi or Ethernet before trying anyway (the PC may be on this phone's hotspot or tether). */
     private val lanWaitMs: Long = LAN_WAIT_MS,
+    /** The phone's calls: reported to the PC, and answered, ended or placed from it. */
+    private val calls: CallControl = NoCalls,
 ) : SyncControl {
     private val settings = SyncSettings(context)
     private val discovery = PcDiscovery(context)
-    override fun refreshInbox() = sms.refresh()
+    override fun refreshInbox() {
+        sms.refresh()
+        calls.refresh()
+    }
     private val statusState = MutableStateFlow<SyncStatus>(settings.load()?.let { SyncStatus.Connecting(it.pcName) } ?: SyncStatus.NotPaired)
     override val status: StateFlow<SyncStatus> = statusState
     override val discovered: StateFlow<List<FoundPc>> = discovery.found
@@ -168,8 +173,13 @@ class SyncClient(
                 val nonce = randomToken(16)
                 writer.write(SyncProtocol.pair(deviceName(), nonce) + "\n")
                 writer.flush()
-                val code = (SyncProtocol.parse(reader.readLine() ?: "") as? PcFrame.PairCode)
-                    ?: return@withContext PairResult.Failed("The PC is busy pairing another phone. Try again in a minute.")
+                val code = when (val first = SyncProtocol.parse(reader.readLine() ?: "")) {
+                    is PcFrame.PairCode -> first
+                    is PcFrame.Denied -> return@withContext PairResult.Failed(
+                        if (first.reason == "version") "This phone and $name run different versions of Kainos Talk. Update both, then connect." else "$name refused to connect.",
+                    )
+                    else -> return@withContext PairResult.Failed("The PC is busy pairing another phone. Try again in a minute.")
+                }
                 onCode(SyncProtocol.pairingCode(seen!!, identity.fingerprint, nonce, code.nonce))
                 socket.soTimeout = PAIRING_TIMEOUT_MS
                 coroutineScope {
@@ -302,6 +312,7 @@ class SyncClient(
                 else -> return@coroutineScope Outcome.CLOSED
             }
             val syncer = launch { syncConversations(welcome, ::send) }
+            val caller = launch { syncCalls(::send) }
             try {
                 while (isActive) {
                     val line = withContext(Dispatchers.IO) { reader.readLine() } ?: break
@@ -316,6 +327,15 @@ class SyncClient(
                             val error = withContext(Dispatchers.IO) { sms.send(frame.to, frame.text) }
                             send(SyncProtocol.replyResult(frame.id, error))
                         }
+                        is PcFrame.Answer -> launch { send(SyncProtocol.replyResult(frame.id, withContext(Dispatchers.IO) { calls.answer(frame.call) })) }
+                        is PcFrame.HangUp -> launch { send(SyncProtocol.replyResult(frame.id, withContext(Dispatchers.IO) { calls.hangUp(frame.call, frame.phase) })) }
+                        is PcFrame.Dial -> launch {
+                            val error = withContext(Dispatchers.IO) {
+                                val number = frame.number ?: frame.key?.let(sms::addressOf)
+                                if (number == null) "no single number for this conversation" else calls.dial(number)
+                            }
+                            send(SyncProtocol.replyResult(frame.id, error))
+                        }
                         is PcFrame.Reply -> launch {
                             val error = when (val result = hub.sendReply(frame.key, frame.text)) {
                                 ReplyResult.Sent -> null
@@ -328,6 +348,7 @@ class SyncClient(
                 }
             } finally {
                 syncer.cancel()
+                caller.cancel()
             }
             Outcome.CLOSED_AFTER_WELCOME
         } finally {
@@ -398,6 +419,12 @@ class SyncClient(
                 held.remove(key)
             }
         }
+    }
+
+    /** Sends the call now and the call log after the welcome, then each again when it changes. */
+    internal suspend fun syncCalls(send: suspend (String) -> Unit) = coroutineScope {
+        launch { calls.current.collect { send(SyncProtocol.call(it)) } }
+        calls.log.collect { send(SyncProtocol.callLog(it)) }
     }
 
     /** The first of [hosts] that answers, and its socket. */

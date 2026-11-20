@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Incoming call</title>
+    <link rel="stylesheet" href="call-popup.css" />
+    <script src="call-popup.js" defer></script>
+  </head>
+  <body>
+    <main class="ring" aria-live="assertive">
+      <span class="lamp" aria-hidden="true"></span>
+      <h1 id="who"></h1>
+      <p id="detail"></p>
+      <div class="actions">
+        <button type="button" id="decline" class="decline">Decline</button>
+        <button type="button" id="answer" class="answer">Answer</button>
+      </div>
+      <p id="problem" class="problem" role="alert"></p>
+    </main>
+  </body>
+</html>

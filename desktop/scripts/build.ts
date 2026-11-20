@@ -28,12 +28,14 @@ await Promise.all([
   build({ ...node, platform: 'browser', entryPoints: [`${root}src/preload/inbox.ts`], outfile: `${dist}/preload-inbox.cjs` }),
   build({ ...node, platform: 'browser', entryPoints: [`${root}src/preload/server.ts`], outfile: `${dist}/preload-server.cjs` }),
   build({ ...node, platform: 'browser', entryPoints: [`${root}src/preload/apps.ts`], outfile: `${dist}/preload-apps.cjs` }),
+  build({ ...node, platform: 'browser', entryPoints: [`${root}src/preload/call-strip.ts`], outfile: `${dist}/preload-call-strip.cjs` }),
+  build({ ...node, platform: 'browser', entryPoints: [`${root}src/preload/call-popup.ts`], outfile: `${dist}/preload-call-popup.cjs` }),
   build({
     bundle: true,
     format: 'iife',
     platform: 'browser',
     target: 'chrome140',
-    entryPoints: [`${root}src/renderer/main.ts`, `${root}src/renderer/inbox.ts`, `${root}src/renderer/server.ts`, `${root}src/renderer/apps.ts`],
+    entryPoints: [`${root}src/renderer/main.ts`, `${root}src/renderer/inbox.ts`, `${root}src/renderer/server.ts`, `${root}src/renderer/apps.ts`, `${root}src/renderer/call-strip.ts`, `${root}src/renderer/call-popup.ts`],
     outdir: `${dist}/renderer`,
     loader: { '.woff2': 'file', '.woff': 'file' },
     assetNames: 'fonts/[name]-[hash]',
@@ -44,6 +46,8 @@ await Promise.all([
   copyFile(`${root}src/renderer/inbox.html`, `${dist}/renderer/inbox.html`),
   copyFile(`${root}src/renderer/server.html`, `${dist}/renderer/server.html`),
   copyFile(`${root}src/renderer/apps.html`, `${dist}/renderer/apps.html`),
+  copyFile(`${root}src/renderer/call-strip.html`, `${dist}/renderer/call-strip.html`),
+  copyFile(`${root}src/renderer/call-popup.html`, `${dist}/renderer/call-popup.html`),
 ]);
 
 console.log('built desktop/dist');

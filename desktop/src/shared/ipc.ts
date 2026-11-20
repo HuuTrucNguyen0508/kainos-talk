@@ -42,6 +42,10 @@ export const Channel = {
   serverAdd: 'kainos:server-add',
   /** Add a Streamroom address window to main: Cancel or Escape. */
   serverCancel: 'kainos:server-cancel',
+  /** Call strip to main: switch the active tab between its call and its chats. */
+  callToggle: 'kainos:call-toggle',
+  /** Main to the call strip: what the tab shows under it ('call' or 'chats'). */
+  callShowing: 'kainos:call-showing',
   /** Dock to main: a tab drag started (true) or ended (false). */
   dockDrag: 'kainos:dock-drag',
 } as const;

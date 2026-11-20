@@ -16,8 +16,10 @@ object SyncProtocol {
      * 3: every source the phone reads (chats and mail), not only texts. The phone now sends
      *    texts only, still as `conversation` frames with source "sms"; nothing changed on the wire.
      * 4: the welcome lists what the PC still holds, so a reconnect sends only what changed.
+     * 5: phone calls (`call`, `callLog`, `answer`, `hangUp`, `dial`). An older PC closes the
+     *    connection on a frame type it does not know, so both apps update together.
      */
-    const val VERSION = 4
+    const val VERSION = 5
     const val PORT = 48090
 
     /** mDNS service type of a PC running Kainos Talk. */
@@ -26,6 +28,9 @@ object SyncProtocol {
     /** Conversations sent per sync, newest first, and messages per conversation. */
     const val MAX_CONVERSATIONS = 100
     const val MAX_MESSAGES = 200
+
+    /** Call log entries sent, newest first. */
+    const val MAX_CALL_LOG = 100
 
     /**
      * The 6-digit code both screens show while pairing. It covers both devices' certificates, so
@@ -129,6 +134,43 @@ object SyncProtocol {
 
     fun pong(): String = frame("pong") {}
 
+    /** The call on this phone now, or null once it ended. */
+    fun call(call: LiveCall?): String = frame("call") {
+        put(
+            "call",
+            call?.let {
+                JSONObject()
+                    .put("id", it.id)
+                    .put("phase", it.phase.wire)
+                    .put("direction", if (it.incoming) "incoming" else "outgoing")
+                    .put("number", it.number?.take(40) ?: JSONObject.NULL)
+                    .put("name", it.name?.take(500) ?: JSONObject.NULL)
+                    .put("key", it.key ?: JSONObject.NULL)
+                    .put("sinceMs", it.sinceMs)
+            } ?: JSONObject.NULL,
+        )
+    }
+
+    fun callLog(calls: List<CallEntry>): String = frame("callLog") {
+        put(
+            "calls",
+            JSONArray().apply {
+                calls.take(MAX_CALL_LOG).forEach {
+                    put(
+                        JSONObject()
+                            .put("id", it.id)
+                            .put("kind", it.kind.wire)
+                            .put("number", it.number?.take(40) ?: JSONObject.NULL)
+                            .put("name", it.name?.take(500) ?: JSONObject.NULL)
+                            .put("key", it.key ?: JSONObject.NULL)
+                            .put("timeMs", it.timeMs)
+                            .put("seconds", it.seconds),
+                    )
+                }
+            },
+        )
+    }
+
     /** A picture the PC asked for, as JPEG in base64, or why it is missing. */
     fun image(id: String, jpeg: ByteArray?, error: String?): String = frame("image") {
         put("id", id)
@@ -169,6 +211,23 @@ object SyncProtocol {
             }
             "ping" -> PcFrame.Ping
             "getImage" -> text("id", 100)?.let { PcFrame.GetImage(it) }
+            "answer" -> {
+                val id = text("id", 100)
+                val call = text("call", 100)
+                if (id != null && call != null) PcFrame.Answer(id, call) else null
+            }
+            "hangUp" -> {
+                val id = text("id", 100)
+                val call = text("call", 100)
+                val phase = CallPhase.entries.firstOrNull { it.wire == text("phase", 20) }
+                if (id != null && call != null && phase != null) PcFrame.HangUp(id, call, phase) else null
+            }
+            "dial" -> {
+                val id = text("id", 100)
+                val number = text("number", 40)
+                val key = text("key", 500)
+                if (id != null && (number == null) != (key == null)) PcFrame.Dial(id, number, key) else null
+            }
             else -> null
         }
     }
@@ -243,4 +302,47 @@ sealed interface PcFrame {
 
     /** The PC wants a picture from a message to show it. */
     data class GetImage(val id: String) : PcFrame
+
+    /**
+     * Answer the ringing call [call]. Each call action names the call and the phase the PC showed,
+     * so a call that changed meanwhile is left alone; each is answered with a `replyResult` of its id.
+     */
+    data class Answer(val id: String, val call: String) : PcFrame
+
+    /** End the call [call], or decline it while it rings, as long as it is still in [phase]. */
+    data class HangUp(val id: String, val call: String, val phase: CallPhase) : PcFrame
+
+    /** Call [number], or the one number of the text conversation [key]: exactly one is set. */
+    data class Dial(val id: String, val number: String?, val key: String?) : PcFrame
 }
+
+/** Android tells a normal app only ringing and off the hook, so a call placed is active at once. */
+enum class CallPhase(val wire: String) { RINGING("ringing"), ACTIVE("active") }
+
+/** The call on this phone right now. */
+data class LiveCall(
+    val id: String,
+    val phase: CallPhase,
+    val incoming: Boolean,
+    /** Null for a hidden number, or a call placed on the phone before its number is known. */
+    val number: String?,
+    /** The saved contact's name. */
+    val name: String?,
+    /** The text conversation with this number, when there is one. */
+    val key: String?,
+    val sinceMs: Long,
+)
+
+enum class CallKind(val wire: String) { INCOMING("incoming"), OUTGOING("outgoing"), MISSED("missed"), DECLINED("declined") }
+
+/** One line of the call log. */
+data class CallEntry(
+    val id: String,
+    val kind: CallKind,
+    val number: String?,
+    val name: String?,
+    val key: String?,
+    val timeMs: Long,
+    /** How long it lasted; 0 for a call nobody answered. */
+    val seconds: Long,
+)

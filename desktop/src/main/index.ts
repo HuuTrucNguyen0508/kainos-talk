@@ -17,6 +17,7 @@ import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
 import { CLOUDFLARE_GUIDE, LOCAL_GUIDE, STREAMROOM_ID, parseServer, serverChoices, serverLabel, thisPc, withCurrent, withLocalPort, withServers, withoutServer, type StreamroomServers } from '../shared/streamroom.ts';
 import { askServerAddress, type ServerDialogMode } from './server-dialog.ts';
+import { createCallPopup } from './call-popup.ts';
 
 import { claimingService } from './navigation.ts';
 import { openExternal } from './open-external.ts';
@@ -28,6 +29,8 @@ import { chromeUserAgent } from './user-agent.ts';
 const APP_NAME = 'Kainos Talk';
 /** Longest phone name the dock shows; the name comes from the phone. */
 const PHONE_NAME_MAX = 60;
+/** Height of the strip over a tab with a call on (call-strip.css fills it). */
+const CALL_STRIP_HEIGHT = 40;
 
 app.setName(APP_NAME);
 if (process.env.KAINOS_USER_DATA) app.setPath('userData', process.env.KAINOS_USER_DATA);
@@ -110,6 +113,25 @@ async function start(): Promise<void> {
   dockContents.on('will-navigate', (event) => event.preventDefault());
   dockContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
+  /** The strip at the top of a tab with a call on, to switch between the call and the chats. */
+  const callStrip = new WebContentsView({
+    webPreferences: { preload: join(__dirname, 'preload-call-strip.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false },
+  });
+  callStrip.setVisible(false);
+  callStrip.webContents.on('will-navigate', (event) => event.preventDefault());
+  callStrip.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  void callStrip.webContents.loadFile(join(__dirname, 'renderer', 'call-strip.html'));
+  /** Last told to the call strip; a reloaded strip page starts on 'call', as does a new call. */
+  let sentShowing: 'call' | 'chats' | undefined;
+  callStrip.webContents.on('did-finish-load', () => (sentShowing = undefined));
+  ipcMain.on(Channel.callToggle, (event) => {
+    if (event.sender !== callStrip.webContents) return;
+    const runtime = runtimeById(state.activeServiceId);
+    if (!runtime?.call()) return;
+    runtime.setCallInFront(!runtime.callInFront());
+    shownContents(runtime)?.focus();
+  });
+
   /** Set once every service runtime exists; callbacks that arrive earlier have nothing to update. */
   let runtimesReady = false;
   /** Choose your apps, while it is open over the window. */
@@ -145,6 +167,53 @@ async function start(): Promise<void> {
     notification.show();
     app.emit('kainos-notification', { serviceId: 'inbox', muted, notification });
   }
+  /**
+   * A ringing call, unless Texts is muted. While Kainos Talk is the window in use it opens a
+   * window of its own in the middle of the screen. Otherwise it is a desktop notification: a new
+   * window would pull Kainos Talk's workspace over whatever is open, a game say.
+   */
+  let callPopupContents: WebContents | undefined;
+  /** Kainos Talk is the window in use. Tracked from its events, which the off-screen test can send. */
+  let inUse = false;
+  win.on('focus', () => (inUse = true));
+  win.on('blur', () => (inUse = false));
+  /** How the ringing call shows, chosen when it starts to ring and kept until it stops. */
+  let ringingAs: { id: string; way: 'window' } | { id: string; way: 'notification'; who: string; notification: Notification | undefined } | undefined;
+  function notifyCall(who: string): Notification | undefined {
+    if (!Notification.isSupported()) return undefined;
+    const notification = new Notification({ title: `${who} is calling`, body: 'Answer on the Texts page or on your phone.', icon: icons.plain, urgency: 'critical' });
+    notification.on('click', () => {
+      showWindow();
+      activate('inbox');
+    });
+    notification.show();
+    return notification;
+  }
+  const callPopup = createCallPopup({
+    localDir: __dirname,
+    background: themeBackground,
+    answer: () => sms?.answer(),
+    decline: () => sms?.hangUp(),
+    onOpen: (contents) => (callPopupContents = contents),
+    onClose: () => (callPopupContents = undefined),
+  });
+  function showRinging(): void {
+    const s = sms?.state();
+    const ringing = s?.call?.phase === 'ringing' && !state.mutedServiceIds.includes('inbox') ? s.call : undefined;
+    if (ringingAs && ringingAs.id !== ringing?.id) {
+      if (ringingAs.way === 'notification') ringingAs.notification?.close();
+      ringingAs = undefined;
+    }
+    if (!ringing) return callPopup.show(undefined);
+    if (!ringingAs) ringingAs = inUse ? { id: ringing.id, way: 'window' } : { id: ringing.id, way: 'notification', who: '', notification: undefined };
+    if (ringingAs.way === 'window') return callPopup.show({ call: ringing, pending: s!.callAction.pending, failure: s!.callAction.failure });
+    // The caller's number and name can come after the call: the notification is shown again with them.
+    const who = ringing.name ?? ringing.number ?? 'Unknown number';
+    if (who === ringingAs.who) return;
+    ringingAs.notification?.close();
+    ringingAs.who = who;
+    ringingAs.notification = notifyCall(who);
+  }
   /** The phone sync, running only while Texts is on: off, nothing listens on the network. */
   let sms: SmsSync | undefined;
   let smsStarting: Promise<void> | undefined;
@@ -156,6 +225,7 @@ async function start(): Promise<void> {
       advertise: process.env.KAINOS_SYNC_MDNS !== '0',
       onChange: () => {
         if (sms) smsView()?.send(SmsChannel.state, sms.state());
+        showRinging();
         // The window title and tray lamp follow the inbox.
         if (runtimesReady) render();
       },
@@ -176,6 +246,7 @@ async function start(): Promise<void> {
     await smsStarting?.catch(() => {});
     const running = sms;
     sms = undefined;
+    showRinging();
     await running?.stop();
   }
   if (isOn('inbox')) await startSms();
@@ -184,6 +255,7 @@ async function start(): Promise<void> {
     const picture = (await sms?.image(decodeURIComponent(new URL(request.url).pathname.slice(1)))) ?? null;
     return picture ? new Response(new Uint8Array(picture), { headers: { 'content-type': 'image/jpeg' } }) : new Response(null, { status: 404 });
   });
+  win.contentView.addChildView(callStrip);
   win.contentView.addChildView(chrome);
   /** Pages made while the runtimes are being created; wired once everything they use exists. */
   let unwiredPages: WebContents[] | undefined = [];
@@ -213,7 +285,10 @@ async function start(): Promise<void> {
     }),
   );
   const runtimeById = (id: string) => runtimes.find((runtime) => runtime.service.id === id);
-  const runtimeOf = (contents: WebContents) => runtimes.find((runtime) => runtime.view()?.webContents === contents);
+  /** The page a service shows: its call while that is in front, else its page. */
+  const shownContents = (runtime: ServiceRuntime | undefined) => (runtime?.callInFront() ? runtime.call() : runtime?.view())?.webContents;
+  const runtimeOf = (contents: WebContents) =>
+    runtimes.find((runtime) => runtime.view()?.webContents === contents || runtime.call()?.webContents === contents);
   runtimesReady = true;
 
   /** A link leaving a service: a service that claims its host (Streamroom's invites) opens it, else the browser. */
@@ -272,7 +347,7 @@ async function start(): Promise<void> {
   const pagePointers = new Map<WebContents, PagePointer>();
   function clearPagePointer(contents: WebContents): void {
     pagePointers.delete(contents);
-    if (contents === runtimeById(state.activeServiceId)?.view()?.webContents) revealBy({ kind: 'page', at: 'away' });
+    if (contents === shownContents(runtimeById(state.activeServiceId))) revealBy({ kind: 'page', at: 'away' });
   }
   /** The dock page's centred group, as it last measured it. */
   let group: DockSize | undefined;
@@ -296,7 +371,7 @@ async function start(): Promise<void> {
   function layout(): void {
     const [width = 0, height = 0] = win.getContentSize();
     const active = runtimeById(state.activeServiceId);
-    const activeContents = active?.view()?.webContents;
+    const activeContents = shownContents(active);
     feed({ kind: 'page', at: activeContents ? pagePointers.get(activeContents) ?? 'away' : 'away' });
     // A service that is loading or failed stays hidden, so the dock page can show why.
     const activeReady = active?.status().kind === 'ready';
@@ -304,11 +379,29 @@ async function start(): Promise<void> {
     const activeFullscreen = active?.fullscreen() === true;
     feed({ kind: 'active', active: !state.dockAlwaysShown && activeReady && !activeFullscreen });
     const placed = layoutBar({ width, height, activeReady, activeFullscreen, pinned: state.dockAlwaysShown, onScreen: onScreen(reveal.phase), group });
+    // While the tab on screen has a call on, the call strip sits at the top of the page's place
+    // (not over a fullscreen video), and the call or the page fills the rest.
+    const activeCall = activeReady && !activeFullscreen && active?.call() !== undefined;
+    const area = placed.service;
+    const stripHeight = activeCall ? Math.min(CALL_STRIP_HEIGHT, area.height) : 0;
+    const below = { ...area, y: area.y + stripHeight, height: area.height - stripHeight };
     for (const runtime of runtimes) {
       const view = runtime.view();
       if (!view) continue;
-      view.setBounds(placed.service);
-      view.setVisible(runtime === active && runtime.status().kind === 'ready');
+      const shown = runtime === active && runtime.status().kind === 'ready';
+      const bounds = runtime === active ? below : area;
+      const call = runtime.call();
+      call?.setBounds(bounds);
+      call?.setVisible(shown && runtime.callInFront());
+      view.setBounds(bounds);
+      view.setVisible(shown && !runtime.callInFront());
+    }
+    callStrip.setBounds({ ...area, height: stripHeight });
+    callStrip.setVisible(activeCall);
+    const showing = active?.callInFront() ? 'call' : 'chats';
+    if (activeCall && showing !== sentShowing) {
+      sentShowing = showing;
+      callStrip.webContents.send(Channel.callShowing, showing);
     }
     // Bounds first, then the frame: the view is in place before the dock slides up into it,
     // and keeps its bounds (onScreen while leaving) until it has slid away.
@@ -351,7 +444,7 @@ async function start(): Promise<void> {
   function focusActiveService(): void {
     const runtime = runtimeById(state.activeServiceId);
     if (runtime?.status().kind !== 'ready') return;
-    if (win.isFocused()) runtime.view()?.webContents.focus();
+    if (win.isFocused()) shownContents(runtime)?.focus();
     else focusOnWindowFocus = true;
   }
   win.on('focus', () => {
@@ -402,10 +495,10 @@ async function start(): Promise<void> {
       runtime.wake();
     }
     if (state.activeServiceId !== serviceId) {
-      const previous = runtimeById(state.activeServiceId)?.view();
-      if (previous) clearPagePointer(previous.webContents);
+      const previous = shownContents(runtimeById(state.activeServiceId));
+      if (previous) clearPagePointer(previous);
       updateState({ activeServiceId: serviceId });
-      const contents = runtime.view()?.webContents;
+      const contents = shownContents(runtime);
       if (contents) {
         clearPagePointer(contents);
         contents.send(Channel.resetPagePointer);
@@ -664,8 +757,8 @@ async function start(): Promise<void> {
     return { window: win, ...(at && { x: at.x + view.x, y: at.y + view.y }), callback: () => revealBy({ kind: 'menu', open: false }) };
   }
 
-  /** Kainos' own pages: the dock and the Texts page. Service pages keep their own colours. */
-  const themedPages = () => [dockContents, smsView(), serverDialog, apps?.view.webContents].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
+  /** Kainos' own pages: the dock, the Texts page and the call strip. Service pages keep their own colours. */
+  const themedPages = () => [dockContents, smsView(), serverDialog, apps?.view.webContents, callStrip.webContents, callPopupContents].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
   function chooseTheme(theme: ThemeChoice): void {
     updateState({ theme }, 0);
     paintThemeBackground();
@@ -736,7 +829,7 @@ async function start(): Promise<void> {
       return;
     }
     const runtime = runtimeById(state.activeServiceId);
-    if (runtime?.status().kind === 'ready') runtime.view()?.webContents.focus();
+    if (runtime?.status().kind === 'ready') shownContents(runtime)?.focus();
   }
 
   // Ctrl+1..9, Ctrl+Q, F5/Ctrl+R and F6 work wherever focus is: the dock or any service page.
@@ -754,6 +847,7 @@ async function start(): Promise<void> {
     });
   }
   handleShortcuts(dockContents);
+  handleShortcuts(callStrip.webContents);
 
   /** Hooks for each service page, set when its view is made (at startup and on each wake). */
   function wirePage(contents: WebContents): void {
@@ -814,7 +908,7 @@ async function start(): Promise<void> {
     const at = parsePagePointer(raw);
     if (!at || !runtimeOf(event.sender)) return;
     pagePointers.set(event.sender, at);
-    if (event.sender === runtimeById(state.activeServiceId)?.view()?.webContents) revealBy({ kind: 'page', at });
+    if (event.sender === shownContents(runtimeById(state.activeServiceId))) revealBy({ kind: 'page', at });
   });
 
   const smsContents = smsView();
@@ -834,6 +928,18 @@ async function start(): Promise<void> {
   });
   ipcMain.on(SmsChannel.copyCode, (event, code: unknown) => {
     if (fromSms(event) && isCopyableCode(code)) clipboard.writeText(code);
+  });
+  ipcMain.on(SmsChannel.answer, (event) => {
+    if (fromSms(event)) sms?.answer();
+  });
+  ipcMain.on(SmsChannel.hangUp, (event) => {
+    if (fromSms(event)) sms?.hangUp();
+  });
+  ipcMain.on(SmsChannel.dial, (event, to: unknown) => {
+    if (!fromSms(event) || typeof to !== 'object' || to === null) return;
+    const { number, key } = to as Record<string, unknown>;
+    if (typeof number === 'string' && number.length <= 40) sms?.dial({ number });
+    else if (typeof key === 'string' && key.length <= 500) sms?.dial({ key });
   });
   ipcMain.on(SmsChannel.send, (event, to: unknown, text: unknown) => {
     if (fromSms(event) && typeof to === 'string' && typeof text === 'string' && text.length <= 5000) sms?.send(to, text);
@@ -867,8 +973,7 @@ async function start(): Promise<void> {
   win.on('closed', () => {
     clearTimeout(revealTimer);
     for (const runtime of runtimes) {
-      const contents = runtime.view()?.webContents;
-      if (contents && !contents.isDestroyed()) contents.close();
+      for (const contents of [runtime.call()?.webContents, runtime.view()?.webContents]) if (contents && !contents.isDestroyed()) contents.close();
     }
     if (!dockContents.isDestroyed()) dockContents.close();
   });

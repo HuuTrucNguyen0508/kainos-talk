@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Call in progress</title>
+    <link rel="stylesheet" href="call-strip.css" />
+    <script src="call-strip.js" defer></script>
+  </head>
+  <body>
+    <button type="button" id="strip" data-showing="call">
+      <span class="lamp" aria-hidden="true"></span>
+      <span class="label">Call in progress</span>
+      <span class="action" id="action">Back to chats</span>
+    </button>
+  </body>
+</html>

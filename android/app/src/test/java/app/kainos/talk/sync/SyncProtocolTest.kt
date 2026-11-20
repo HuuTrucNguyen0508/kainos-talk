@@ -115,4 +115,72 @@ class SyncProtocolTest {
         assertTrue(line(SenderKind.PERSON), line(SenderKind.PERSON).contains(""""sender":"person""""))
         assertEquals("person", JSONObject(line(SenderKind.PERSON)).getJSONObject("conversation").getString("sender"))
     }
+
+    @Test
+    fun callFramesMatchWhatThePcParses() {
+        val calls = vectors.getJSONArray("callFrames")
+        assertEquals(3, calls.length())
+        for (i in 0 until calls.length()) {
+            val v = calls.getJSONObject(i)
+            val c = v.optJSONObject("call")
+            val call = c?.let {
+                LiveCall(
+                    id = it.getString("id"),
+                    phase = CallPhase.entries.single { phase -> phase.wire == it.getString("phase") },
+                    incoming = it.getString("direction") == "incoming",
+                    number = it.optString("number").takeUnless { _ -> it.isNull("number") },
+                    name = it.optString("name").takeUnless { _ -> it.isNull("name") },
+                    key = it.optString("key").takeUnless { _ -> it.isNull("key") },
+                    sinceMs = it.getLong("sinceMs"),
+                )
+            }
+            assertJsonEquals(v.getString("frame"), SyncProtocol.call(call))
+        }
+        val logs = vectors.getJSONArray("callLogFrames")
+        assertEquals(2, logs.length())
+        for (i in 0 until logs.length()) {
+            val v = logs.getJSONObject(i)
+            val entries = v.getJSONArray("calls")
+            val log = (0 until entries.length()).map { j ->
+                val e = entries.getJSONObject(j)
+                CallEntry(
+                    id = e.getString("id"),
+                    kind = CallKind.entries.single { kind -> kind.wire == e.getString("kind") },
+                    number = e.optString("number").takeUnless { e.isNull("number") },
+                    name = e.optString("name").takeUnless { e.isNull("name") },
+                    key = e.optString("key").takeUnless { e.isNull("key") },
+                    timeMs = e.getLong("timeMs"),
+                    seconds = e.getLong("seconds"),
+                )
+            }
+            assertJsonEquals(v.getString("frame"), SyncProtocol.callLog(log))
+        }
+    }
+
+    @Test
+    fun callActionsFromThePcParse() {
+        val expected = listOf(
+            PcFrame.Answer("a1", "c1"),
+            PcFrame.HangUp("a2", "c1", CallPhase.RINGING),
+            PcFrame.Dial("a3", "+33 6 12 34 56 78", null),
+            PcFrame.Dial("a4", null, "sms|0|s:mum"),
+        )
+        val frames = vectors.getJSONArray("pcCallFrames")
+        assertEquals(expected, (0 until frames.length()).map { SyncProtocol.parse(frames.getJSONObject(it).getString("frame")) })
+        assertNull(SyncProtocol.parse("""{"t":"dial","id":"x","number":null,"key":null}"""))
+        assertNull(SyncProtocol.parse("""{"t":"dial","id":"x","number":"1","key":"k"}"""))
+        assertNull(SyncProtocol.parse("""{"t":"answer","id":"x"}"""))
+        assertNull(SyncProtocol.parse("""{"t":"hangUp","id":"x","call":"c","phase":"held"}"""))
+    }
+
+    /** org.json on the JVM does not keep key order, so frames compare as JSON values. */
+    private fun assertJsonEquals(expected: String, actual: String) = assertEquals(actual, plain(JSONObject(expected)), plain(JSONObject(actual)))
+
+    private fun plain(value: Any?): Any? = when (value) {
+        is JSONObject -> value.keys().asSequence().associateWith { plain(value.get(it)) }
+        is org.json.JSONArray -> (0 until value.length()).map { plain(value.get(it)) }
+        JSONObject.NULL -> null
+        is Number -> value.toLong()
+        else -> value
+    }
 }

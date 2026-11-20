@@ -68,10 +68,12 @@ class SyncInteropTest {
     /** The next server line that matches, within 10 s. */
     private fun await(what: String, match: (String) -> Boolean): String {
         val end = System.currentTimeMillis() + 10_000
+        var last: String? = null
         while (true) {
             val left = end - System.currentTimeMillis()
-            check(left > 0) { "timed out waiting for $what" }
+            check(left > 0) { "timed out waiting for $what; the server last said: ${last?.take(2_000)}" }
             val line = lines.poll(left, TimeUnit.MILLISECONDS) ?: continue
+            last = line
             if (match(line)) return line
         }
     }
@@ -130,7 +132,8 @@ class SyncInteropTest {
     fun pairsSyncsTextsAndCarriesRepliesAndReads() = runBlocking {
         val hub = hub()
         val store = FakeSmsStore().apply { images["mms-part:1"] = byteArrayOf(-1, -40, -1) }
-        val client = SyncClient(ApplicationProvider.getApplicationContext(), hub, store, scope, identity("phone.p12"), port, lanAvailable = kotlinx.coroutines.flow.flowOf(true))
+        val calls = FakeCalls()
+        val client = SyncClient(ApplicationProvider.getApplicationContext(), hub, store, scope, identity("phone.p12"), port, lanAvailable = kotlinx.coroutines.flow.flowOf(true), calls = calls)
         val impostor = client.pairAt(listOf("127.0.0.1"), expectedFingerprint = "00".repeat(32), name = "Test PC") {}
         assertEquals("a PC whose certificate differs from its mDNS record is refused", true, impostor is PairResult.Failed)
         val phoneCode = java.util.concurrent.atomic.AtomicReference("")
@@ -154,7 +157,8 @@ class SyncInteropTest {
         assertEquals("Dinner on Sunday?", mum.getJSONArray("messages").getJSONObject(0).getString("text"))
 
         // Protocol 4: a reconnect sends only what the PC does not hold already.
-        awaitState("both conversations") { s -> s.getJSONArray("conversations").length() == 2 }
+        // Both may already be in the state that showed Mum's; then no state line follows.
+        if (synced.getJSONArray("conversations").length() != 2) awaitState("both conversations") { s -> s.getJSONArray("conversations").length() == 2 }
         Thread.sleep(500)
         val firstSync = traffic()
         println("traffic first connection: $firstSync")
@@ -203,6 +207,22 @@ class SyncInteropTest {
         await("the new text to be handed to the phone") { it == "sent true" }
         awaitState("the phone's refusal") { s -> s.getJSONObject("newText").optString("failure") == "no permission to send texts" }
 
+        // A call ringing on the phone rings on the PC, and the PC's buttons reach the phone.
+        calls.current.value = LiveCall("c1", CallPhase.RINGING, incoming = true, number = "+33612345678", name = "Mum", key = "sms|0|s:mum", sinceMs = 3_000L)
+        awaitState("the ringing call") { s -> s.optJSONObject("call")?.optString("name") == "Mum" }
+        command("answer")
+        await("the answer to be sent") { it == "answered true" }
+        awaitState("the answer to be done") { s -> !s.getJSONObject("callAction").getBoolean("pending") }
+        calls.current.value = null
+        calls.log.value = listOf(CallEntry("5", CallKind.MISSED, "+33612345678", "Mum", "sms|0|s:mum", 2_500L, 0))
+        awaitState("the call log") { s -> s.isNull("call") && s.getJSONArray("calls").optJSONObject(0)?.optString("kind") == "missed" }
+        command("dial +33 6 12 34 56 78")
+        await("the dial to be sent") { it == "dialled true" }
+        awaitState("the dial to be done") { s -> !s.getJSONObject("callAction").getBoolean("pending") }
+        assertEquals(listOf("answer c1", "dial +33 6 12 34 56 78"), calls.actions)
+        command("dialkey sms|0|s:mum")
+        awaitState("the phone's refusal to dial") { s -> s.getJSONObject("callAction").optString("failure") == "no single number for this conversation" }
+
         // Another device with its own certificate cannot take the phone's place, even with its id.
         // Same app storage, so the same device id and PC pin; only the certificate differs.
         val stranger = SyncClient(ApplicationProvider.getApplicationContext(), hub, store, scope, identity("impostor.p12"), port, lanAvailable = kotlinx.coroutines.flow.flowOf(true))
@@ -216,4 +236,15 @@ class SyncInteropTest {
         assertEquals(SyncStatus.NotPaired, client.status.value)
         command("quit")
     }
+}
+
+/** Calls as the PC drives them: what it set rings, and what it pressed is recorded. */
+private class FakeCalls : CallControl {
+    override val current = kotlinx.coroutines.flow.MutableStateFlow<LiveCall?>(null)
+    override val log = kotlinx.coroutines.flow.MutableStateFlow<List<CallEntry>>(emptyList())
+    val actions = java.util.concurrent.CopyOnWriteArrayList<String>()
+    override fun answer(call: String): String? = null.also { actions += "answer $call" }
+    override fun hangUp(call: String, phase: CallPhase): String? = null.also { actions += "hangUp $call ${phase.wire}" }
+    override fun dial(number: String): String? = null.also { actions += "dial $number" }
+    override fun refresh() = Unit
 }

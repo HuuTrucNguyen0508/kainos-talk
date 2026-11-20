@@ -8,6 +8,8 @@ const vectors = JSON.parse(readFileSync(new URL('../../../protocol/sms-sync-vect
   addresses: { local: string[]; remote: string[] };
   frameHash: { frame: string; hash: string }[];
   conversationFrames: { frame: string; sender: string }[];
+  callFrames: { frame: string; call: unknown }[];
+  callLogFrames: { frame: string; calls: unknown[] }[];
 };
 
 test('pairing codes match the shared vectors', () => {
@@ -52,4 +54,30 @@ test('mail frames and chats of other apps parse to an ignored frame, not to a re
   assert.equal(parsePhoneFrame(chat('sms'))?.t, 'conversation');
   assert.equal(parsePhoneFrame(chat('sms').replace('"source":"sms",', ''))?.t, 'conversation', 'a phone from before sources named none');
   assert.equal(parsePhoneFrame('{"t":"conversation","conversation":{"key":"k","messages":[]}}'), undefined, 'a malformed text is still refused');
+});
+
+test('call frames parse to the calls the vectors name', () => {
+  assert.equal(vectors.callFrames.length, 3);
+  for (const v of vectors.callFrames) assert.deepEqual(parsePhoneFrame(v.frame), { t: 'call', call: v.call }, v.frame);
+  assert.equal(vectors.callLogFrames.length, 2);
+  for (const v of vectors.callLogFrames) assert.deepEqual(parsePhoneFrame(v.frame), { t: 'callLog', calls: v.calls }, v.frame);
+});
+
+test('a call frame with a field out of range is refused', () => {
+  const call = { id: 'c', phase: 'ringing', direction: 'incoming', number: null, name: null, key: null, sinceMs: 1 };
+  const frame = (patch: object) => JSON.stringify({ t: 'call', call: { ...call, ...patch } });
+  assert.equal(parsePhoneFrame(frame({}))?.t, 'call');
+  assert.equal(parsePhoneFrame(frame({ phase: 'held' })), undefined);
+  assert.equal(parsePhoneFrame(frame({ direction: 'sideways' })), undefined);
+  assert.equal(parsePhoneFrame(frame({ number: '1'.repeat(41) })), undefined);
+  assert.equal(parsePhoneFrame(frame({ sinceMs: '1' })), undefined);
+  assert.equal(parsePhoneFrame(frame({ sinceMs: 1e300 })), undefined, 'a time no Date can show');
+  assert.equal(parsePhoneFrame('{"t":"call"}'), undefined);
+
+  const entry = { id: 'e', kind: 'missed', number: null, name: null, key: null, timeMs: 1, seconds: 2.9 };
+  const log = (entries: object[]) => JSON.stringify({ t: 'callLog', calls: entries });
+  assert.deepEqual(parsePhoneFrame(log([entry])), { t: 'callLog', calls: [{ ...entry, seconds: 2 }] });
+  assert.equal(parsePhoneFrame(log([{ ...entry, kind: 'voicemail' }])), undefined);
+  assert.equal(parsePhoneFrame(log([{ ...entry, timeMs: -1e17 }])), undefined);
+  assert.equal(parsePhoneFrame(log(Array.from({ length: 101 }, () => entry))), undefined);
 });

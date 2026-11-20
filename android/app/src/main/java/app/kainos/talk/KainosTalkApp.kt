@@ -17,6 +17,7 @@ import app.kainos.talk.listener.NotificationIngest
 import app.kainos.talk.store.MessageStore
 import app.kainos.talk.store.TalkDatabase
 import app.kainos.talk.hub.SmsAwareHub
+import app.kainos.talk.sync.PhoneCalls
 import app.kainos.talk.sync.SmsInbox
 import app.kainos.talk.sync.SyncClient
 import kotlinx.coroutines.CoroutineScope
@@ -65,8 +66,11 @@ class AppGraph(context: Context, watched: Set<String>) {
         if (granted && !connection.connected.value) NotificationListenerService.requestRebind(component)
     }
 
+    /** The phone's calls, for the PC: what rings, and its buttons. */
+    val calls = PhoneCalls(appContext, sms, scope)
+
     /** SMS sync with the paired PC; it runs whenever the app's process does. */
-    val sync = SyncClient(appContext, hub, sms, scope, pictures = { id -> images.load(id) ?: sms.image(id) }).also { it.start() }
+    val sync = SyncClient(appContext, hub, sms, scope, pictures = { id -> images.load(id) ?: sms.image(id) }, calls = calls).also { it.start() }
 }
 
 fun Context.talkGraph(): AppGraph = (applicationContext as KainosTalkApp).graph

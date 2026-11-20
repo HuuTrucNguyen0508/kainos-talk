@@ -1,5 +1,5 @@
 {
-  "about": "Shared by desktop/src/shared/sync-protocol.test.ts and the Android SyncProtocolTest. senderKind pins the phone's classifier; conversationFrames pins how the PC parses a frame's sender.",
+  "about": "Shared by desktop/src/shared/sync-protocol.test.ts and the Android SyncProtocolTest. senderKind pins the phone's classifier; conversationFrames pins how the PC parses a frame's sender. callFrames pin the call frames the phone builds and the PC parses; pcCallFrames pin the call actions the PC sends and the phone parses.",
   "pairing": [
     {
       "pcFingerprint": "9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08",
@@ -147,6 +147,94 @@
     {
       "frame": "{\"t\":\"conversation\",\"conversation\":{\"key\":\"k\",\"title\":\"T\",\"isGroup\":false,\"sender\":null,\"unread\":1,\"lastActivityMs\":1,\"canReply\":true,\"messages\":[]}}",
       "sender": "person"
+    }
+  ],
+  "callFrames": [
+    {
+      "frame": "{\"t\":\"call\",\"call\":{\"id\":\"c1\",\"phase\":\"ringing\",\"direction\":\"incoming\",\"number\":\"+33612345678\",\"name\":\"Maman ❤️\",\"key\":\"sms|0|s:mum\",\"sinceMs\":1000}}",
+      "call": {
+        "id": "c1",
+        "phase": "ringing",
+        "direction": "incoming",
+        "number": "+33612345678",
+        "name": "Maman ❤️",
+        "key": "sms|0|s:mum",
+        "sinceMs": 1000
+      }
+    },
+    {
+      "frame": "{\"t\":\"call\",\"call\":{\"id\":\"c2\",\"phase\":\"active\",\"direction\":\"outgoing\",\"number\":null,\"name\":null,\"key\":null,\"sinceMs\":2000}}",
+      "call": {
+        "id": "c2",
+        "phase": "active",
+        "direction": "outgoing",
+        "number": null,
+        "name": null,
+        "key": null,
+        "sinceMs": 2000
+      }
+    },
+    {
+      "frame": "{\"t\":\"call\",\"call\":null}",
+      "call": null
+    }
+  ],
+  "callLogFrames": [
+    {
+      "frame": "{\"t\":\"callLog\",\"calls\":[{\"id\":\"12\",\"kind\":\"missed\",\"number\":\"0612345678\",\"name\":null,\"key\":null,\"timeMs\":3000,\"seconds\":0},{\"id\":\"11\",\"kind\":\"outgoing\",\"number\":\"+33612345678\",\"name\":\"Maman ❤️\",\"key\":\"sms|0|s:mum\",\"timeMs\":2000,\"seconds\":95}]}",
+      "calls": [
+        {
+          "id": "12",
+          "kind": "missed",
+          "number": "0612345678",
+          "name": null,
+          "key": null,
+          "timeMs": 3000,
+          "seconds": 0
+        },
+        {
+          "id": "11",
+          "kind": "outgoing",
+          "number": "+33612345678",
+          "name": "Maman ❤️",
+          "key": "sms|0|s:mum",
+          "timeMs": 2000,
+          "seconds": 95
+        }
+      ]
+    },
+    {
+      "frame": "{\"t\":\"callLog\",\"calls\":[]}",
+      "calls": []
+    }
+  ],
+  "pcCallFrames": [
+    {
+      "frame": "{\"t\":\"answer\",\"id\":\"a1\",\"call\":\"c1\"}",
+      "action": "answer",
+      "id": "a1",
+      "call": "c1"
+    },
+    {
+      "frame": "{\"t\":\"hangUp\",\"id\":\"a2\",\"call\":\"c1\",\"phase\":\"ringing\"}",
+      "action": "hangUp",
+      "id": "a2",
+      "call": "c1",
+      "phase": "ringing"
+    },
+    {
+      "frame": "{\"t\":\"dial\",\"id\":\"a3\",\"number\":\"+33 6 12 34 56 78\",\"key\":null}",
+      "action": "dial",
+      "id": "a3",
+      "number": "+33 6 12 34 56 78",
+      "key": null
+    },
+    {
+      "frame": "{\"t\":\"dial\",\"id\":\"a4\",\"number\":null,\"key\":\"sms|0|s:mum\"}",
+      "action": "dial",
+      "id": "a4",
+      "number": null,
+      "key": "sms|0|s:mum"
     }
   ]
 }

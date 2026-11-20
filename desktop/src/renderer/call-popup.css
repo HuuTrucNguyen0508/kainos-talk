@@ -1,0 +1,117 @@
+@import './tokens.css';
+
+/* The incoming-call window: who is calling, under the same pulsing lamp as the Texts page's call
+   bar, and two buttons. Decline sits left and Answer right, as on a phone. */
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 15px/1.45 'Atkinson Hyperlegible', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+button {
+  font: inherit;
+}
+h1,
+p {
+  margin: 0;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.ring {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 4px;
+  height: 100%;
+  padding: 20px 24px;
+  text-align: center;
+}
+.lamp {
+  width: 16px;
+  height: 16px;
+  margin-bottom: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 28%, transparent);
+  animation: ring 1.3s ease-in-out infinite;
+}
+@keyframes ring {
+  50% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+h1 {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 26px;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+#detail {
+  color: var(--ink-soft);
+}
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  width: 100%;
+  margin-top: 18px;
+}
+.answer,
+.decline {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  height: 52px;
+  border: 0;
+  border-radius: 26px;
+  font-weight: 700;
+}
+.answer {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.decline {
+  background: var(--alert);
+  color: var(--alert-ink);
+}
+.answer:disabled,
+.decline:disabled {
+  opacity: 0.55;
+}
+svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.problem {
+  min-height: 1.45em;
+  margin-top: 6px;
+  color: var(--alert);
+  font-size: 14px;
+}
+.problem:empty {
+  visibility: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lamp {
+    animation: none;
+  }
+}

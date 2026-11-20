@@ -27,15 +27,16 @@ export function decideNavigation(service: ServiceDefinition, url: string): PageN
   return isExternalSafe(url) ? 'external' : 'block';
 }
 
-export type WindowOpen = 'popup' | 'external' | 'block';
+export type WindowOpen = 'popup' | 'call' | 'external' | 'block';
 
 /**
  * A window.open() or target=_blank link from a service. Captcha and sign-in steps on the
  * service's popup hosts open as a popup that shares its login; links to anywhere else open in
- * the system browser. Blank popups are refused: none of the services' sign-in flows needs one,
- * and the opener could fill a blank window with any content under no visible address.
+ * the system browser. Blank popups are refused, since the opener could fill one with any content
+ * under no visible address, except a call window (`callWindow`), which Messenger opens blank.
  */
 export function decideWindowOpen(service: ServiceDefinition, url: string): WindowOpen {
+  if (url === '' || url === 'about:blank') return service.callWindow ? 'call' : 'block';
   const parsed = parse(url);
   if (!parsed) return 'block';
   if (onHosts(parsed, service.popupHosts)) return 'popup';

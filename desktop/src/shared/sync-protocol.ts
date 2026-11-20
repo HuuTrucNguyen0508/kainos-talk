@@ -12,8 +12,10 @@ import { isIP } from 'node:net';
  *    texts only and ignores the rest, so the number stays: a phone on 3 or 4 still connects.
  * 4: the welcome lists what the PC still holds, so a reconnect sends only what changed.
  *    A conversation's `sender` is additive: an older phone leaves it out and it parses as `person`.
+ * 5: phone calls (`call`, `callLog`, `answer`, `hangUp`, `dial`). An older PC closes the connection
+ *    on a frame type it does not know, so the number moves and both apps update together.
  */
-export const SYNC_VERSION = 4;
+export const SYNC_VERSION = 5;
 export const SYNC_PORT = 48090;
 /** mDNS service type: `_kainos-talk._tcp`. */
 export const SYNC_SERVICE = 'kainos-talk';
@@ -91,6 +93,39 @@ export interface SyncConversation {
   readonly messages: readonly SyncMessage[];
 }
 
+/** Android tells a normal app only ringing and off the hook, so a call placed is `active` at once. */
+export type CallPhase = 'ringing' | 'active';
+
+/** The call on the phone right now. */
+export interface LiveCall {
+  readonly id: string;
+  readonly phase: CallPhase;
+  readonly direction: 'incoming' | 'outgoing';
+  /** Null for a hidden number, or a call placed on the phone before its number is known. */
+  readonly number: string | null;
+  /** The saved contact's name. */
+  readonly name: string | null;
+  /** The text conversation with this number, when there is one. */
+  readonly key: string | null;
+  readonly sinceMs: number;
+}
+
+export type CallKind = 'incoming' | 'outgoing' | 'missed' | 'declined';
+
+/** One line of the phone's call log. */
+export interface CallEntry {
+  readonly id: string;
+  readonly kind: CallKind;
+  readonly number: string | null;
+  readonly name: string | null;
+  readonly key: string | null;
+  readonly timeMs: number;
+  /** How long it lasted; 0 for a call nobody answered. */
+  readonly seconds: number;
+}
+
+export const MAX_CALL_LOG = 100;
+
 /** Frames the phone sends. */
 export type PhoneFrame =
   | { readonly t: 'pair'; readonly v: number; readonly device: string; readonly nonce: string }
@@ -106,6 +141,10 @@ export type PhoneFrame =
   | { readonly t: 'ignored' }
   | { readonly t: 'replyResult'; readonly id: string; readonly ok: boolean; readonly error: string | null }
   | { readonly t: 'pong' }
+  /** The call on the phone changed; null when it ended. */
+  | { readonly t: 'call'; readonly call: LiveCall | null }
+  /** The newest calls, newest first. */
+  | { readonly t: 'callLog'; readonly calls: readonly CallEntry[] }
   /** A picture the PC asked for: JPEG in base64, or why it is missing. */
   | { readonly t: 'image'; readonly id: string; readonly mime: string | null; readonly data: string | null; readonly error: string | null };
 
@@ -125,7 +164,16 @@ export type PcFrame =
   /** A new text to a number, sent by the phone itself (needs SMS access on the phone). */
   | { t: 'send'; id: string; to: string; text: string }
   | { t: 'ping' }
-  | { t: 'getImage'; id: string };
+  | { t: 'getImage'; id: string }
+  /**
+   * Answers the ringing call. Each call action names the call and the phase the PC showed, so the
+   * phone refuses one that changed meanwhile, and is answered with a `replyResult` of the same id.
+   */
+  | { t: 'answer'; id: string; call: string }
+  /** Ends the call, or declines it while it rings. */
+  | { t: 'hangUp'; id: string; call: string; phase: CallPhase }
+  /** Calls a number, or the one number of a text conversation: exactly one of the two is set. */
+  | { t: 'dial'; id: string; number: string | null; key: string | null };
 
 const str = (value: unknown, max = 10_000): value is string => typeof value === 'string' && value.length <= max;
 const num = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -150,6 +198,28 @@ function parseConversation(raw: unknown): SyncConversation | undefined {
   if (parsed.some((message) => message === undefined)) return undefined;
   // Missing (an older phone) or unknown: treat it as a person, who gets a reply box.
   return { key, title, isGroup, sender: raw.sender === 'service' ? 'service' : 'person', unread: Math.max(0, Math.floor(unread)), lastActivityMs, canReply, messages: parsed as SyncMessage[] };
+}
+
+const nullable = (value: unknown, max: number): value is string | null => value === null || str(value, max);
+/** A time a `Date` can hold, so formatting it can't throw. */
+const time = (value: unknown): value is number => num(value) && Math.abs(value) <= 8.64e15;
+
+function parseLiveCall(raw: unknown): LiveCall | null | undefined {
+  if (raw === null) return null;
+  if (!record(raw)) return undefined;
+  const { id, phase, direction, number, name, key, sinceMs } = raw;
+  if (!str(id, 100) || (phase !== 'ringing' && phase !== 'active') || (direction !== 'incoming' && direction !== 'outgoing')) return undefined;
+  if (!nullable(number, 40) || !nullable(name, 500) || !nullable(key, 500) || !time(sinceMs)) return undefined;
+  return { id, phase, direction, number, name, key, sinceMs };
+}
+
+const CALL_KINDS: readonly unknown[] = ['incoming', 'outgoing', 'missed', 'declined'] satisfies CallKind[];
+
+function parseCallEntry(raw: unknown): CallEntry | undefined {
+  if (!record(raw)) return undefined;
+  const { id, kind, number, name, key, timeMs, seconds } = raw;
+  if (!str(id, 100) || !CALL_KINDS.includes(kind) || !nullable(number, 40) || !nullable(name, 500) || !nullable(key, 500) || !time(timeMs) || !num(seconds)) return undefined;
+  return { id, kind: kind as CallKind, number, name, key, timeMs, seconds: Math.max(0, Math.floor(seconds)) };
 }
 
 /** One line from the phone: untrusted input, checked field by field. */
@@ -185,6 +255,15 @@ export function parsePhoneFrame(line: string): PhoneFrame | undefined {
         : undefined;
     case 'pong':
       return { t: 'pong' };
+    case 'call': {
+      const call = parseLiveCall(raw.call);
+      return call === undefined ? undefined : { t: 'call', call };
+    }
+    case 'callLog': {
+      if (!Array.isArray(raw.calls) || raw.calls.length > MAX_CALL_LOG) return undefined;
+      const calls = raw.calls.map(parseCallEntry);
+      return calls.every((entry) => entry !== undefined) ? { t: 'callLog', calls: calls as CallEntry[] } : undefined;
+    }
     case 'image': {
       const { id, mime, data, error } = raw;
       if (!str(id, 100) || !(mime === null || mime === 'image/jpeg') || !(data === null || str(data, MAX_FRAME_BYTES)) || !(error === null || str(error, 100))) return undefined;

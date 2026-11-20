@@ -18,10 +18,12 @@ test('the phone texts page is the Texts service, drawn as a line icon among fill
   assert.deepEqual(SERVICES.slice(1, 5).map((s) => s.icon.paint), ['fill', 'fill', 'fill', 'fill']);
 });
 
-test('Streamroom, which has no brand logo to borrow, is a line icon; it alone makes calls, claims its links and starts hibernated', () => {
+test('Streamroom, which has no brand logo to borrow, is a line icon; it alone claims its links and starts hibernated', () => {
   const room = findService('streamroom')!;
   assert.equal(room.icon.paint, 'stroke');
-  assert.deepEqual(SERVICES.filter((s) => s.calls).map((s) => s.id), ['streamroom']);
+  assert.deepEqual(SERVICES.filter((s) => s.calls).map((s) => s.id), ['messenger', 'streamroom']);
+  // Messenger alone opens its calls in a blank window of their own.
+  assert.deepEqual(SERVICES.filter((s) => s.callWindow).map((s) => s.id), ['messenger']);
   assert.deepEqual(SERVICES.filter((s) => s.claimsLinks).map((s) => s.id), ['streamroom']);
   assert.deepEqual(SERVICES.filter((s) => s.startsHibernated).map((s) => s.id), ['streamroom']);
 });

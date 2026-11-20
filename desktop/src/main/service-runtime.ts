@@ -15,6 +15,12 @@ export interface ServiceRuntime {
   readonly service: ServiceDefinition;
   /** The page's view; none while the service hibernates. */
   view(): WebContentsView | undefined;
+  /** The call a call-window service (`callWindow`) has open, shown over its page until it ends. */
+  call(): WebContentsView | undefined;
+  /** Whether the call shows rather than the page. A new call shows. */
+  callInFront(): boolean;
+  /** Shows the call, or the page under it. Does nothing without a call. */
+  setCallInFront(inFront: boolean): void;
   status(): ServiceStatus;
   unread(): Unread;
   /** Whether the page is in HTML fullscreen (a video or stream), so the view should cover the window. */
@@ -52,9 +58,12 @@ export interface RuntimeOptions {
   /** Start without a page; the service wakes when asked. */
   readonly hibernated: boolean;
   readonly onChange: () => void;
-  /** A new page view to place in the window: at startup, and each time the service wakes. */
+  /**
+   * A new view to place in the window: the page at startup and each time the service wakes, and
+   * a call when one starts. A call goes over its page.
+   */
   readonly onViewCreated: (view: WebContentsView) => void;
-  /** The page view is closing (the service hibernates); take it out of the window. */
+  /** The view is closing (the service hibernates, or its call ended); take it out of the window. */
   readonly onViewClosed: (view: WebContentsView) => void;
   /** A link leaving the service: another service may claim it, else it goes to the browser. */
   readonly openLink: (url: string) => void;
@@ -114,23 +123,26 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
   const popups = new Set<BrowserWindow>();
   let background = options.background;
   let view: WebContentsView | undefined;
+  let call: WebContentsView | undefined;
+  let callInFront = true;
+
+  const pagePreferences = (): Electron.WebPreferences => ({
+    partition,
+    preload: service.localPage ? join(options.localDir, `preload-${service.localPage}.cjs`) : options.preload,
+    // Tells the preload which service it is in (for its unread counter).
+    additionalArguments: [`--kainos-service=${service.id}`, ...(service.googleSignIn ? [`--kainos-firefox=${firefoxUserAgent(process.platform, new Date())}`] : [])],
+    contextIsolation: true,
+    sandbox: true,
+    nodeIntegration: false,
+    // Hidden services must keep their connections alive so notifications keep arriving, and a
+    // call keeps going while another tab is open.
+    backgroundThrottling: false,
+    spellcheck: true,
+  });
 
   /** A page view with the service's rules. Its events count only while it is the service's view. */
   const createView = (): WebContentsView => {
-    const created = new WebContentsView({
-      webPreferences: {
-        partition,
-        preload: service.localPage ? join(options.localDir, `preload-${service.localPage}.cjs`) : options.preload,
-        // Tells the preload which service it is in (for its unread counter).
-        additionalArguments: [`--kainos-service=${service.id}`, ...(service.googleSignIn ? [`--kainos-firefox=${firefoxUserAgent(process.platform, new Date())}`] : [])],
-        contextIsolation: true,
-        sandbox: true,
-        nodeIntegration: false,
-        // Hidden services must keep their connections alive so notifications keep arriving.
-        backgroundThrottling: false,
-        spellcheck: true,
-      },
-    });
+    const created = new WebContentsView({ webPreferences: pagePreferences() });
     created.setBackgroundColor(background);
     const contents = created.webContents;
     const live = () => view === created;
@@ -184,6 +196,15 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       }
       const decision = decideWindowOpen(service, url);
       if (decision === 'external') options.openLink(url);
+      // One call at a time, and only from the page on screen.
+      if (decision === 'call' && live() && !call) {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: { backgroundColor: background, webPreferences: pagePreferences() },
+          // Electron hands over the new page in `webContents`, which its types leave out.
+          createWindow: (created) => openCall(new WebContentsView({ webContents: (created as { webContents: WebContents }).webContents, webPreferences: pagePreferences() })),
+        };
+      }
       if (decision !== 'popup') return { action: 'deny' };
       return {
         action: 'allow',
@@ -217,6 +238,46 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     });
     contents.on('context-menu', (_event, params) => showPageMenu(contents, params));
     return created;
+  };
+
+  /**
+   * A call the page opened in a window of its own, shown over the page instead. It ends when its
+   * page closes itself (hanging up), or with the page (hibernate, sign out).
+   */
+  const openCall = (created: WebContentsView): WebContents => {
+    call = created;
+    callInFront = true;
+    created.setBackgroundColor(background);
+    const contents = created.webContents;
+    contents.on('will-prevent-unload', (event) => event.preventDefault());
+    contents.on('enter-html-full-screen', () => {
+      fullscreen = true;
+      options.onChange();
+    });
+    contents.on('leave-html-full-screen', () => {
+      fullscreen = false;
+      options.onChange();
+    });
+    // A call that heads anywhere else is over: the page opens in the browser instead.
+    guardNavigation(contents, (url) => decidePopupNavigation(service, url), () => setImmediate(endCall));
+    contents.setWindowOpenHandler(({ url }) => {
+      if (decideWindowOpen(service, url) !== 'block') options.openLink(url);
+      return { action: 'deny' };
+    });
+    contents.on('context-menu', (_event, params) => showPageMenu(contents, params));
+    contents.once('destroyed', () => {
+      if (call !== created) return;
+      call = undefined;
+      fullscreen = false;
+      options.onViewClosed(created);
+      options.onChange();
+    });
+    options.onViewCreated(created);
+    options.onChange();
+    return contents;
+  };
+  const endCall = () => {
+    if (call && !call.webContents.isDestroyed()) call.webContents.close({ waitForBeforeUnload: false });
   };
 
   const guardNavigation = (target: WebContents, decide: (url: string) => PageNavigation, onExternal = () => {}) => {
@@ -265,6 +326,13 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       return service;
     },
     view: () => view,
+    call: () => call,
+    callInFront: () => call !== undefined && callInFront,
+    setCallInFront(inFront) {
+      if (!call || inFront === callInFront) return;
+      callInFront = inFront;
+      options.onChange();
+    },
     status: () => status,
     unread: () => unread,
     fullscreen: () => fullscreen,
@@ -280,6 +348,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       if (!closing) return;
       view = undefined;
       for (const popup of popups) popup.destroy();
+      endCall();
       options.onViewClosed(closing);
       // Closing the page ends its renderer process, which is where nearly all its memory is.
       if (!closing.webContents.isDestroyed()) closing.webContents.close({ waitForBeforeUnload: false });
@@ -301,6 +370,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       // Stop everything that could write the login back (unload handlers, timers, popups)
       // before wiping, or a page can restore its token after the wipe.
       for (const popup of popups) popup.destroy();
+      endCall();
       const page = view;
       if (page) await page.webContents.loadURL('about:blank').catch(() => {});
       titleUnread = NO_UNREAD;
@@ -327,6 +397,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     setBackground: (color) => {
       background = color;
       view?.setBackgroundColor(color);
+      call?.setBackgroundColor(color);
     },
   };
 }

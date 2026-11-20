@@ -13,12 +13,14 @@ import {
   isLocalAddress,
   pairingCode,
   parsePhoneFrame,
+  type CallEntry,
+  type LiveCall,
   type PcFrame,
   type PhoneFrame,
   type SyncConversation,
   type SyncMessage,
 } from '../shared/sync-protocol.ts';
-import type { SmsState } from '../shared/sms.ts';
+import { isPhoneNumber, type SmsState } from '../shared/sms.ts';
 
 export interface SmsSyncOptions {
   /** Where the certificate and the paired phone are kept. */
@@ -40,6 +42,12 @@ export interface SmsSync {
   forgetPhone(): void;
   /** Sends a new text to a number through the phone; false when no phone is connected. */
   send(to: string, text: string): boolean;
+  /** Answers the ringing call; false when no phone is connected or nothing rings. */
+  answer(): boolean;
+  /** Ends the call, or declines it while it rings. */
+  hangUp(): boolean;
+  /** Calls a number, or the one number of a text conversation, from the phone. */
+  dial(to: { readonly number: string } | { readonly key: string }): boolean;
   /** A picture from a message (JPEG bytes); fetched from the phone once, then cached. */
   image(id: string): Promise<Buffer | null>;
   /** Closes the server and every connection. */
@@ -61,6 +69,8 @@ interface Tls {
 const PAIRING_TIMEOUT_MS = 120_000;
 /** The failures and pending map's key for a new text (not a conversation). */
 const NEW_TEXT = '\u0000new';
+/** The failures and pending map's key for a call action (answer, hang up, dial). */
+const CALL = '\u0000call';
 const REPLY_TIMEOUT_MS = 30_000;
 const IMAGE_TIMEOUT_MS = 20_000;
 /** Bytes of pictures kept in memory; the oldest go first. */
@@ -176,6 +186,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
   const seen = new Set<string>();
   const replies = new Map<string, { key: string; timer: NodeJS.Timeout }>();
   const failures = new Map<string, string>();
+  let call: LiveCall | null = null;
+  let callLog: readonly CallEntry[] = [];
   /** Recent pictures, oldest first, so the cache can drop the oldest. */
   const images = new Map<string, Buffer>();
   let imageBytes = 0;
@@ -227,6 +239,10 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       for (const done of imageWaiters.get(frame.id) ?? []) done(picture);
       imageWaiters.delete(frame.id);
       return;
+    } else if (frame.t === 'call') {
+      call = frame.call;
+    } else if (frame.t === 'callLog') {
+      callLog = frame.calls;
     } else if (frame.t === 'removed') {
       conversations.delete(frame.key);
       hashes.delete(frame.key);
@@ -238,6 +254,29 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       if (!frame.ok) failures.set(pending.key, frame.error ?? 'failed');
     }
     changed();
+  }
+
+  /** One call action at a time: a second click before the phone answers is dropped. */
+  const callPending = () => [...replies.values()].some((pending) => pending.key === CALL);
+
+  /**
+   * Sends a frame the phone answers with a `replyResult`, and files its outcome under [key]: a
+   * conversation, a new text or a call action. No answer in time counts as a failure.
+   */
+  function request(key: string, frame: (id: string) => PcFrame): true {
+    const id = randomUUID();
+    failures.delete(key);
+    replies.set(id, {
+      key,
+      timer: setTimeout(() => {
+        replies.delete(id);
+        failures.set(key, 'no answer from the phone');
+        changed();
+      }, REPLY_TIMEOUT_MS),
+    });
+    connection!.send(frame(id));
+    changed();
+    return true;
   }
 
   // Each phone proves itself with its own self-signed certificate, checked against the one it
@@ -337,6 +376,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       if (pairing?.line === line) endPairing();
       if (connection === line) {
         connection = undefined;
+        // Out of touch, the PC can't tell when the call ends; a stale ringing bar is worse than none.
+        call = null;
         for (const [id, pending] of replies) {
           clearTimeout(pending.timer);
           failures.set(pending.key, 'phone disconnected');
@@ -374,43 +415,36 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
         phone: phone ? { name: phone.name, connected: connection !== undefined } : null,
         pairing: pairing ? { device: pairing.device, code: pairing.code, pcAccepted: pairing.pcAccepted, phoneConfirmed: pairing.phoneConfirmed } : null,
         conversations: [...conversations.values()].sort((a, b) => b.lastActivityMs - a.lastActivityMs),
+        call,
+        calls: callLog,
+        callAction: { pending: callPending(), failure: failures.get(CALL) ?? null },
         sending: [...new Set([...replies.values()].map((pending) => pending.key))],
-        failures: Object.fromEntries([...failures].filter(([key]) => key !== NEW_TEXT)),
+        failures: Object.fromEntries([...failures].filter(([key]) => key !== NEW_TEXT && key !== CALL)),
         newText: { sending: [...replies.values()].some((pending) => pending.key === NEW_TEXT), failure: failures.get(NEW_TEXT) ?? null },
       };
     },
     reply(key, text) {
       if (!connection || !conversations.has(key)) return false;
-      const id = randomUUID();
-      failures.delete(key);
-      replies.set(id, {
-        key,
-        timer: setTimeout(() => {
-          replies.delete(id);
-          failures.set(key, 'no answer from the phone');
-          changed();
-        }, REPLY_TIMEOUT_MS),
-      });
-      connection.send({ t: 'reply', id, key, text });
-      changed();
-      return true;
+      return request(key, (id) => ({ t: 'reply', id, key, text }));
     },
     send(to, text) {
-      const digits = to.replace(/\D/g, '').length;
-      if (!connection || !/^\+?[0-9 ().-]+$/.test(to.trim()) || digits < 3 || digits > 20 || !text.trim()) return false;
-      const id = randomUUID();
-      failures.delete(NEW_TEXT);
-      replies.set(id, {
-        key: NEW_TEXT,
-        timer: setTimeout(() => {
-          replies.delete(id);
-          failures.set(NEW_TEXT, 'no answer from the phone');
-          changed();
-        }, REPLY_TIMEOUT_MS),
-      });
-      connection.send({ t: 'send', id, to: to.trim(), text });
-      changed();
-      return true;
+      if (!connection || !isPhoneNumber(to) || !text.trim()) return false;
+      return request(NEW_TEXT, (id) => ({ t: 'send', id, to: to.trim(), text }));
+    },
+    answer() {
+      if (!connection || call?.phase !== 'ringing' || callPending()) return false;
+      const ringing = call.id;
+      return request(CALL, (id) => ({ t: 'answer', id, call: ringing }));
+    },
+    hangUp() {
+      if (!connection || !call || callPending()) return false;
+      const { id: current, phase } = call;
+      return request(CALL, (id) => ({ t: 'hangUp', id, call: current, phase }));
+    },
+    dial(to) {
+      if (!connection || call || callPending()) return false;
+      if ('key' in to) return conversations.has(to.key) && request(CALL, (id) => ({ t: 'dial', id, number: null, key: to.key }));
+      return isPhoneNumber(to.number) && request(CALL, (id) => ({ t: 'dial', id, number: to.number.trim(), key: null }));
     },
     image(id) {
       const cached = images.get(id);
@@ -453,6 +487,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       connection = undefined;
       conversations.clear();
       hashes.clear();
+      callLog = [];
+      call = null;
       changed();
     },
     stop() {

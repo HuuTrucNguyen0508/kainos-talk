@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, mock, test } from 'node:test';
 import { connectPaired, conversation, link, newIdentity, phoneIdentity, startPairing } from '../../test/fake-phone.ts';
 import { startSmsSync, type SmsSync } from './sms-sync.ts';
-import { SYNC_VERSION, frameHash, type SyncConversation, type SyncMessage } from '../shared/sync-protocol.ts';
+import { SYNC_VERSION, frameHash, type LiveCall, type SyncConversation, type SyncMessage } from '../shared/sync-protocol.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'kainos-sync-'));
 const port = 48_500 + Math.floor(Math.random() * 400);
@@ -127,6 +127,62 @@ test('texts flow from the phone, replies and reads go back', async () => {
   assert.ok(await until(() => !server.state().conversations.some((c) => c.key === 'sms|0|s:garage')));
   phone.close();
   assert.ok(await until(() => server.state().phone?.connected === false));
+});
+
+test('a call rings on the PC, is answered and hung up from it, and dials out by number or conversation', async () => {
+  const server = await sync;
+  const phone = await connectPaired(port, deviceId);
+  assert.ok(await until(() => server.state().phone?.connected === true));
+  assert.equal(server.answer(), false, 'nothing rings');
+  assert.equal(server.hangUp(), false, 'no call to end');
+
+  const ringing: LiveCall = { id: 'c1', phase: 'ringing', direction: 'incoming', number: '+33612345678', name: 'Maman', key: 'sms|0|s:mum', sinceMs: 1000 };
+  phone.send({ t: 'call', call: ringing });
+  assert.ok(await until(() => server.state().call?.phase === 'ringing'));
+  assert.deepEqual(server.state().call, ringing);
+  assert.equal(server.dial({ number: '0612345678' }), false, 'no second call while one rings');
+
+  assert.equal(server.answer(), true);
+  assert.equal(server.hangUp(), false, 'one call action at a time');
+  const answer = await phone.next('answer');
+  assert.equal(answer.call, 'c1', 'the answer names the call the PC showed');
+  assert.equal(server.state().callAction.pending, true);
+  phone.send({ t: 'replyResult', id: answer.id, ok: true, error: null });
+  phone.send({ t: 'call', call: { ...ringing, phase: 'active', sinceMs: 2000 } });
+  assert.ok(await until(() => server.state().call?.phase === 'active'));
+  assert.deepEqual(server.state().callAction, { pending: false, failure: null });
+  assert.equal(server.answer(), false, 'an active call is not answered again');
+
+  assert.equal(server.hangUp(), true);
+  const hangUp = await phone.next('hangUp');
+  assert.deepEqual({ call: hangUp.call, phase: hangUp.phase }, { call: 'c1', phase: 'active' });
+  phone.send({ t: 'replyResult', id: hangUp.id, ok: true, error: null });
+  phone.send({ t: 'call', call: null });
+  phone.send({ t: 'callLog', calls: [{ id: '9', kind: 'incoming', number: '+33612345678', name: 'Maman', key: 'sms|0|s:mum', timeMs: 1000, seconds: 64 }] });
+  assert.ok(await until(() => server.state().call === null && server.state().calls.length === 1));
+  assert.equal(server.state().calls[0]!.seconds, 64);
+
+  assert.equal(server.dial({ number: 'not a number' }), false);
+  assert.equal(server.dial({ key: 'sms|0|s:unknown' }), false, 'only a conversation the phone sent');
+  assert.equal(server.dial({ number: ' +33 6 12 34 56 78 ' }), true);
+  const dial = await phone.next('dial');
+  assert.deepEqual({ number: dial.number, key: dial.key }, { number: '+33 6 12 34 56 78', key: null });
+  phone.send({ t: 'replyResult', id: dial.id, ok: false, error: 'no permission to make calls' });
+  assert.ok(await until(() => server.state().callAction.failure === 'no permission to make calls'));
+
+  phone.send({ t: 'conversation', conversation: conversation('sms|0|s:mum', 'Maman', [{ id: 'x1', text: 'Appelle-moi', timeMs: 1 }]) });
+  assert.ok(await until(() => server.state().conversations.some((c) => c.key === 'sms|0|s:mum')));
+  assert.equal(server.dial({ key: 'sms|0|s:mum' }), true);
+  assert.equal(server.dial({ key: 'sms|0|s:mum' }), false, 'a second dial while the first is on its way is dropped');
+  const byKey = await phone.next('dial');
+  assert.deepEqual({ number: byKey.number, key: byKey.key }, { number: null, key: 'sms|0|s:mum' });
+  assert.equal(server.state().callAction.failure, null, 'a new action clears the last failure');
+
+  phone.send({ t: 'call', call: { ...ringing, id: 'c2' } });
+  assert.ok(await until(() => server.state().call?.id === 'c2'));
+  phone.close();
+  assert.ok(await until(() => server.state().phone?.connected === false));
+  assert.equal(server.state().call, null, 'a phone gone means no call the PC can show');
 });
 
 test('mail and chats from other apps, as an older phone still sends them, are dropped without closing the connection', async () => {

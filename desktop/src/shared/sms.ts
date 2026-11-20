@@ -1,4 +1,4 @@
-import type { SyncConversation } from './sync-protocol.ts';
+import type { CallEntry, LiveCall, SyncConversation } from './sync-protocol.ts';
 
 /** Everything the SMS view shows: the sync server's state. */
 export interface SmsState {
@@ -17,6 +17,35 @@ export interface SmsState {
   readonly failures: Readonly<Record<string, string>>;
   /** A new text on its way, and why the last one failed. */
   readonly newText: { readonly sending: boolean; readonly failure: string | null };
+  /** The call on the phone now. */
+  readonly call: LiveCall | null;
+  /** The phone's newest calls, newest first. */
+  readonly calls: readonly CallEntry[];
+  /** An answer, hang-up or dial on its way to the phone, and why the last one failed. */
+  readonly callAction: { readonly pending: boolean; readonly failure: string | null };
+}
+
+/** What the incoming-call window shows: the ringing call, and the phone's answer to a button. */
+export interface CallPopupState {
+  readonly call: LiveCall;
+  /** Answer or Decline is on its way to the phone. */
+  readonly pending: boolean;
+  readonly failure: string | null;
+}
+
+export const CallPopupChannel = {
+  getState: 'kainos-call-popup:get-state',
+  state: 'kainos-call-popup:state',
+  answer: 'kainos-call-popup:answer',
+  decline: 'kainos-call-popup:decline',
+} as const;
+
+/** The incoming-call window's only API, exposed as window.kainosRinging. */
+export interface CallPopupApi {
+  getState(): Promise<CallPopupState | undefined>;
+  onState(listener: (state: CallPopupState) => void): void;
+  answer(): void;
+  decline(): void;
 }
 
 export const SmsChannel = {
@@ -27,6 +56,9 @@ export const SmsChannel = {
   answerPairing: 'kainos-sms:answer-pairing',
   forgetPhone: 'kainos-sms:forget-phone',
   send: 'kainos-sms:send',
+  answer: 'kainos-sms:answer',
+  hangUp: 'kainos-sms:hang-up',
+  dial: 'kainos-sms:dial',
   /** Inbox page to main: put a verification code on the clipboard. */
   copyCode: 'kainos-sms:copy-code',
   /** Main to the inbox page: open this conversation (a notification was clicked). */
@@ -34,6 +66,12 @@ export const SmsChannel = {
   /** Main to the inbox page: whether it is in sight. Its own visibilityState can't tell. */
   shown: 'kainos-sms:shown',
 } as const;
+
+/** What the phone dials or texts: digits with spaces, dashes, dots or brackets and a leading +, 3 to 20 digits. */
+export function isPhoneNumber(raw: string): boolean {
+  const digits = raw.replace(/\D/g, '').length;
+  return /^\+?[0-9 ().-]+$/.test(raw.trim()) && digits >= 3 && digits <= 20;
+}
 
 /** Pictures from messages, served to the inbox page alone; fetched from the phone the first time. */
 export const IMAGE_SCHEME = 'kainos-image';
@@ -52,6 +90,10 @@ export interface SmsApi {
   forgetPhone(): void;
   /** A new text to a phone number. */
   send(to: string, text: string): void;
+  answer(): void;
+  hangUp(): void;
+  /** Calls a number, or the one number of a text conversation. */
+  dial(to: { readonly number: string } | { readonly key: string }): void;
   /** Copies a verification code (4 to 8 digits); main writes the clipboard, since a local page may not. */
   copyCode(code: string): void;
   onOpenKey(listener: (key: string) => void): void;

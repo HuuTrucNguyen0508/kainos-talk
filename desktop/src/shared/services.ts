@@ -38,6 +38,11 @@ export interface ServiceDefinition {
   /** A call app: its own pages may also share the screen and pick the speaker. */
   readonly calls?: true;
   /**
+   * Opens each call in a window of its own: a blank one, which the page then sends to a call
+   * page on its hosts. Only these services may open a blank popup.
+   */
+  readonly callWindow?: true;
+  /**
    * Links to its hosts from the other services open in this tab instead of the browser, so an
    * invite link sent in a chat joins from Kainos.
    */
@@ -161,6 +166,8 @@ export const SERVICES: readonly ServiceDefinition[] = [
     hosts: ['www.messenger.com', 'messenger.com', 'www.facebook.com'],
     popupHosts: ['www.facebook.com'],
     iconHosts: ['*.fbcdn.net'],
+    calls: true,
+    callWindow: true,
     icon: {
       color: '#0866FF',
       paint: 'fill',

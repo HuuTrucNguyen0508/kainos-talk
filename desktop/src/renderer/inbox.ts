@@ -1,5 +1,6 @@
-import { imageUrl, type SmsApi, type SmsState } from '../shared/sms.ts';
-import type { SyncConversation, SyncMessage } from '../shared/sync-protocol.ts';
+import { imageUrl, isPhoneNumber, type SmsApi, type SmsState } from '../shared/sms.ts';
+import type { CallEntry, SyncConversation, SyncMessage } from '../shared/sync-protocol.ts';
+import { callLabel, caller, clock, matchingCalls, timeline } from './calls.ts';
 import { findCode, groupCode, matching, splitBySender, unreadIn } from './texts.ts';
 import './inbox.css';
 
@@ -49,6 +50,8 @@ const ICON = {
   copy: ['M9.5 8.5H18A1.5 1.5 0 0 1 19.5 10v8.5A1.5 1.5 0 0 1 18 20H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z', 'M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15'],
   check: ['M5 12.5l4.5 4.5L19 7.5'],
   linkOff: ['M3.5 9.5a12.5 12.5 0 0 1 17 0', 'M7 13.2a7.5 7.5 0 0 1 10 0', 'M12 17.4v.2', 'M4.5 3.5l15 17'],
+  call: ['M6.6 3.5h2.6l1.5 4-2 1.3a11 11 0 0 0 6.5 6.5l1.3-2 4 1.5v2.6a2 2 0 0 1-2.2 2A16.5 16.5 0 0 1 4.6 5.7a2 2 0 0 1 2-2.2z'],
+  hangUp: ['M3.2 14.2c4.9-4.3 12.7-4.3 17.6 0l-1.9 3-3.5-1.3v-2.5a10.5 10.5 0 0 0-6.8 0v2.5l-3.5 1.3z'],
 };
 
 /** The Kainos mark: a tile with a ring and a dot. */
@@ -156,8 +159,14 @@ function codeButton(code: string, className: 'chip' | 'code-inline'): HTMLButton
 let state: SmsState | undefined;
 /** The conversation in the middle pane; none shows the new-text form. */
 let openKey: string | undefined;
-/** Under 1500px the left column shows People or Notices, one at a time. */
-let tab: 'people' | 'notices' = 'people';
+/** The left column's list. Notices has its own column from 1500px, so there it shows as People. */
+let tab: 'people' | 'notices' | 'calls' = 'people';
+/** A number to put in the call form the next time it opens (from a call with no conversation). */
+let dialPrefill = '';
+/** A failed call action the user dismissed; the bar shows the next one. */
+let dismissedFailure: string | null = null;
+/** What is wrong with the number in the call form, found before it goes to the phone. */
+let dialProblem: string | null = null;
 /** What the search box holds; both lists show matching conversations only. */
 let query = '';
 const drafts = new Map<string, string>();
@@ -224,10 +233,12 @@ function wrap(card: HTMLElement): HTMLElement {
 interface Texts {
   readonly shell: HTMLElement;
   readonly offline: HTMLElement;
+  readonly callBar: HTMLElement;
   readonly people: HTMLElement;
-  readonly peopleUnread: HTMLElement;
+  readonly compose: HTMLButtonElement;
   readonly peopleRows: HTMLUListElement;
-  readonly tabs: { readonly people: HTMLButtonElement; readonly notices: HTMLButtonElement };
+  readonly callRows: HTMLUListElement;
+  readonly tabs: { readonly people: HTMLButtonElement; readonly notices: HTMLButtonElement; readonly calls: HTMLButtonElement };
   readonly notices: HTMLElement;
   /** Head and feed of the notices: in the right column, or under the tabs in a narrow window. */
   readonly noticesBody: HTMLElement;
@@ -254,6 +265,8 @@ function buildTexts(): Texts {
   const shell = el('div', 'texts');
   const offline = el('div', 'offline-bar');
   offline.setAttribute('role', 'status');
+  const callBar = el('section', 'call-bar');
+  callBar.setAttribute('aria-label', 'Call');
 
   const people = el('nav', 'side people');
   people.setAttribute('aria-label', 'People');
@@ -270,35 +283,32 @@ function buildTexts(): Texts {
   });
   search.append(icon(ICON.search), field);
   const compose = button('new-text');
-  compose.title = 'New text';
-  compose.setAttribute('aria-label', 'New text');
-  compose.append(icon(ICON.compose));
   compose.addEventListener('click', () => open(undefined));
   tools.append(search, compose);
 
   const seg = el('div', 'seg');
   seg.setAttribute('role', 'tablist');
   seg.setAttribute('aria-label', 'Lists');
-  const tabButton = (name: 'people' | 'notices', label: string) => {
+  const tabButton = (name: typeof tab, label: string) => {
     const node = button('');
     node.setAttribute('role', 'tab');
     node.dataset.tab = name;
     node.append(el('span', '', label), el('span'));
     node.addEventListener('click', () => {
       tab = name;
-      if (state) renderLists(state);
+      if (state) renderTexts(state);
     });
     return node;
   };
-  const tabs = { people: tabButton('people', 'People'), notices: tabButton('notices', 'Notices') };
-  seg.append(tabs.people, tabs.notices);
+  const tabs = { people: tabButton('people', 'People'), notices: tabButton('notices', 'Notices'), calls: tabButton('calls', 'Calls') };
+  seg.append(tabs.people, tabs.notices, tabs.calls);
 
-  const peopleHead = el('header', 'side-head people-head');
-  const peopleUnread = el('span');
-  peopleHead.append(el('h2', '', 'People'), peopleUnread);
   const peopleRows = el('ul', 'rows people-rows');
   arrowKeys(peopleRows, '.row');
-  people.append(tools, seg, peopleHead, peopleRows);
+  const callRows = el('ul', 'rows call-rows');
+  callRows.setAttribute('aria-label', 'Recent calls');
+  arrowKeys(callRows, '.row');
+  people.append(tools, seg, peopleRows, callRows);
 
   const notices = el('aside', 'side notices');
   notices.setAttribute('aria-label', 'Notices');
@@ -316,9 +326,9 @@ function buildTexts(): Texts {
   notices.append(noticesBody);
 
   const middle = el('section', 'middle');
-  shell.append(offline, people, middle, notices);
+  shell.append(offline, callBar, people, middle, notices);
   root.replaceChildren(shell);
-  return { shell, offline, people, peopleUnread, peopleRows, tabs, notices, noticesBody, noticesUnread, markAll, noticeRows, middle };
+  return { shell, offline, callBar, people, compose, peopleRows, callRows, tabs, notices, noticesBody, noticesUnread, markAll, noticeRows, middle };
 }
 
 /** In a narrow window the notices move under the tabs in the left column; wide, they have their own. */
@@ -338,6 +348,73 @@ function renderOffline(s: SmsState, t: Texts): void {
   line.append(el('b', '', 'Your phone is not connected.'), ' ', el('span', '', 'Open Kainos Talk on the phone, on the same Wi-Fi as this computer.'));
   t.offline.replaceChildren(icon(ICON.linkOff), line);
 }
+
+/** The phone's call, across the top: who, how long, and its buttons. */
+function renderCallBar(s: SmsState, bar: HTMLElement): void {
+  const call = s.call;
+  const failure = s.callAction.failure;
+  // A new attempt shows its own failure, even one worded like the dismissed one.
+  if (s.callAction.pending) dismissedFailure = null;
+  if (!call && (!failure || failure === dismissedFailure)) {
+    delete bar.dataset.phase;
+    delete bar.dataset.signature;
+    bar.replaceChildren();
+    return;
+  }
+  const signature = JSON.stringify([call, s.callAction]);
+  if (bar.dataset.signature === signature) return;
+  bar.dataset.signature = signature;
+  if (!call) {
+    bar.dataset.phase = 'failed';
+    const dismiss = button('quiet', 'Dismiss');
+    dismiss.addEventListener('click', () => {
+      dismissedFailure = failure;
+      renderCallBar(s, bar);
+    });
+    bar.replaceChildren(el('p', 'call-problem', `Your phone didn’t do that: ${failure}.`), dismiss);
+    return;
+  }
+  bar.dataset.phase = call.phase;
+  const who = el('div', 'call-who');
+  const name = caller(call);
+  const detail = el('p', 'call-detail');
+  if (call.phase === 'ringing') detail.textContent = call.name && call.number ? `${call.number} is calling your phone` : 'Calling your phone';
+  else {
+    const since = el('span', 'call-clock');
+    since.dataset.since = String(call.sinceMs);
+    since.textContent = clock(Date.now() - call.sinceMs);
+    detail.append(since, ` ${call.direction === 'incoming' ? 'on the call' : 'calling out'}. Sound comes through this computer while your phone is connected to it over Bluetooth.`);
+  }
+  who.append(el('h2', '', name), detail);
+  const lamp = el('span', 'call-lamp');
+  lamp.setAttribute('aria-hidden', 'true');
+  const actions = el('div', 'call-actions');
+  const pending = s.callAction.pending;
+  if (call.phase === 'ringing') {
+    const decline = button('call-end', 'Decline');
+    decline.prepend(icon(ICON.hangUp));
+    decline.disabled = pending;
+    decline.addEventListener('click', () => api.hangUp());
+    const answer = button('call-answer', 'Answer');
+    answer.prepend(icon(ICON.call));
+    answer.disabled = pending;
+    answer.addEventListener('click', () => api.answer());
+    actions.append(decline, answer);
+  } else {
+    const end = button('call-end', 'End call');
+    end.prepend(icon(ICON.hangUp));
+    end.disabled = pending;
+    end.addEventListener('click', () => api.hangUp());
+    actions.append(end);
+  }
+  bar.replaceChildren(lamp, who, actions);
+  if (failure) bar.append(el('p', 'call-problem', `Your phone didn’t do that: ${failure}.`));
+}
+
+/** The call bar's clock moves on its own; the rest of the page only changes with the state. */
+setInterval(() => {
+  for (const since of document.querySelectorAll<HTMLElement>('.call-clock')) since.textContent = clock(Date.now() - Number(since.dataset.since));
+}, 1000);
 
 function noMatch(empty: string): HTMLLIElement {
   return el('li', 'no-match', query.trim() ? `Nothing matches “${query.trim()}”. Search looks at names and message text.` : empty);
@@ -385,16 +462,19 @@ function noticeItem(c: SyncConversation): HTMLLIElement {
 function renderLists(s: SmsState): void {
   const t = texts!;
   const { people, notices } = splitBySender(s.conversations);
-  const focusedKey = (document.activeElement as HTMLElement | null)?.dataset.key;
-  t.shell.dataset.tab = tab;
-  for (const [name, list] of [['people', people], ['notices', notices]] as const) {
+  const focused = (document.activeElement as HTMLElement | null)?.dataset;
+  const shown = shownTab();
+  t.shell.dataset.tab = shown;
+  for (const [name, list] of [['people', people], ['notices', notices], ['calls', []]] as const) {
     const node = t.tabs[name];
-    node.setAttribute('aria-selected', String(tab === name));
+    node.setAttribute('aria-selected', String(shown === name));
     node.lastElementChild!.replaceWith(count(unreadIn(list)));
   }
-  const peopleUnread = unreadIn(people);
+  const calling = shown === 'calls';
+  t.compose.title = calling ? 'Call a number' : 'New text';
+  t.compose.setAttribute('aria-label', t.compose.title);
+  t.compose.replaceChildren(icon(calling ? ICON.call : ICON.compose));
   const noticesUnread = unreadIn(notices);
-  t.peopleUnread.textContent = peopleUnread ? `${peopleUnread} unread` : '';
   t.noticesUnread.textContent = noticesUnread ? `${noticesUnread} unread` : '';
   t.markAll.disabled = noticesUnread === 0;
 
@@ -404,7 +484,42 @@ function renderLists(s: SmsState): void {
   );
   const shownNotices = matching(notices, query);
   t.noticeRows.replaceChildren(...(shownNotices.length ? shownNotices.map(noticeItem) : [noMatch('Codes, deliveries and other automated texts land here.')]));
-  if (focusedKey) t.shell.querySelector<HTMLElement>(`button[data-key="${CSS.escape(focusedKey)}"]`)?.focus();
+  const shownCalls = matchingCalls(s.calls, query);
+  t.callRows.replaceChildren(
+    ...(shownCalls.length ? shownCalls.map((entry) => callRow(entry, s)) : [noMatch('No calls yet. To see them here, allow calls in Connect to PC on the phone.')]),
+  );
+  if (focused?.key) t.shell.querySelector<HTMLElement>(`button[data-key="${CSS.escape(focused.key)}"]`)?.focus();
+  else if (focused?.call) t.shell.querySelector<HTMLElement>(`button[data-call="${CSS.escape(focused.call)}"]`)?.focus();
+}
+
+/** The list the left column shows: Notices only in a narrow window, where it has no column of its own. */
+function shownTab(): typeof tab {
+  return tab === 'notices' && !narrow.matches ? 'people' : tab;
+}
+
+/** A call in the log. Opening it shows its conversation, or the call form with its number. */
+function callRow(entry: CallEntry, s: SmsState): HTMLLIElement {
+  const li = el('li');
+  const row = button('row call-row');
+  row.dataset.call = entry.id;
+  const who = caller(entry);
+  const label = callLabel(entry);
+  const body = el('span', 'row-body');
+  const text = el('span', 'row-text', label);
+  text.toggleAttribute('data-missed', entry.kind === 'missed');
+  body.append(el('span', 'row-title', who), el('span', 'row-time', rowTime(entry.timeMs)), text);
+  row.append(avatar(entry.name ?? ''), body);
+  const conversation = entry.key ? s.conversations.find((c) => c.key === entry.key) : undefined;
+  row.setAttribute('aria-label', `${who}, ${label}, ${rowTime(entry.timeMs)}`);
+  row.title = conversation ? `Open your texts with ${who}` : entry.number ? `Call ${entry.number}` : '';
+  row.disabled = !conversation && !entry.number;
+  row.addEventListener('click', () => {
+    if (conversation) return open(conversation.key, true);
+    dialPrefill = entry.number ?? '';
+    open(undefined);
+  });
+  li.append(row);
+  return li;
 }
 
 function picture(id: string): HTMLImageElement {
@@ -453,6 +568,70 @@ function showFullSize(src: string): void {
 }
 
 const NEW_TEXT = '\u0000new';
+const DIAL = '\u0000dial';
+
+/** Nothing open in Calls: the middle pane is the call form. */
+function renderDial(s: SmsState, middle: HTMLElement): void {
+  if (middle.dataset.key !== DIAL) {
+    const blank = el('div', 'blank');
+    const form = el('form', 'new-form');
+    const to = el('input', 'input');
+    to.type = 'tel';
+    to.placeholder = 'Phone number';
+    to.autocomplete = 'off';
+    to.id = 'dial-to';
+    const toLabel = el('label', '', 'Number');
+    toLabel.htmlFor = to.id;
+    const call = el('button', 'primary send');
+    call.type = 'submit';
+    call.append(icon(ICON.call), el('span', '', 'Call'));
+    const footer = el('footer');
+    footer.append(call, el('p', 'composer-note'));
+    form.append(
+      el('h1', '', 'Call a number'),
+      el('p', 'lead', 'Your phone places the call. You hear it on this computer while the phone is connected to it over Bluetooth.'),
+      toLabel,
+      to,
+      footer,
+    );
+    to.addEventListener('input', () => {
+      if (!dialProblem) return;
+      dialProblem = null;
+      if (state) renderDial(state, middle);
+    });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (call.disabled) return;
+      dialProblem = isPhoneNumber(to.value) ? null : 'Type a phone number: digits, with spaces, dashes or a leading + if you like.';
+      if (!dialProblem) api.dial({ number: to.value.trim() });
+      else if (state) renderDial(state, middle);
+    });
+    blank.append(form);
+    middle.replaceChildren(blank);
+    middle.dataset.key = DIAL;
+  }
+  const to = middle.querySelector<HTMLInputElement>('#dial-to')!;
+  if (dialPrefill) {
+    to.value = dialPrefill;
+    dialPrefill = '';
+  }
+  const call = middle.querySelector<HTMLButtonElement>('.send')!;
+  const note = middle.querySelector<HTMLParagraphElement>('.composer-note')!;
+  const blocked = callBlocked(s);
+  call.disabled = blocked !== undefined;
+  call.lastElementChild!.textContent = s.callAction.pending ? 'Calling…' : 'Call';
+  const problem = dialProblem ?? (s.callAction.failure ? `Not called: ${s.callAction.failure}.` : null);
+  note.toggleAttribute('data-failed', problem !== null);
+  note.textContent = problem ?? blocked ?? 'The number shows as yours, as for any call from your phone.';
+}
+
+/** Why a new call can't start now, if it can't. */
+function callBlocked(s: SmsState): string | undefined {
+  if (s.phone?.connected !== true) return 'Your phone is not connected, so it can’t place a call.';
+  if (s.call) return 'Your phone is already on a call.';
+  if (s.callAction.pending) return 'Waiting for your phone…';
+  return undefined;
+}
 
 /** Nothing open: the middle pane is the new-text form, ready to type into. */
 function renderNewText(s: SmsState, middle: HTMLElement): void {
@@ -518,27 +697,45 @@ let threadSignature = '';
 
 function renderThread(s: SmsState, middle: HTMLElement): void {
   const conversation = s.conversations.find((c) => c.key === openKey);
-  if (!conversation) return renderNewText(s, middle);
+  if (!conversation) return shownTab() === 'calls' ? renderDial(s, middle) : renderNewText(s, middle);
   const sameThread = middle.dataset.key === conversation.key;
+  const items = timeline(conversation.messages, s.calls, conversation.key);
   // Unread does not show in the thread; leaving it out keeps marking read from rebuilding it.
-  const signature = JSON.stringify([{ ...conversation, unread: 0 }, s.sending.includes(conversation.key), s.failures[conversation.key] ?? null, s.phone?.connected === true]);
+  const signature = JSON.stringify([
+    { ...conversation, unread: 0 },
+    s.sending.includes(conversation.key),
+    s.failures[conversation.key] ?? null,
+    s.phone?.connected === true,
+    items.filter((item) => item.kind === 'call'),
+    callBlocked(s) ?? null,
+  ]);
   if (sameThread && signature === threadSignature) return;
   threadSignature = signature;
   const textarea = sameThread ? middle.querySelector('textarea') : null;
   const bubbles = el('ol', 'bubbles');
   bubbles.setAttribute('aria-label', `Messages with ${conversation.title}`);
   let lastDay = 0;
-  conversation.messages.forEach((message, index) => {
-    const day = startOfDay(message.timeMs);
+  const lastMessage = conversation.messages.at(-1);
+  for (const item of items) {
+    const at = item.kind === 'message' ? item.message.timeMs : item.call.timeMs;
+    const day = startOfDay(at);
     if (day !== lastDay) {
-      bubbles.append(el('li', 'day', dayLabel(message.timeMs)));
+      bubbles.append(el('li', 'day', dayLabel(at)));
       lastDay = day;
     }
+    if (item.kind === 'call') {
+      const line = el('li', 'call-line');
+      line.toggleAttribute('data-missed', item.call.kind === 'missed');
+      line.append(icon(ICON.call), el('span', '', `${callLabel(item.call)}, ${time.format(at)}`));
+      bubbles.append(line);
+      continue;
+    }
+    const message = item.message;
     const bubble = el('li', 'bubble');
     bubble.toggleAttribute('data-out', message.outgoing);
     if (conversation.isGroup && !message.outgoing && message.sender) bubble.append(el('span', 'bubble-from', message.sender));
     if (message.image) bubble.append(picture(message.image));
-    const isLast = index === conversation.messages.length - 1;
+    const isLast = message === lastMessage;
     const meta = message.outgoing && isLast && STATUS[message.status] ? `${STATUS[message.status]}, ${time.format(message.timeMs)}` : time.format(message.timeMs);
     // The time sits at the end of the last line, as on the phone.
     const text = el('span', 'bubble-text');
@@ -548,12 +745,23 @@ function renderThread(s: SmsState, middle: HTMLElement): void {
     bubble.toggleAttribute('data-failed', message.status === 'failed');
     bubble.append(text);
     bubbles.append(bubble);
-  });
+  }
 
   const head = el('header', 'thread-head');
   const names = el('div');
   names.append(el('h1', '', conversation.title), el('p', '', conversation.isGroup ? 'Group text' : conversation.sender === 'service' ? 'Automated text' : 'Text message'));
   head.append(avatar(conversation.title), names);
+  if (!conversation.isGroup && conversation.sender === 'person') {
+    const call = button('quiet call-button');
+    call.append(icon(ICON.call), el('span', '', 'Call'));
+    const blocked = callBlocked(s);
+    call.disabled = blocked !== undefined;
+    call.title = blocked ?? `Call ${conversation.title} from your phone`;
+    call.addEventListener('click', () => api.dial({ key: conversation.key }));
+    head.append(call);
+  }
+  // Moving the reply box into the new thread drops its focus; a draft being typed keeps it.
+  const typing = textarea && document.activeElement === textarea ? ([textarea.selectionStart, textarea.selectionEnd] as const) : undefined;
   const composer = composerFor(s, conversation, textarea);
   const previousScroll = sameThread ? middle.querySelector('.bubbles') : null;
   const atBottom = !previousScroll || previousScroll.scrollHeight - previousScroll.scrollTop - previousScroll.clientHeight < 40;
@@ -561,6 +769,10 @@ function renderThread(s: SmsState, middle: HTMLElement): void {
   thread.append(head, bubbles, composer);
   middle.replaceChildren(thread);
   middle.dataset.key = conversation.key;
+  if (typing && textarea && !textarea.disabled) {
+    textarea.focus();
+    textarea.setSelectionRange(...typing);
+  }
   if (atBottom) bubbles.scrollTop = bubbles.scrollHeight;
   else bubbles.scrollTop = previousScroll!.scrollTop;
 }
@@ -622,14 +834,17 @@ function composerFor(s: SmsState, conversation: SyncConversation, existing: HTML
   return form;
 }
 
-/** Shows a conversation in the middle pane, or the new-text form for none. */
-function open(key: string | undefined): void {
+/**
+ * Shows a conversation in the middle pane, or for none the new-text form (the call form in
+ * Calls). Opened from the call log, the conversation keeps Calls in the left column.
+ */
+function open(key: string | undefined, fromCalls = false): void {
   openKey = key;
   const conversation = key ? state?.conversations.find((c) => c.key === key) : undefined;
-  if (conversation) tab = conversation.sender === 'service' ? 'notices' : 'people';
+  if (conversation && !fromCalls) tab = conversation.sender === 'service' ? 'notices' : 'people';
   if (state && texts) renderTexts(state);
   markOpenRead();
-  const target = conversation ? texts?.middle.querySelector('textarea') : texts?.middle.querySelector<HTMLInputElement>('#new-to');
+  const target = conversation ? texts?.middle.querySelector('textarea') : texts?.middle.querySelector<HTMLInputElement>('#new-to, #dial-to');
   if (target && !target.disabled) target.focus();
 }
 
@@ -644,6 +859,7 @@ function renderTexts(s: SmsState): void {
   if (openKey && !s.conversations.some((c) => c.key === openKey)) openKey = undefined;
   placeNotices(texts);
   renderOffline(s, texts);
+  renderCallBar(s, texts.callBar);
   renderLists(s);
   renderThread(s, texts.middle);
 }
@@ -678,7 +894,7 @@ function paint(): void {
 }
 
 narrow.addEventListener('change', () => {
-  if (texts) placeNotices(texts);
+  if (texts && state) renderTexts(state);
 });
 api.onShown((now) => {
   shown = now;

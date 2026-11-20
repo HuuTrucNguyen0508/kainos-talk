@@ -51,6 +51,15 @@ test('blank popups are refused: their opener could fill them with anything', () 
   assert.equal(decideWindowOpen(proton, 'about:blank'), 'block');
 });
 
+test('Messenger opens its call window blank, then sends it to a call page on messenger.com', () => {
+  const messenger = findService('messenger')!;
+  assert.equal(decideWindowOpen(messenger, 'about:blank'), 'call');
+  assert.equal(decideWindowOpen(messenger, ''), 'call');
+  assert.equal(decidePopupNavigation(messenger, 'https://www.messenger.com/groupcall/ROOM:1/?call_id=2'), 'stay');
+  assert.equal(decidePopupNavigation(messenger, 'https://evil.example/'), 'external');
+  assert.equal(decideWindowOpen(messenger, 'javascript:alert(1)'), 'block');
+});
+
 test('a popup stays on the service and its popup hosts; anything else goes to the browser', () => {
   assert.equal(decidePopupNavigation(discord, 'https://discord.com/oauth2/authorized'), 'stay');
   assert.equal(decidePopupNavigation(discord, 'https://hcaptcha.com/challenge'), 'stay');

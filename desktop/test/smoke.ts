@@ -212,12 +212,15 @@ async function dockPage(app: ElectronApplication): Promise<Page> {
   return page;
 }
 
-/** Runs JavaScript in one service page from the main process. */
+/**
+ * The main window is the one with views in it (an incoming-call window has none). Its views are
+ * found by place, leaving out the call strip, which is no service's page.
+ */
 /** Runs JavaScript in one service page from the main process; `gesture` counts it as a user action. */
 function inService<T>(app: ElectronApplication, id: ServiceId, code: string, gesture = false): Promise<T> {
   return app.evaluate(
     ({ BaseWindow }, { index, code, gesture }) =>
-      (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).webContents.executeJavaScript(code, gesture),
+      (BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html'))[index] as Electron.WebContentsView).webContents.executeJavaScript(code, gesture),
     { index: SERVICE_IDS.indexOf(id), code, gesture },
   ) as Promise<T>;
 }
@@ -226,8 +229,8 @@ function inService<T>(app: ElectronApplication, id: ServiceId, code: string, ges
 function sendKey(app: ElectronApplication, target: 'dock' | ServiceId, keyCode: string, modifiers: string[] = []): Promise<void> {
   return app.evaluate(
     ({ BaseWindow }, { index, keyCode, modifiers }) => {
-      const win = BaseWindow.getAllWindows()[0]!;
-      const contents = (win.contentView.children.at(index) as Electron.WebContentsView).webContents;
+      const win = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!;
+      const contents = (win.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')).at(index) as Electron.WebContentsView).webContents;
       const mods = modifiers as NonNullable<Electron.KeyboardInputEvent['modifiers']>;
       contents.sendInputEvent({ type: 'keyDown', keyCode, modifiers: mods });
       contents.sendInputEvent({ type: 'keyUp', keyCode, modifiers: mods });
@@ -405,18 +408,18 @@ const contrastLog: { label: string; summary: string; all: Measured[] }[] = [];
 
 /** The active service's bounds inside the window. */
 const viewBounds = (app: ElectronApplication, id: ServiceId) =>
-  app.evaluate(({ BaseWindow }, index) => (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).getBounds(), SERVICE_IDS.indexOf(id));
+  app.evaluate(({ BaseWindow }, index) => (BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html'))[index] as Electron.WebContentsView).getBounds(), SERVICE_IDS.indexOf(id));
 const serviceFocused = (app: ElectronApplication, id: ServiceId) =>
-  app.evaluate(({ BaseWindow }, index) => (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).webContents.isFocused(), SERVICE_IDS.indexOf(id));
+  app.evaluate(({ BaseWindow }, index) => (BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html'))[index] as Electron.WebContentsView).webContents.isFocused(), SERVICE_IDS.indexOf(id));
 /** Index of the dock tab that has keyboard focus, or -1. */
 const dockFocus = (page: Page) => page.evaluate(() => [...document.querySelectorAll('.tab')].indexOf(document.activeElement as Element));
 /** The dock page's bounds in the window, or null while it is hidden. */
 const dockBounds = (app: ElectronApplication) =>
   app.evaluate(({ BaseWindow }) => {
-    const view = BaseWindow.getAllWindows()[0]!.contentView.children.at(-1) as Electron.WebContentsView;
+    const view = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')).at(-1) as Electron.WebContentsView;
     return view.getVisible() ? view.getBounds() : null;
   });
-const contentSize = (app: ElectronApplication) => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getContentSize() as [number, number]);
+const contentSize = (app: ElectronApplication) => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.getContentSize() as [number, number]);
 /** The always-shown dock's strip, in pixels (shared/ipc.ts DOCK_HEIGHT). */
 const DOCK = 64;
 /** The floating dock's view: the group, 16px each side and above, 8px below (shared/ipc.ts DOCK_FLOAT). */
@@ -426,7 +429,7 @@ const FLOAT = { margin: 16, bottom: 8 };
 function pointer(app: ElectronApplication, target: 'dock' | ServiceId, type: 'mouseMove' | 'mouseLeave', x: number, y: number): Promise<void> {
   return app.evaluate(
     ({ BaseWindow }, { index, type, x, y }) => {
-      const view = BaseWindow.getAllWindows()[0]!.contentView.children.at(index) as Electron.WebContentsView;
+      const view = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')).at(index) as Electron.WebContentsView;
       view.webContents.sendInputEvent({ type: type as 'mouseMove', x: Math.round(x), y: Math.round(y) });
     },
     { index: target === 'dock' ? -1 : SERVICE_IDS.indexOf(target), type, x, y },
@@ -457,7 +460,7 @@ async function groupCentre(app: ElectronApplication, page: Page): Promise<number
 
 function serviceUrl(app: ElectronApplication, id: ServiceId): Promise<string> {
   return app.evaluate(
-    ({ BaseWindow }, index) => (BaseWindow.getAllWindows()[0]!.contentView.children[index] as Electron.WebContentsView).webContents.getURL(),
+    ({ BaseWindow }, index) => (BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html'))[index] as Electron.WebContentsView).webContents.getURL(),
     SERVICE_IDS.indexOf(id),
   );
 }
@@ -470,8 +473,8 @@ function serviceUrl(app: ElectronApplication, id: ServiceId): Promise<string> {
 async function pressShortcut(app: ElectronApplication, page: Page, target: 'dock' | ServiceId, digit: number): Promise<number> {
   await app.evaluate(
     ({ BaseWindow }, { index, key }) => {
-      const win = BaseWindow.getAllWindows()[0]!;
-      const contents = (win.contentView.children.at(index) as Electron.WebContentsView).webContents;
+      const win = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!;
+      const contents = (win.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')).at(index) as Electron.WebContentsView).webContents;
       contents.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers: ['control'] });
       contents.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers: ['control'] });
     },
@@ -613,7 +616,7 @@ async function welcome(profile: string): Promise<void> {
   const stateFile = join(profile, 'kainos-state.json');
   const saved = () => JSON.parse(readFileSync(stateFile, 'utf8')) as { enabledServiceIds?: string[]; welcomed?: boolean };
   const findPage = (app: ElectronApplication, part: string) => poll(async () => app.windows().find((w) => w.url().includes(part)), Boolean, 20_000);
-  const views = (app: ElectronApplication) => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.contentView.children.length);
+  const views = (app: ElectronApplication) => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')).length);
   // The main run ends with no tray host; with none at startup Electron's tray falls back to GTK and crashes off screen.
   bus!.setTrayHost(true);
   let app = await launch(profile);
@@ -934,7 +937,7 @@ async function run(profile: string): Promise<void> {
       })()`,
     );
     const handledIn = await app.evaluate(({ BaseWindow }) =>
-      (BaseWindow.getAllWindows()[0]!.contentView.children as Electron.WebContentsView[]).slice(0, 5).map((view) => view.webContents.session.protocol.isProtocolHandled('kainos-image')),
+      (BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')) as Electron.WebContentsView[]).slice(0, 5).map((view) => view.webContents.session.protocol.isProtocolHandled('kainos-image')),
     );
     check(websiteTries === 'refused refused' && JSON.stringify(handledIn) === JSON.stringify([true, false, false, false, false]), 'a website cannot read the inbox pictures (only the inbox session serves kainos-image:)', `${websiteTries}; handled ${JSON.stringify(handledIn)}`);
     await inService(app, 'inbox', `(() => { const f = document.querySelector('.search input'); f.value = 'tyres'; f.dispatchEvent(new Event('input')); return 1; })()`, true);
@@ -969,7 +972,7 @@ async function run(profile: string): Promise<void> {
       inService<{ aside: string; seg: string; tab: string; inAside: boolean }>(
         app,
         'inbox',
-        `({ aside: getComputedStyle(document.querySelector('.notices')).display, seg: getComputedStyle(document.querySelector('.seg')).display, tab: document.querySelector('.texts').dataset.tab, inAside: !!document.querySelector('.notices .notice-item') })`,
+        `({ aside: getComputedStyle(document.querySelector('.notices')).display, seg: getComputedStyle(document.querySelector('.seg [data-tab="notices"]')).display, tab: document.querySelector('.texts').dataset.tab, inAside: !!document.querySelector('.notices .notice-item') })`,
       );
     const noticeRaised = nextAppEvent<{ serviceId: string; shown: boolean }>(app, 'kainos-notification');
     const stripe = { ...conversation('sms|0|s:stripe', 'StripeLink', [{ id: 's1', text: '248677 is your Link verification code.', timeMs: Date.now() }], 1), sender: 'service' as const };
@@ -983,14 +986,14 @@ async function run(profile: string): Promise<void> {
     check(placed.notice && !placed.people, 'a text from a service is listed under Notices, not People', JSON.stringify(placed));
     const narrowLayout = await layoutOf();
     check(narrowWidth < 1500 && narrowLayout.aside === 'none' && narrowLayout.seg === 'flex', 'under 1500px the notices are a second tab beside People', `${narrowWidth}px ${JSON.stringify(narrowLayout)}`);
-    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.setContentSize(1600, 820));
+    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(1600, 820));
     const wideLayout = await poll(layoutOf, (l) => l.aside !== 'none' && l.inAside, 3000);
     check(wideLayout.aside === 'flex' && wideLayout.seg === 'none' && wideLayout.inAside, 'from 1500px the notices have their own column on the right', JSON.stringify(wideLayout));
     await sleep(500);
     await screenshot(app, '04h-texts-wide');
     // Real ultrawide and portrait tiles: the page fills the window, and the dock comes up centred.
     for (const [width, height] of [[3440, 1440], [1720, 1440], [1418, 2488], [1418, 1244], [709, 2488]] as const) {
-      await app.evaluate(({ BaseWindow }, { width, height }) => BaseWindow.getAllWindows()[0]!.setContentSize(width, height), { width, height });
+      await app.evaluate(({ BaseWindow }, { width, height }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(width, height), { width, height });
       await lowerDock(app, 'inbox');
       const service = await poll(() => viewBounds(app, 'inbox'), (b) => b.height === height && b.width === width, 3000);
       const shown = await revealDock(app, page, 'inbox');
@@ -1009,7 +1012,7 @@ async function run(profile: string): Promise<void> {
       })()`);
       check(fits, `${width}×${height}: the full-height panes fit and the header follows the composer column`);
     }
-    await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows()[0]!.setContentSize(w!, h!), [narrowWidth, narrowHeight]);
+    await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(w!, h!), [narrowWidth, narrowHeight]);
     await poll(layoutOf, (l) => l.aside === 'none', 3000);
     // Clicking the notification opens the notice in the middle and its tab in the narrow layout.
     await pressShortcut(app, page, 'dock', digit('discord'));
@@ -1035,6 +1038,121 @@ async function run(profile: string): Promise<void> {
     check((await smsPhone.next('read')).key === 'sms|0|s:36679', 'Mark all read marks each unread notice read on the phone');
     await inService(app, 'inbox', `document.querySelector('.seg [data-tab="people"]').click(); 1`, true);
 
+    // Calls: what rings on the phone rings here; Answer, End and Call reach the phone.
+    const callNow = Date.now();
+    smsPhone.send({ t: 'callLog', calls: [
+      { id: 'l2', kind: 'missed', number: '+33 6 98 76 54 32', name: null, key: null, timeMs: callNow - 7_200_000, seconds: 0 },
+      { id: 'l1', kind: 'incoming', number: '+33 6 12 34 56 78', name: 'Mum', key: 'sms|0|s:mum', timeMs: callNow - 60_000, seconds: 95 },
+    ].reverse() });
+    const ringing = { id: 'call-1', phase: 'ringing' as const, direction: 'incoming' as const, number: '+33 6 12 34 56 78', name: 'Mum', key: 'sms|0|s:mum', sinceMs: callNow };
+    const ringWindow = () => app.windows().find((candidate) => candidate.url().endsWith('/renderer/call-popup.html'));
+    const mainWindowIs = (event: 'focus' | 'blur') => app.evaluate(({ BaseWindow }, e) => void BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.emit(e), event);
+    // Away from Kainos Talk (in a game, say), a call rings as a notification: a window would pull
+    // Kainos Talk's workspace up. The number and name can come after the call: the notification follows.
+    await mainWindowIs('blur');
+    const away = { ...ringing, id: 'call-0' };
+    smsPhone.send({ t: 'call', call: { ...away, number: null, name: null, key: null } });
+    await poll(async () => bus?.notifications.find((n) => n.summary === 'Unknown number is calling'), Boolean, 5000);
+    smsPhone.send({ t: 'call', call: away });
+    const awayNote = await poll(async () => bus?.notifications.find((n) => n.summary === 'Mum is calling'), Boolean, 5000);
+    check(awayNote !== undefined && ringWindow() === undefined, 'away from Kainos Talk, a ringing call is a notification and opens no window', awayNote?.summary ?? 'none');
+    smsPhone.send({ t: 'call', call: null });
+    check(await poll(async () => awayNote !== undefined && bus!.closed.includes(awayNote.id), Boolean, 3000), '... which goes once the call stops ringing');
+    const notesBefore = bus?.notifications.length ?? 0;
+
+    // In Kainos Talk, it opens the incoming-call window in the middle of the screen.
+    await mainWindowIs('focus');
+    smsPhone.send({ t: 'call', call: { ...ringing, number: null, name: null, key: null } });
+    const ringText = async () => (await ringWindow()?.evaluate(() => document.querySelector('main')?.innerText ?? '').catch(() => '')) ?? '';
+    const unnamed = await poll(ringText, (t) => /Unknown number/.test(t), 5000);
+    check(/Unknown number/.test(unnamed), 'a ringing call opens the incoming-call window', unnamed.replace(/\s+/g, ' '));
+    smsPhone.send({ t: 'call', call: ringing });
+    const named = await poll(ringText, (t) => /Mum/.test(t), 5000);
+    check(/^Mum\s+\+33 6 12 34 56 78 is calling your phone\s+Decline\s+Answer/.test(named), '... which names the caller once the phone knows them, with Decline and Answer', named.replace(/\s+/g, ' '));
+    const ringPlace = await app.evaluate(({ BrowserWindow, screen }) => {
+      const ring = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().endsWith('/renderer/call-popup.html'))!;
+      const b = ring.getBounds();
+      const area = screen.getDisplayMatching(b).workArea;
+      return { dx: b.x + b.width / 2 - (area.x + area.width / 2), dy: b.y + b.height / 2 - (area.y + area.height / 2), title: ring.getTitle(), onTop: ring.isAlwaysOnTop() };
+    });
+    check(Math.abs(ringPlace.dx) <= 1 && Math.abs(ringPlace.dy) <= 1, '... in the middle of the screen', JSON.stringify(ringPlace));
+    if (!ringPlace.onTop) skip('... kept over other windows', 'this headless display has no always-on-top; Wayland compositors decide it themselves');
+    check(ringPlace.title === 'Mum is calling', '... titled with the caller', ringPlace.title);
+    check(!bus?.notifications.slice(notesBefore).some((n) => / is calling$/.test(n.summary)), '... instead of a desktop notification');
+    const bar = () => inService<string>(app, 'inbox', `document.querySelector('.call-bar')?.innerText ?? ''`);
+    const ringingBar = await poll(bar, (t) => /Mum/.test(t) && /Answer/.test(t), 5000);
+    check(/Mum/.test(ringingBar) && /Decline/.test(ringingBar) && /Answer/.test(ringingBar), 'the Texts page shows the ringing call too, with Decline and Answer', ringingBar.replace(/\s+/g, ' '));
+    for (const name of THEME_NAMES) {
+      await pickTheme(app, page, name);
+      await poll(() => themeAttributes(app, page), (t) => t === `dock ${themeId(name)}, texts ${themeId(name)}`, 3000);
+      await poll(async () => (await ringWindow()?.evaluate(() => document.documentElement.dataset.theme ?? 'none')) ?? '', (t) => t === themeId(name), 3000);
+      await measureContrast(`${name}: the incoming-call window`, async () => (await ringWindow()!.evaluate(CONTRAST_WALK)) as Measured[]);
+      await ringWindow()!.screenshot({ path: join(verify, `04j-call-window-${themeId(name)}.png`) });
+    }
+    await pickTheme(app, page, 'Match system');
+    await screenshot(app, '04j-call-ringing');
+    await ringWindow()!.click('#answer');
+    const answer = await smsPhone.next('answer');
+    check(answer.call === 'call-1', 'Answer in the incoming-call window asks the phone to answer that call', JSON.stringify(answer));
+    smsPhone.send({ t: 'replyResult', id: answer.id, ok: true, error: null });
+    smsPhone.send({ t: 'call', call: { ...ringing, phase: 'active', sinceMs: Date.now() - 65_000 } });
+    const activeBar = await poll(bar, (t) => /End call/.test(t), 5000);
+    check(/1:0\d/.test(activeBar) && /End call/.test(activeBar), 'an answered call shows its running time and End call', activeBar.replace(/\s+/g, ' '));
+    check((await poll(async () => ringWindow() === undefined, Boolean, 3000)) === true, '... and the incoming-call window closes');
+    for (const name of THEME_NAMES) {
+      await pickTheme(app, page, name);
+      await poll(() => themeAttributes(app, page), (t) => t === `dock ${themeId(name)}, texts ${themeId(name)}`, 3000);
+      await measureContrast(`${name}: Texts with a call on`, () => inService<Measured[]>(app, 'inbox', CONTRAST_WALK));
+    }
+    await pickTheme(app, page, 'Match system');
+    await screenshot(app, '04k-call-active');
+    await inService(app, 'inbox', `document.querySelector('.call-end').click(); 1`, true);
+    const hangUp = await smsPhone.next('hangUp');
+    smsPhone.send({ t: 'replyResult', id: hangUp.id, ok: true, error: null });
+    smsPhone.send({ t: 'call', call: null });
+    check((await poll(bar, (t) => t === '', 5000)) === '', 'End call asks the phone to hang up, and the bar goes once the call ends');
+
+    await inService(app, 'inbox', `document.querySelector('.seg [data-tab="calls"]').click(); 1`, true);
+    const callList = await poll(() => inService<string>(app, 'inbox', `document.querySelector('.call-rows').innerText`), (t) => /Missed call/.test(t), 5000);
+    check(/Mum[\s\S]*Incoming call, 1 min 35 s[\s\S]*\+33 6 98 76 54 32[\s\S]*Missed call/.test(callList), 'Calls lists the call log, newest first, with how long each call lasted', callList.replace(/\s+/g, ' '));
+    const compose = await inService<string>(app, 'inbox', `document.querySelector('.new-text').title`);
+    await inService(app, 'inbox', `document.querySelector('.new-text').click(); 1`, true);
+    const dialForm = await poll(() => inService<boolean>(app, 'inbox', `document.activeElement?.id === 'dial-to'`), Boolean, 3000);
+    check(compose === 'Call a number' && dialForm, '... and its new button is Call a number, which opens the call form ready to type', compose);
+    await screenshot(app, '04l-calls');
+    await inService(app, 'inbox', `(() => { const to = document.querySelector('#dial-to'); to.value = '12'; to.form.requestSubmit(); return 1; })()`, true);
+    const tooShort = await inService<string>(app, 'inbox', `document.querySelector('.new-form .composer-note').textContent`);
+    check(/Type a phone number/.test(tooShort), 'a number too short to dial is caught in the form', tooShort);
+    await inService(app, 'inbox', `document.querySelector('.call-rows .row[data-call="l2"]').click(); 1`, true);
+    const prefilled = await poll(() => inService<string>(app, 'inbox', `document.querySelector('#dial-to')?.value ?? ''`), (v) => v !== '', 3000);
+    check(prefilled === '+33 6 98 76 54 32', 'a call with no conversation puts its number in the call form', prefilled);
+    await inService(app, 'inbox', `document.querySelector('#dial-to').form.requestSubmit(); 1`, true);
+    const dialled = await smsPhone.next('dial');
+    check(dialled.number === '+33 6 98 76 54 32' && dialled.key === null, 'Call on the form asks the phone to dial that number', JSON.stringify(dialled));
+    smsPhone.send({ t: 'replyResult', id: dialled.id, ok: false, error: 'no permission to make calls' });
+    const refused = await poll(bar, (t) => /no permission/.test(t), 5000);
+    check(/no permission to make calls/.test(refused), "the phone's refusal shows across the top", refused.replace(/\s+/g, ' '));
+    await inService(app, 'inbox', `document.querySelector('.call-bar .quiet').click(); 1`, true);
+    check((await poll(bar, (t) => t === '', 3000)) === '', '... until it is dismissed');
+
+    await inService(app, 'inbox', `document.querySelector('.call-rows .row[data-call="l1"]').click(); 1`, true);
+    const thread = await poll(() => inService<{ tab: string; head: string; line: string }>(app, 'inbox', `({ tab: document.querySelector('.texts').dataset.tab, head: document.querySelector('.thread-head h1')?.textContent ?? '', line: document.querySelector('.call-line')?.textContent ?? '' })`), (t) => t.head === 'Mum', 5000);
+    check(thread.head === 'Mum' && thread.tab === 'calls' && /^Incoming call, 1 min 35 s, /.test(thread.line), "a call with a conversation opens it, its calls among its texts, and Calls stays selected", JSON.stringify(thread));
+    await screenshot(app, '04m-call-in-thread');
+    await inService(app, 'inbox', `(() => { const t = document.querySelector('.composer textarea'); t.focus(); t.value = 'On my w'; t.dispatchEvent(new Event('input')); return 1; })()`, true);
+    smsPhone.send({ t: 'callLog', calls: [{ id: 'l3', kind: 'outgoing', number: '+33 6 12 34 56 78', name: 'Mum', key: 'sms|0|s:mum', timeMs: Date.now(), seconds: 12 }] });
+    const kept = await poll(
+      () => inService<{ line: string; focused: boolean; draft: string }>(app, 'inbox', `({ line: document.querySelector('.call-line')?.textContent ?? '', focused: document.activeElement?.matches('.composer textarea') ?? false, draft: document.querySelector('.composer textarea').value })`),
+      (k) => k.line.startsWith('Outgoing call'),
+      5000,
+    );
+    check(kept.focused && kept.draft === 'On my w', 'a call arriving in the open thread leaves the draft being typed focused', JSON.stringify(kept));
+    await inService(app, 'inbox', `document.querySelector('.call-button').click(); 1`, true);
+    const dialByKey = await smsPhone.next('dial');
+    check(dialByKey.key === 'sms|0|s:mum' && dialByKey.number === null, "Call in a conversation's header dials that conversation's number", JSON.stringify(dialByKey));
+    smsPhone.send({ t: 'replyResult', id: dialByKey.id, ok: true, error: null });
+    await inService(app, 'inbox', `document.querySelector('.seg [data-tab="people"]').click(); 1`, true);
+
     // Unread counts come from page titles.
     await inService(app, 'proton-mail', `document.title = '(4) Inbox | Proton Mail'`);
     await inService(app, 'discord', `document.title = '• Discord | #general'`);
@@ -1043,7 +1161,7 @@ async function run(profile: string): Promise<void> {
     // The window title counts every service: the texts' unread plus Proton's 4 (Discord's marker adds no number).
     const textsUnread = Number((await inService<string>(app, 'inbox', 'document.title')).match(/^\((\d+)\)/)?.[1] ?? 0);
     const expectedTitle = `(${textsUnread + 4}) Kainos Talk`;
-    const title = await poll(() => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getTitle()), (value) => value === expectedTitle, 5000);
+    const title = await poll(() => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.getTitle()), (value) => value === expectedTitle, 5000);
     check(title === expectedTitle, "window title adds up the texts and the websites' unread", title);
     await inService(app, 'whatsapp', `document.title = '(99+) WhatsApp'`);
     check((await poll(() => tabState(page, 'whatsapp'), (text) => text === 'count:99+', 5000)) === 'count:99+', 'a capped "(99+)" title shows 99+');
@@ -1165,7 +1283,7 @@ async function run(profile: string): Promise<void> {
         // The SMS view is Kainos' own page; it never copies to the clipboard.
         if (id === 'inbox') continue;
         await pressShortcut(app, page, 'dock', index + 1);
-        await app.evaluate(({ BaseWindow }, i) => (BaseWindow.getAllWindows()[0]!.contentView.children[i] as Electron.WebContentsView).webContents.focus(), index);
+        await app.evaluate(({ BaseWindow }, i) => (BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html'))[i] as Electron.WebContentsView).webContents.focus(), index);
         results.push(`${id}: ${await inService<string>(app, id, `${call}.then(() => 'ok', (e) => e.name + ': ' + e.message)`, true)}`);
       }
       return results;
@@ -1191,7 +1309,7 @@ async function run(profile: string): Promise<void> {
     };
     const full = await poll(covered, Boolean, 5000);
     check(entered === 'ok' && full, 'a page in fullscreen covers the whole window, dock included', `${entered} ${JSON.stringify(await viewBounds(app, 'whatsapp'))}`);
-    info('the window itself went fullscreen with the page', String(await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.isFullScreen())));
+    info('the window itself went fullscreen with the page', String(await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.isFullScreen())));
     await inService(app, 'whatsapp', `document.exitFullscreen().then(() => 1, () => 0)`, true);
     await pointer(app, 'whatsapp', 'mouseMove', 300, 300);
     const back = async () => {
@@ -1204,7 +1322,7 @@ async function run(profile: string): Promise<void> {
     // Failed load, light and dark, then retry.
     await pressShortcut(app, page, 'dock', digit('discord'));
     await app.evaluate(({ BaseWindow }) => {
-      const view = BaseWindow.getAllWindows()[0]!.contentView.children[2] as Electron.WebContentsView;
+      const view = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html'))[2] as Electron.WebContentsView;
       view.webContents.loadURL('https://kainos-smoke.invalid/').catch(() => undefined);
     });
     check((await poll(() => status(page, 'discord'), (value) => value === 'failed', 20_000)) === 'failed', 'an unreachable page shows the failed state');
@@ -1243,7 +1361,7 @@ async function run(profile: string): Promise<void> {
     await screenshot(app, '07-failed-dark');
     await page.locator('.retry').click();
     check((await poll(() => status(page, 'discord'), (value) => value === 'ready', 60_000)) === 'ready', 'Retry loads Discord again');
-    const isWinFocused = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.isFocused());
+    const isWinFocused = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.isFocused());
     if (isWinFocused) check(await poll(() => serviceFocused(app, 'discord'), Boolean, 3000), 'after Retry, keyboard focus is in Discord');
     else skip('after Retry, keyboard focus is in Discord', 'the off-screen window never reports focus, so the app waits for it');
 
@@ -1375,7 +1493,7 @@ async function run(profile: string): Promise<void> {
         for (const candidate of pages) await candidate.emulateMedia({ colorScheme: scheme });
         for (const [width, height] of [[3440, 1440], [1418, 2488]] as const) {
           const shot = (name: string) => screenshot(app, `reveal/${width}x${height}-${scheme}-${name}`);
-          await app.evaluate(({ BaseWindow }, { width, height }) => BaseWindow.getAllWindows()[0]!.setContentSize(width, height), { width, height });
+          await app.evaluate(({ BaseWindow }, { width, height }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(width, height), { width, height });
           await pressShortcut(app, page, 'whatsapp', digit('whatsapp'));
           await lowerDock(app, 'whatsapp');
           await sleep(800);
@@ -1400,7 +1518,7 @@ async function run(profile: string): Promise<void> {
         nativeTheme.themeSource = 'system';
       });
       for (const candidate of pages) await candidate.emulateMedia({ colorScheme: null });
-      await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows()[0]!.setContentSize(w!, h!), [w0, h0]);
+      await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(w!, h!), [w0, h0]);
       await sleep(500);
     }
 
@@ -1431,9 +1549,9 @@ async function run(profile: string): Promise<void> {
     {
       mkdirSync(join(verify, 'themes'), { recursive: true });
       const [w0, h0] = await contentSize(app);
-      await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.setContentSize(1720, 1440));
+      await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(1720, 1440));
       await pressShortcut(app, page, 'dock', digit('inbox'));
-      const background = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getBackgroundColor().toLowerCase());
+      const background = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.getBackgroundColor().toLowerCase());
       // With the phone gone: the disconnected bar and the dock's "not connected".
       for (const name of THEME_NAMES) {
         await pickTheme(app, page, name);
@@ -1476,7 +1594,7 @@ async function run(profile: string): Promise<void> {
       await pickTheme(app, page, 'Carbon');
       await poll(() => themeAttributes(app, page), (t) => t === 'dock carbon, texts carbon', 3000);
       writeFileSync(join(verify, 'themes', 'contrast.json'), JSON.stringify(contrastLog, null, 2));
-      await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows()[0]!.setContentSize(w!, h!), [w0, h0]);
+      await app.evaluate(({ BaseWindow }, [w, h]) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(w!, h!), [w0, h0]);
       await pressShortcut(app, page, 'dock', digit('whatsapp'));
     }
 
@@ -1498,7 +1616,7 @@ async function run(profile: string): Promise<void> {
     // brings it back without opening it, and an invite link sent in another service opens in
     // its tab instead of the browser.
     {
-      const pageViews = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.contentView.children.length - 1);
+      const pageViews = () => app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.contentView.children.filter((v) => !(v as Electron.WebContentsView).webContents.getURL().endsWith('/call-strip.html')).length - 1);
       const roomPages = () =>
         app.evaluate(({ webContents, session }) => webContents.getAllWebContents().filter((c) => !c.isDestroyed() && c.session === session.fromPartition('persist:service-streamroom')).length);
       const savedAsleep = () => (JSON.parse(readFileSync(stateFile, 'utf8')) as { hibernatedServiceIds?: string[] }).hibernatedServiceIds?.join(' ') ?? '';
@@ -1674,7 +1792,7 @@ async function run(profile: string): Promise<void> {
     {
       mkdirSync(join(verify, 'dock-order'), { recursive: true });
       const [w0, h0] = await contentSize(app);
-      await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.setContentSize(1720, 1440));
+      await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(1720, 1440));
       await app.evaluate(({ nativeTheme }) => {
         nativeTheme.themeSource = 'dark';
       });
@@ -1871,18 +1989,18 @@ async function run(profile: string): Promise<void> {
         nativeTheme.themeSource = 'system';
       });
       await page.emulateMedia({ colorScheme: null });
-      await app.evaluate(({ BaseWindow }, [w1, h1]) => BaseWindow.getAllWindows()[0]!.setContentSize(w1!, h1!), [w0, h0]);
+      await app.evaluate(({ BaseWindow }, [w1, h1]) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.setContentSize(w1!, h1!), [w0, h0]);
       await sleep(500);
     }
 
     // With a tray host, closing the window hides it to the tray instead of quitting.
-    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.close());
-    const hidden = await poll(() => app.evaluate(({ BaseWindow }) => !BaseWindow.getAllWindows()[0]!.isVisible()), Boolean, 5000);
+    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.close());
+    const hidden = await poll(() => app.evaluate(({ BaseWindow }) => !BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.isVisible()), Boolean, 5000);
     check(hidden, 'with a tray host, closing the window hides it to the tray');
     check(bus!.trayItems.length > 0, 'the tray icon registers with the tray host', bus!.trayItems.join('; '));
 
     await app.evaluate(({ BaseWindow }) => {
-      const win = BaseWindow.getAllWindows()[0]!;
+      const win = BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!;
       win.show();
       win.setBounds({ x: 120, y: 90, width: 1100, height: 720 });
     });
@@ -1922,7 +2040,7 @@ async function run(profile: string): Promise<void> {
     check(JSON.stringify(kept) === JSON.stringify({ x: 0, y: h - DOCK, width: w, height: DOCK }), 'second launch keeps the dock shown in its strip', JSON.stringify(kept));
     const relaunched = await poll(() => themeAttributes(app, page), (t) => t === 'dock carbon, texts carbon', 5000);
     check(relaunched === 'dock carbon, texts carbon', 'second launch keeps Carbon on the dock and the Texts page', relaunched);
-    const relaunchedBackground = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getBackgroundColor().toLowerCase());
+    const relaunchedBackground = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.getBackgroundColor().toLowerCase());
     check(relaunchedBackground === '#000000', "... and paints the window in Carbon's black from the start", relaunchedBackground);
     await page.locator('#dock-options').click();
     await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
@@ -1931,9 +2049,9 @@ async function run(profile: string): Promise<void> {
     await pointer(app, 'proton-mail', 'mouseMove', w / 2, h / 2);
     const gone = await poll(() => dockBounds(app), (b) => b === null, 3000);
     check(gone === null && (await viewBounds(app, 'proton-mail')).height === h, 'switching it off again hides the dock and gives the page the whole window');
-    const bounds = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.getBounds());
+    const bounds = await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.getBounds());
     check(bounds.width === 1100 && bounds.height === 720, 'second launch restores the window size', JSON.stringify(bounds));
-    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows()[0]!.close()).catch(() => undefined);
+    await app.evaluate(({ BaseWindow }) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)!.close()).catch(() => undefined);
     check(await exits(app, 10_000), 'with no tray host, closing the window quits');
   } finally {
     await shutdown(app);

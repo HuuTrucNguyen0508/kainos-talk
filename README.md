@@ -1,9 +1,9 @@
 # Kainos Talk
 
-One app for Proton Mail, Discord, WhatsApp, Messenger and Streamroom, with your phone's texts (SMS and RCS) on the PC.
+One app for Proton Mail, Discord, WhatsApp, Messenger and Streamroom, with your phone's texts (SMS and RCS) and calls on the PC.
 
 - `desktop/`: the PC app (Electron). Each website runs in its own view inside one window, with a dock that slides up from the bottom to switch between them, and a Texts page shows the phone's texts.
-- `android/`: the phone app (Kotlin, Gradle). It is an SMS bridge: it sends the phone's texts (SMS and RCS from the messages app) to the PC's Texts page over the local network, and sends the replies you write there. See [docs/sms-sync-plan.md](docs/sms-sync-plan.md).
+- `android/`: the phone app (Kotlin, Gradle). It is an SMS bridge: it sends the phone's texts (SMS and RCS from the messages app) to the PC's Texts page over the local network, and sends the replies you write there. It also shows the phone's calls on the PC, where you can answer, end and place them; the sound goes over Bluetooth. See [docs/sms-sync-plan.md](docs/sms-sync-plan.md) and [docs/calls-plan.md](docs/calls-plan.md).
 - `protocol/`: test vectors for the phone-to-PC SMS sync, checked by both apps' tests.
 
 ## Install
@@ -18,6 +18,8 @@ Download both apps from the [latest release](https://github.com/HuuTrucNguyen050
   Kainos Talk on private networks when Windows Firewall asks, so the phone can connect.
 - **Phone (Android 13 or newer):** `Kainos-Talk-<version>.apk`. Open it on the phone and allow
   installing from that source. Then pair it with the PC from the Texts page.
+- **Calls on the PC:** in the phone app, allow calls in Connect to PC, and pair the phone with the
+  PC over Bluetooth so call audio plays through the PC.
 
 On first launch the PC app asks which apps you want; change them any time with **Choose apps…**
 in the Kainos mark's menu on the dock.
