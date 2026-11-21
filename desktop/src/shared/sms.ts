@@ -23,6 +23,18 @@ export interface SmsState {
   readonly calls: readonly CallEntry[];
   /** An answer, hang-up or dial on its way to the phone, and why the last one failed. */
   readonly callAction: { readonly pending: boolean; readonly failure: string | null };
+  /** Whether call sound can reach this PC over Bluetooth. */
+  readonly callAudio: CallAudio | null;
+}
+
+/**
+ * Whether call sound can reach this PC: the phone connected to it over Bluetooth hands-free.
+ * Null until the PC first tries, and on systems where it can't (Windows).
+ */
+export interface CallAudio {
+  readonly kind: 'connected' | 'connecting' | 'unreachable' | 'pc-off' | 'not-paired' | 'no-bluetooth';
+  /** The phone's Bluetooth name. */
+  readonly device: string | null;
 }
 
 /** What the incoming-call window shows: the ringing call, and the phone's answer to a button. */
@@ -59,6 +71,8 @@ export const SmsChannel = {
   answer: 'kainos-sms:answer',
   hangUp: 'kainos-sms:hang-up',
   dial: 'kainos-sms:dial',
+  /** Inbox page to main: connect the phone over Bluetooth for call sound. */
+  connectCallAudio: 'kainos-sms:connect-call-audio',
   /** Inbox page to main: put a verification code on the clipboard. */
   copyCode: 'kainos-sms:copy-code',
   /** Main to the inbox page: open this conversation (a notification was clicked). */
@@ -94,6 +108,8 @@ export interface SmsApi {
   hangUp(): void;
   /** Calls a number, or the one number of a text conversation. */
   dial(to: { readonly number: string } | { readonly key: string }): void;
+  /** Connects the phone over Bluetooth so call sound comes through this PC. */
+  connectCallAudio(): void;
   /** Copies a verification code (4 to 8 digits); main writes the clipboard, since a local page may not. */
   copyCode(code: string): void;
   onOpenKey(listener: (key: string) => void): void;

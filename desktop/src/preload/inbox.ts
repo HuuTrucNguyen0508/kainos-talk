@@ -15,6 +15,7 @@ const api: SmsApi = {
   send: (to, text) => ipcRenderer.send(SmsChannel.send, to, text),
   answer: () => ipcRenderer.send(SmsChannel.answer),
   hangUp: () => ipcRenderer.send(SmsChannel.hangUp),
+  connectCallAudio: () => ipcRenderer.send(SmsChannel.connectCallAudio),
   dial: (to) => ipcRenderer.send(SmsChannel.dial, to),
   copyCode: (code) => ipcRenderer.send(SmsChannel.copyCode, code),
   onOpenKey: (listener) => ipcRenderer.on(SmsChannel.openKey, (_event, key: string) => listener(key)),

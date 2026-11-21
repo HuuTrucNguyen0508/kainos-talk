@@ -139,6 +139,15 @@ ol {
   color: var(--alert);
   font-size: 14px;
 }
+.call-sound {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+  color: var(--alert);
+  font-size: 14px;
+}
 .call-bar[data-phase='failed'] {
   grid-template-columns: minmax(0, 1fr) auto;
   background: var(--alert-wash);

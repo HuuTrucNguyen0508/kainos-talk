@@ -1,4 +1,4 @@
-import { BaseWindow, Menu, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
+import { BaseWindow, Menu, powerMonitor, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
@@ -13,6 +13,7 @@ import { REVEAL_TIMING, initialReveal, onScreen, raised, stepReveal, type Reveal
 import { forwardNotifications } from './notifications.ts';
 import { startVencord } from './vencord.ts';
 import { startSmsSync, type SmsSync } from './sms-sync.ts';
+import { startCallAudio } from './call-audio.ts';
 import { openAppsPage, type AppsPage } from './apps-page.ts';
 import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
@@ -221,6 +222,18 @@ async function start(): Promise<void> {
   }
   /** The phone sync, running only while Texts is on: off, nothing listens on the network. */
   let sms: SmsSync | undefined;
+  const sendSmsState = () => {
+    if (sms) smsView()?.send(SmsChannel.state, sms.state());
+  };
+  // Call sound comes over Bluetooth, which the phone forgets to connect: the PC connects it
+  // whenever the phone joins over the LAN, a call rings or starts, or the PC wakes up.
+  const callAudio = await startCallAudio(sendSmsState);
+  const connectCallAudio = () => callAudio.ensure(sms?.state().phone?.name);
+  /** What the last change showed, to connect only on a new phone link or a new call. */
+  let seen: { linked: boolean; call: string | null } = { linked: false, call: null };
+  powerMonitor.on('resume', () => {
+    if (sms?.state().phone?.connected) connectCallAudio();
+  });
   let smsStarting: Promise<void> | undefined;
   function startSms(): Promise<void> {
     if (sms) return Promise.resolve();
@@ -228,8 +241,14 @@ async function start(): Promise<void> {
       dir: join(app.getPath('userData'), 'sms-sync'),
       ...(process.env.KAINOS_SYNC_PORT && { port: Number(process.env.KAINOS_SYNC_PORT) }),
       advertise: process.env.KAINOS_SYNC_MDNS !== '0',
+      callAudio: () => callAudio.state(),
       onChange: () => {
-        if (sms) smsView()?.send(SmsChannel.state, sms.state());
+        const now = sms?.state();
+        const linked = now?.phone?.connected === true;
+        const callId = now?.call?.id ?? null;
+        if (linked && (!seen.linked || (callId !== null && callId !== seen.call))) connectCallAudio();
+        seen = { linked, call: callId };
+        sendSmsState();
         showRinging();
         // The window title and tray lamp follow the inbox.
         if (runtimesReady) render();
@@ -971,9 +990,14 @@ async function start(): Promise<void> {
   ipcMain.on(SmsChannel.hangUp, (event) => {
     if (fromSms(event)) sms?.hangUp();
   });
+  ipcMain.on(SmsChannel.connectCallAudio, (event) => {
+    if (fromSms(event)) connectCallAudio();
+  });
   ipcMain.on(SmsChannel.dial, (event, to: unknown) => {
     if (!fromSms(event) || typeof to !== 'object' || to === null) return;
     const { number, key } = to as Record<string, unknown>;
+    // Connecting takes a fraction of a second, well before the other phone picks up.
+    connectCallAudio();
     if (typeof number === 'string' && number.length <= 40) sms?.dial({ number });
     else if (typeof key === 'string' && key.length <= 500) sms?.dial({ key });
   });

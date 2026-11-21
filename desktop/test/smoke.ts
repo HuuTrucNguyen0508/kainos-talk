@@ -199,6 +199,8 @@ function launch(profile: string, extra: { env?: Record<string, string>; args?: s
       KAINOS_BLOCK_EXTERNAL: '1',
       KAINOS_SYNC_PORT: String(syncPort),
       KAINOS_SYNC_MDNS: '0',
+      // The fake phone must not make the app connect the real one over Bluetooth.
+      KAINOS_CALL_AUDIO: '0',
       DBUS_SESSION_BUS_ADDRESS: bus!.address,
     }),
     timeout: 60_000,

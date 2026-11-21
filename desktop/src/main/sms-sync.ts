@@ -20,7 +20,7 @@ import {
   type SyncConversation,
   type SyncMessage,
 } from '../shared/sync-protocol.ts';
-import { isPhoneNumber, type SmsState } from '../shared/sms.ts';
+import { isPhoneNumber, type CallAudio, type SmsState } from '../shared/sms.ts';
 
 export interface SmsSyncOptions {
   /** Where the certificate and the paired phone are kept. */
@@ -31,6 +31,8 @@ export interface SmsSyncOptions {
   readonly onChange: () => void;
   /** A message arrived that the user has not seen. */
   readonly onIncoming: (conversation: SyncConversation, message: SyncMessage) => void;
+  /** Whether call sound reaches this PC; kept outside, by the Bluetooth link. */
+  readonly callAudio?: () => CallAudio | null;
 }
 
 export interface SmsSync {
@@ -418,6 +420,7 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
         call,
         calls: callLog,
         callAction: { pending: callPending(), failure: failures.get(CALL) ?? null },
+        callAudio: options.callAudio?.() ?? null,
         sending: [...new Set([...replies.values()].map((pending) => pending.key))],
         failures: Object.fromEntries([...failures].filter(([key]) => key !== NEW_TEXT && key !== CALL)),
         newText: { sending: [...replies.values()].some((pending) => pending.key === NEW_TEXT), failure: failures.get(NEW_TEXT) ?? null },

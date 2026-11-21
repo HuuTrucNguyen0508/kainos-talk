@@ -361,7 +361,7 @@ function renderCallBar(s: SmsState, bar: HTMLElement): void {
     bar.replaceChildren();
     return;
   }
-  const signature = JSON.stringify([call, s.callAction]);
+  const signature = JSON.stringify([call, s.callAction, s.callAudio]);
   if (bar.dataset.signature === signature) return;
   bar.dataset.signature = signature;
   if (!call) {
@@ -383,7 +383,9 @@ function renderCallBar(s: SmsState, bar: HTMLElement): void {
     const since = el('span', 'call-clock');
     since.dataset.since = String(call.sinceMs);
     since.textContent = clock(Date.now() - call.sinceMs);
-    detail.append(since, ` ${call.direction === 'incoming' ? 'on the call' : 'calling out'}. Sound comes through this computer while your phone is connected to it over Bluetooth.`);
+    detail.append(since, ` ${call.direction === 'incoming' ? 'on the call' : 'calling out'}.`);
+    const sound = soundWorking(s.callAudio);
+    if (sound) detail.append(` ${sound}`);
   }
   who.append(el('h2', '', name), detail);
   const lamp = el('span', 'call-lamp');
@@ -408,7 +410,39 @@ function renderCallBar(s: SmsState, bar: HTMLElement): void {
     actions.append(end);
   }
   bar.replaceChildren(lamp, who, actions);
+  const soundProblem = soundMissing(s.callAudio);
+  if (soundProblem) {
+    const row = el('div', 'call-sound');
+    const retry = button('quiet', 'Connect again');
+    retry.addEventListener('click', () => api.connectCallAudio());
+    row.append(el('p', '', soundProblem), retry);
+    bar.append(row);
+  }
   if (failure) bar.append(el('p', 'call-problem', `Your phone didn’t do that: ${failure}.`));
+}
+
+/** Where the call's sound is, while it is (or soon will be) on this computer. */
+function soundWorking(audio: SmsState['callAudio']): string | null {
+  if (!audio) return 'Sound comes through this computer while your phone is connected to it over Bluetooth.';
+  if (audio.kind === 'connected') return 'Sound comes through this computer.';
+  if (audio.kind === 'connecting') return 'Connecting your phone over Bluetooth for sound…';
+  return null;
+}
+
+/** Why the call's sound stays on the phone, and what to do about it. */
+function soundMissing(audio: SmsState['callAudio']): string | null {
+  switch (audio?.kind) {
+    case 'unreachable':
+      return 'Sound stays on your phone: this computer can’t reach it over Bluetooth. Turn on Bluetooth on the phone, then connect again.';
+    case 'pc-off':
+      return 'Sound stays on your phone: Bluetooth is off on this computer. Turn it on, then connect again.';
+    case 'not-paired':
+      return 'Sound stays on your phone: pair it with this computer over Bluetooth first.';
+    case 'no-bluetooth':
+      return 'Sound stays on your phone: this computer has no Bluetooth.';
+    default:
+      return null;
+  }
 }
 
 /** The call bar's clock moves on its own; the rest of the page only changes with the state. */
@@ -589,7 +623,7 @@ function renderDial(s: SmsState, middle: HTMLElement): void {
     footer.append(call, el('p', 'composer-note'));
     form.append(
       el('h1', '', 'Call a number'),
-      el('p', 'lead', 'Your phone places the call. You hear it on this computer while the phone is connected to it over Bluetooth.'),
+      el('p', 'lead', 'Your phone places the call, and connects to this computer over Bluetooth so you hear it here.'),
       toLabel,
       to,
       footer,
