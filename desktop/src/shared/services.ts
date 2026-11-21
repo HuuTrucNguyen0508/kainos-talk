@@ -6,6 +6,15 @@ import { unreadFromGmailTitle, unreadFromTitlePrefix, type Unread } from './unre
  *
  * Host patterns are exact hostnames, or "*.example.com" for any subdomain of example.com.
  */
+/**
+ * What a website does while it is in the background (another tab is open, or the window is
+ * hidden or minimised). 'run' keeps drawing it as if on screen. 'sleep' stops drawing it and
+ * slows its timers to once a second, the way a browser treats a background tab; its connection
+ * stays open, so messages and notifications still arrive. 'hibernate' sleeps it, then closes its
+ * page after a while in the background, which frees its memory and stops its notifications.
+ */
+export type AwayMode = 'run' | 'sleep' | 'hibernate';
+
 export interface ServiceDefinition {
   /** Stable id: names the login partition (persist:service-<id>) and the saved state. */
   readonly id: string;
@@ -52,6 +61,8 @@ export interface ServiceDefinition {
    * nothing to notify about. Opening its tab wakes it.
    */
   readonly startsHibernated?: true;
+  /** What it does in the background until the user picks otherwise in its menu; 'sleep' if unset. */
+  readonly whenAway?: AwayMode;
   /**
    * Added after people had already chosen their apps: an update never turns it on for them, so
    * it waits off until they pick it on the Choose your apps page.
@@ -119,6 +130,8 @@ export const SERVICES: readonly ServiceDefinition[] = [
       glyph: 'm15.24 8.998 3.656-3.073v15.81H2.482C1.11 21.735 0 20.609 0 19.223V6.944l7.58 6.38a2.186 2.186 0 0 0 2.871-.042l4.792-4.284h-.003zm-5.456 3.538 1.809-1.616a2.438 2.438 0 0 1-1.178-.533L.905 2.395A.552.552 0 0 0 0 2.826v2.811l8.226 6.923a1.186 1.186 0 0 0 1.558-.024zM23.871 2.463a.551.551 0 0 0-.776-.068l-3.199 2.688v16.653h1.623c1.371 0 2.481-1.127 2.481-2.513V2.824a.551.551 0 0 0-.129-.36z',
     },
     unread: unreadFromTitlePrefix,
+    // Mail can wait: it frees its memory in the background rather than notify.
+    whenAway: 'hibernate',
     // The title only counts the open folder, so read the Inbox counter in the sidebar.
     // Selectors from Ferdium's Proton recipe; not yet checked against a signed-in page.
     unreadCounter: {
@@ -197,6 +210,7 @@ export const SERVICES: readonly ServiceDefinition[] = [
     claimsLinks: true,
     // A room is opened for a call and left; it never notifies, so it need not run all day.
     startsHibernated: true,
+    whenAway: 'hibernate',
   },
   {
     id: 'gmail',
@@ -227,6 +241,14 @@ export function findService(id: unknown): ServiceDefinition | undefined {
 /** Kainos' own pages hold state in main and cost little; only websites can hibernate. */
 export function canHibernate(service: ServiceDefinition): boolean {
   return service.localPage === undefined;
+}
+
+export function defaultAwayMode(service: ServiceDefinition): AwayMode {
+  return service.whenAway ?? 'sleep';
+}
+
+export function isAwayMode(value: unknown): value is AwayMode {
+  return value === 'run' || value === 'sleep' || value === 'hibernate';
 }
 
 export function partitionFor(service: ServiceDefinition): string {

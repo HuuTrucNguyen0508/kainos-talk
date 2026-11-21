@@ -1,7 +1,8 @@
 // Preload for each service page. It routes the page's web notifications through Kainos Talk,
 // so muting works and clicking one opens the right service (Electron gives the main process no
 // other hook into a page's notifications), reads the page's own unread counter for services
-// that have one, and reports the pointer at the bottom edge for the auto-hiding dock.
+// that have one, says whether the page has a call going (so it is never hibernated mid-call), and
+// reports the pointer at the bottom edge for the auto-hiding dock.
 import { contextBridge, ipcRenderer } from 'electron';
 import { Channel, type NotificationRequest } from '../shared/ipc.ts';
 import { findService } from '../shared/services.ts';
@@ -156,5 +157,66 @@ if (counter) {
     ipcRenderer.send(Channel.unreadCounter, reading);
   }, 1500);
 }
+
+/**
+ * Runs in the page's own world, so it must not use anything from this module's scope. Keeps the
+ * camera, microphone and screen tracks the page opens and the peer connections it makes, and
+ * says whether any is going: a page in a call or sharing its screen must stay awake. Busy is
+ * reported at once (a request for a capture, a peer connecting); idle on the next check, since
+ * a stopped track tells nobody.
+ */
+function watchCalls(report: (busy: boolean) => void, everyMs: number): void {
+  const tracks = new Set<MediaStreamTrack>();
+  const peers = new Set<RTCPeerConnection>();
+  /** Capture requests still waiting for an answer, such as an open screen picker. */
+  let asking = 0;
+  let last = false;
+  const check = () => {
+    for (const track of tracks) if (track.readyState === 'ended') tracks.delete(track);
+    for (const peer of peers) if (peer.connectionState === 'closed') peers.delete(peer);
+    // A failed peer may still restart; a disconnected one is reconnecting, so it counts.
+    const busy = asking > 0 || tracks.size > 0 || [...peers].some((peer) => ['connecting', 'connected', 'disconnected'].includes(peer.connectionState));
+    if (busy === last) return;
+    last = busy;
+    report(busy);
+  };
+  const devices = window.MediaDevices?.prototype;
+  for (const name of ['getUserMedia', 'getDisplayMedia'] as const) {
+    const native = devices?.[name];
+    if (!devices || typeof native !== 'function') continue;
+    devices[name] = function (this: MediaDevices, ...args: Parameters<typeof native>) {
+      asking++;
+      check();
+      return native.apply(this, args).then(
+        (stream: MediaStream) => {
+          for (const track of stream.getTracks()) tracks.add(track);
+          asking--;
+          check();
+          return stream;
+        },
+        (error: unknown) => {
+          asking--;
+          check();
+          throw error;
+        },
+      );
+    } as typeof native;
+  }
+  const Peer = window.RTCPeerConnection;
+  if (Peer) {
+    // A proxy, not a subclass: instanceof, the prototype and the static methods stay the page's own.
+    window.RTCPeerConnection = new Proxy(Peer, {
+      construct(target, args, newTarget) {
+        const peer = Reflect.construct(target, args, newTarget) as RTCPeerConnection;
+        peers.add(peer);
+        peer.addEventListener('connectionstatechange', check);
+        return peer;
+      },
+    });
+  }
+  setInterval(check, everyMs);
+}
+
+contextBridge.executeInMainWorld({ func: watchCalls, args: [(busy: boolean) => ipcRenderer.send(Channel.pageBusy, busy), 2000] });
 
 reportBottomEdge();

@@ -3,10 +3,11 @@ import { join } from 'node:path';
 import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
 import { moveService, successor, visibleServices } from '../shared/dock-order.ts';
-import { SERVICES, canHibernate, findService, partitionFor } from '../shared/services.ts';
+import { SERVICES, canHibernate, defaultAwayMode, findService, partitionFor, type AwayMode } from '../shared/services.ts';
 import { totalUnread, unreadLabel, windowTitle } from '../shared/unread.ts';
 import { markPng } from './app-icon.ts';
 import { DEFAULT_SIZE, MIN_SIZE, fitToDisplays, loadAppState, saveAppState, type AppState } from './app-state.ts';
+import { keepAway } from './away.ts';
 import { layoutBar } from './bar.ts';
 import { REVEAL_TIMING, initialReveal, onScreen, raised, stepReveal, type RevealEvent, type RevealPhase, type RevealState } from './dock-reveal.ts';
 import { forwardNotifications } from './notifications.ts';
@@ -31,6 +32,10 @@ const APP_NAME = 'Kainos Talk';
 const PHONE_NAME_MAX = 60;
 /** Height of the strip over a tab with a call on (call-strip.css fills it). */
 const CALL_STRIP_HEIGHT = 40;
+/** How long a page in the background stays drawn before it sleeps; the smoke test shortens it. */
+const SLEEP_AFTER_MS = Number(process.env.KAINOS_SLEEP_AFTER_MS) || 60_000;
+/** How long a page set to hibernate stays in the background before its page closes. */
+const HIBERNATE_AFTER_MS = Number(process.env.KAINOS_HIBERNATE_AFTER_MS) || 10 * 60_000;
 
 app.setName(APP_NAME);
 if (process.env.KAINOS_USER_DATA) app.setPath('userData', process.env.KAINOS_USER_DATA);
@@ -291,6 +296,23 @@ async function start(): Promise<void> {
     runtimes.find((runtime) => runtime.view()?.webContents === contents || runtime.call()?.webContents === contents);
   runtimesReady = true;
 
+  /** What the service does in the background: the user's pick in its menu, else its own default. */
+  const awayMode = (runtime: ServiceRuntime): AwayMode => state.awayModes[runtime.service.id] ?? defaultAwayMode(runtime.service);
+  const windowShown = () => win.isVisible() && !win.isMinimized();
+  const away = keepAway({
+    pages: () => runtimes,
+    mode: awayMode,
+    inSight: (runtime) => runtime.service.id === state.activeServiceId && windowShown(),
+    mayHibernate: ({ service }) => canHibernate(service) && isOn(service.id) && service.id !== state.activeServiceId && !state.hiddenServiceIds.includes(service.id),
+    hibernate: ({ service }) => hibernate(service.id),
+    sleepAfterMs: SLEEP_AFTER_MS,
+    hibernateAfterMs: HIBERNATE_AFTER_MS,
+  });
+  win.on('show', away.update);
+  win.on('hide', away.update);
+  win.on('minimize', away.update);
+  win.on('restore', away.update);
+
   /** A link leaving a service: a service that claims its host (Streamroom's invites) opens it, else the browser. */
   function openLink(url: string): void {
     const claimer = claimingService(runtimes.filter((runtime) => isOn(runtime.service.id)).map((runtime) => runtime.service), url);
@@ -465,6 +487,7 @@ async function start(): Promise<void> {
     tray?.setImage(label ? icons.lamp : icons.plain);
     tray?.setToolTip(label ? `${APP_NAME}: ${label === '•' ? 'new' : label} unread` : APP_NAME);
     dockContents.send(Channel.snapshot, snapshot());
+    away.update();
   }
 
   let saveTimer: NodeJS.Timeout | undefined;
@@ -536,6 +559,23 @@ async function start(): Promise<void> {
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+  }
+
+  function setAwayMode(serviceId: string, mode: AwayMode): void {
+    updateState({ awayModes: { ...state.awayModes, [serviceId]: mode } }, 0);
+    render();
+  }
+
+  /** A website's In the background submenu: keep it running, let it sleep, or let it hibernate. */
+  function awayMenu(runtime: ServiceRuntime): MenuItemConstructorOptions[] {
+    const current = awayMode(runtime);
+    const minutes = Math.round(HIBERNATE_AFTER_MS / 60_000);
+    const choice = (mode: AwayMode, label: string): MenuItemConstructorOptions => ({ label, type: 'radio', checked: mode === current, click: () => setAwayMode(runtime.service.id, mode) });
+    return [
+      choice('run', 'Keep running'),
+      choice('sleep', 'Sleep, still notifying'),
+      choice('hibernate', minutes >= 1 ? `Hibernate after ${minutes} minute${minutes === 1 ? '' : 's'}` : `Hibernate after ${Math.round(HIBERNATE_AFTER_MS / 1000)} seconds`),
+    ];
   }
 
   function setMuted(serviceId: string, muted: boolean): void {
@@ -736,6 +776,7 @@ async function start(): Promise<void> {
             click: () => runtime.reload(),
           },
       ...(canHibernate(runtime.service) && !asleep ? [{ label: 'Hibernate', click: () => hibernate(id) }] : []),
+      ...(canHibernate(runtime.service) ? [{ label: 'In the background', submenu: awayMenu(runtime) }] : []),
       { label: muted ? 'Unmute notifications' : 'Mute notifications', click: () => setMuted(id, !muted) },
       ...(id === STREAMROOM_ID ? [{ label: 'Server', submenu: serverMenu() }] : []),
       { type: 'separator' },

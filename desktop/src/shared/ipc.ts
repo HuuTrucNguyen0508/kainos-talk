@@ -12,6 +12,8 @@ export const Channel = {
   notificationClick: 'kainos:notification-click',
   /** Service preload to main: what the page's own unread counter says. */
   unreadCounter: 'kainos:unread-counter',
+  /** Service preload to main: whether the page has a call, a capture or a peer connection going (boolean). */
+  pageBusy: 'kainos:page-busy',
   /** Main to the dock: put keyboard focus on the active service's tab. */
   focusDock: 'kainos:focus-dock',
   /** Dock to main: open the dock options menu. */

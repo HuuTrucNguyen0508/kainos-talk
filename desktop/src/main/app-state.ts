@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { normalizeHidden, normalizeOrder, visibleServices } from '../shared/dock-order.ts';
 import { DEFAULT_SERVERS, parseServers, type StreamroomServers } from '../shared/streamroom.ts';
+import { isAwayMode, type AwayMode } from '../shared/services.ts';
 import { parseThemeChoice, type ThemeChoice } from '../shared/theme.ts';
 
 export interface Rect {
@@ -28,6 +29,8 @@ export interface AppState {
   readonly hiddenServiceIds: readonly string[];
   /** Services whose page is closed to save memory until their tab is opened. Never the active one. */
   readonly hibernatedServiceIds: readonly string[];
+  /** What a website does in the background, where the user picked it; the others keep their default. */
+  readonly awayModes: Readonly<Partial<Record<string, AwayMode>>>;
   /** The Streamroom server the tab uses, and the addresses added to its menu. */
   readonly streamroom: StreamroomServers;
   /**
@@ -66,6 +69,7 @@ export function defaultState(serviceIds: readonly string[], rules: StateRules = 
     serviceOrder: [...serviceIds],
     hiddenServiceIds: [],
     hibernatedServiceIds: normalizeHibernated(rules.startHibernated, serviceIds, rules, activeServiceId),
+    awayModes: {},
     streamroom: DEFAULT_SERVERS,
     enabledServiceIds: [],
     welcomed: false,
@@ -77,6 +81,15 @@ function normalizeHibernated(stored: unknown, serviceIds: readonly string[], rul
   if (!Array.isArray(stored)) return [];
   const sleepless = rules.sleepless ?? [];
   return [...new Set(stored.filter((id): id is string => typeof id === 'string' && serviceIds.includes(id) && !sleepless.includes(id) && id !== activeServiceId))];
+}
+
+/** Picks of known services that may hibernate (websites), with a mode that exists. */
+function normalizeAwayModes(stored: unknown, serviceIds: readonly string[], rules: StateRules): Partial<Record<string, AwayMode>> {
+  if (!isRecord(stored)) return {};
+  const sleepless = rules.sleepless ?? [];
+  const picks: Partial<Record<string, AwayMode>> = {};
+  for (const [id, mode] of Object.entries(stored)) if (serviceIds.includes(id) && !sleepless.includes(id) && isAwayMode(mode)) picks[id] = mode;
+  return picks;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -126,6 +139,7 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
     serviceOrder,
     hiddenServiceIds,
     hibernatedServiceIds: normalizeHibernated([...savedHibernated, ...newcomers], serviceIds, rules, activeServiceId),
+    awayModes: normalizeAwayModes(raw.awayModes, serviceIds, rules),
     streamroom: isRecord(raw.streamroom) ? parseServers(raw.streamroom) : DEFAULT_SERVERS,
     enabledServiceIds,
     // A state saved before the welcome existed belongs to someone who already set Kainos up.

@@ -3,7 +3,8 @@
 Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger, Streamroom and Gmail in one window, plus a
 Texts page for the phone's SMS and RCS, each switched on or off on Choose your apps. A dock that slides up from the bottom of the window switches between them; each
 service runs in its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
-The websites that are on load at startup and stay loaded, so they keep notifying, unless you hibernate one;
+The websites that are on load at startup. In the background they sleep and keep notifying, or
+hibernate after a while, as each one's **In the background** choice says (see **In the background**);
 Streamroom starts hibernated, and opens the Streamroom server picked in its menu.
 
 ## Commands
@@ -52,6 +53,7 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `src/main/mdns.ts` | Announces the sync server: Avahi over D-Bus, or an in-app responder; LAN interfaces only. |
 | `test/fake-phone.ts` | A protocol-speaking stand-in for the phone, used by the unit and smoke tests. |
 | `src/main/service-runtime.ts` | One service view: session, user agent, permissions, navigation rules, load status. |
+| `src/main/away.ts` | In the background: when a page out of sight sleeps, and when one set to hibernate closes. |
 | `src/main/navigation.ts` | Which links stay in a service, open as a popup, open in a service that claims them (Streamroom), or go to the system browser. |
 | `src/shared/streamroom.ts` | Streamroom's servers: reading an address, the saved choice, and the service pointed at it. |
 | `src/main/apps-page.ts` | Choose your apps (`src/renderer/apps.ts`, `src/preload/apps.ts`): every service with a switch. |
@@ -95,7 +97,7 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   phone sends, lets you reply or start a new text, and raises a desktop notification for each new
   text (mute it from its menu like any service). Its id stays `inbox`, because that names its
   login partition and the saved state. The websites load at startup and raise their own
-  notifications until you hibernate one (see **Hibernate**). The window title and the tray lamp count every service. The phone app
+  notifications unless they hibernate (see **Hibernate** and **In the background**). The window title and the tray lamp count every service. The phone app
   only syncs texts; `docs/pc-inbox-plan.md` records the earlier plan that mirrored every app and
   slept the websites, which was dropped.
 - **The dock** hides until it is wanted, then slides up over the bottom of the page; the page never
@@ -138,6 +140,24 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   tab next to it opens, preferring one that is awake; hiding a tab does the same. Hibernating
   services are kept with the window state. The service opened at launch is always awake, and
   Texts cannot hibernate (its texts live in the app itself, not in a page).
+- **In the background**, in a website's menu, says what the site does while it is out of sight
+  (another tab is open, or the window is hidden or minimised). Each choice is kept with the window
+  state.
+  - **Keep running** keeps drawing the page as if it were on screen.
+  - **Sleep, still notifying** stops drawing it and slows its timers to once a second, as a browser
+    does with a background tab. Its connection stays open, so messages, notifications and the
+    unread count still arrive at once. It is the default for WhatsApp, Discord, Messenger and
+    Gmail, and Texts always does it.
+  - **Hibernate after 10 minutes** sleeps it, then hibernates it after 10 minutes out of sight,
+    as **Hibernate** does: no notifications until its tab is opened again. It is the default for
+    Proton Mail and Streamroom. A page that is in a call, sharing the screen, using the
+    microphone or camera, playing sound or showing a popup is left alone, and tried again 10
+    minutes later. The open tab never hibernates, and neither does a tab hidden from the dock.
+
+  A page sleeps a minute after it leaves the screen, so switching back and forth costs nothing,
+  and is drawn again the moment it is back. A page that has not finished loading does not sleep
+  yet, and one in a call (the same list as above) stays fully awake until the call ends. The open
+  tab sleeps too while the window is hidden or minimised.
 - **Streamroom** is the [Streamroom](https://github.com/HuuTrucNguyen0508/streamroom) project's
   rooms for screen sharing and voice. Kainos holds no Streamroom server of its own: **Server**, in
   the tab's menu, picks which one the tab opens.
@@ -241,7 +261,8 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   Sign out.
 - **Saved state** lives in `kainos-state.json` in Electron's userData folder: window bounds,
   maximised, last active service, muted services, whether the dock is always shown, the theme,
-  the dock's service order and hidden services, the hibernating services, Streamroom's
+  the dock's service order and hidden services, the hibernating services, each website's
+  **In the background** choice, Streamroom's
   server, added addresses and this PC's port, the apps switched on, and whether they have been
   chosen.
 - **Close** hides the window to the tray when a tray is running. On Linux that means a
@@ -259,7 +280,7 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
     back. Left and right arrows move between the tabs, Alt+Left and Alt+Right move the focused
     tab (its new place is announced to screen readers); Escape goes back to the page.
   - On a dock tab, the Menu key or Shift+F10 opens the service menu (Reload or Wake, Hibernate,
-    Mute, Server for Streamroom, Move left, Move right, Hide from dock, Sign out) at the tab.
+    In the background, Mute, Server for Streamroom, Move left, Move right, Hide from dock, Sign out) at the tab.
 
 ## After you sign in
 

@@ -29,6 +29,19 @@ export interface ServiceRuntime {
   restart(): void;
   /** Does nothing while hibernating. `ignoreCache` fetches every file again (a hard reload). */
   reload(ignoreCache?: boolean): void;
+  /**
+   * Stops drawing the page and slows its timers, as a browser does with a background tab, or
+   * brings it back. Its connections stay open, so messages and notifications keep arriving. Only
+   * for a page out of sight: one on screen must be awake. A new page (wake, sign-in) starts awake.
+   */
+  setAsleep(asleep: boolean): void;
+  asleep(): boolean;
+  /**
+   * Whether the page must stay fully awake, since sleeping or closing it would cut something off:
+   * a call, a popup, sound playing, or a camera, microphone, screen share or peer connection
+   * going. Its changes come through `onChange`.
+   */
+  busy(): boolean;
   /** Closes the page and its popups, ending its renderer process; the login stays. */
   hibernate(): void;
   /** A new page on the start page. Does nothing unless hibernating. */
@@ -105,6 +118,9 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
   let counter: CounterReading | undefined;
   let unread: Unread = NO_UNREAD;
   let fullscreen = false;
+  /** What the page's preload last said about its calls and captures. */
+  let pageBusy = false;
+  let asleep = false;
   /** Recomputes the unread count; a page that is not running has none. */
   const refreshUnread = () => {
     const next = status.kind === 'failed' || status.kind === 'hibernated' ? NO_UNREAD : unreadFromPage(titleUnread, counter);
@@ -134,8 +150,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     contextIsolation: true,
     sandbox: true,
     nodeIntegration: false,
-    // Hidden services must keep their connections alive so notifications keep arriving, and a
-    // call keeps going while another tab is open.
+    // A page starts drawing and running as if on screen; main puts it to sleep (setAsleep) in
+    // the background. A call never sleeps.
     backgroundThrottling: false,
     spellcheck: true,
   });
@@ -162,6 +178,19 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       if (!live()) return;
       titleUnread = service.unread(title);
       if (refreshUnread()) options.onChange();
+    });
+    contents.ipc.on(Channel.pageBusy, (_event, busy: unknown) => {
+      if (!live() || pageBusy === (busy === true)) return;
+      pageBusy = busy === true;
+      options.onChange();
+    });
+    // The page in the window now is another document, whose preload starts idle. A navigation
+    // that was cancelled (a link sent to the browser) leaves the old document and its calls.
+    contents.on('did-navigate', () => {
+      if (live()) pageBusy = false;
+    });
+    contents.on('audio-state-changed', () => {
+      if (live()) options.onChange();
     });
     contents.ipc.on(Channel.unreadCounter, (_event, raw: unknown) => {
       if (!live()) return;
@@ -219,7 +248,11 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     });
     contents.on('did-create-window', (popup: BrowserWindow) => {
       popups.add(popup);
-      popup.once('closed', () => popups.delete(popup));
+      options.onChange();
+      popup.once('closed', () => {
+        popups.delete(popup);
+        options.onChange();
+      });
       popup.setMenu(null);
       const popupContents = popup.webContents;
       const showHost = (title = popupContents.getTitle()) => popup.setTitle(popupTitle(popupContents.getURL(), title));
@@ -316,6 +349,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       return;
     }
     view = createView();
+    asleep = false;
+    pageBusy = false;
     options.onViewCreated(view);
     load(url);
   };
@@ -335,6 +370,13 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     },
     status: () => status,
     unread: () => unread,
+    setAsleep(next) {
+      if (next === asleep || !view) return;
+      asleep = next;
+      view.webContents.setBackgroundThrottling(next);
+    },
+    asleep: () => asleep,
+    busy: () => call !== undefined || popups.size > 0 || pageBusy || view?.webContents.isCurrentlyAudible() === true,
     fullscreen: () => fullscreen,
     restart,
     reload: (ignoreCache = false) => {
@@ -353,6 +395,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       // Closing the page ends its renderer process, which is where nearly all its memory is.
       if (!closing.webContents.isDestroyed()) closing.webContents.close({ waitForBeforeUnload: false });
       status = { kind: 'hibernated' };
+      asleep = false;
+      pageBusy = false;
       titleUnread = NO_UNREAD;
       counter = undefined;
       fullscreen = false;

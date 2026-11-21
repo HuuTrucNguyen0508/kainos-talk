@@ -22,6 +22,7 @@ test('round-trips through the state file', () => {
       serviceOrder: ['whatsapp', 'proton-mail', 'discord'],
       hiddenServiceIds: ['discord'],
       hibernatedServiceIds: ['proton-mail'],
+      awayModes: { whatsapp: 'sleep', 'proton-mail': 'run' },
       streamroom: { current: 'https://rooms.example.org', saved: ['https://rooms.example.org', 'http://localhost:8090'], localPort: 8081 },
       enabledServiceIds: ['proton-mail', 'whatsapp'],
       welcomed: true,
@@ -67,6 +68,7 @@ test('a missing or broken file gives defaults', () => {
       serviceOrder: ids,
       hiddenServiceIds: [],
       hibernatedServiceIds: [],
+      awayModes: {},
       streamroom: DEFAULT_SERVERS,
       enabledServiceIds: [],
       welcomed: false,
@@ -100,6 +102,7 @@ test('drops unknown services and bad fields one by one', () => {
     serviceOrder: ids,
     hiddenServiceIds: [],
     hibernatedServiceIds: [],
+    awayModes: {},
     streamroom: DEFAULT_SERVERS,
     enabledServiceIds: ids,
     welcomed: true,
@@ -135,19 +138,19 @@ test('a state file from before the websites stayed awake still loads, and drops 
 test('a state file from the side bar still loads bounds, active service and muting, and drops the side and auto-hide', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true }, ids);
-  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
+  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
 });
 
 test('a state file from the aligned dock still loads bounds, active service and muting, drops the alignment and hides the dock', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlign: 'end' }, ids);
-  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
 });
 
 test('a state file from before themes still loads everything else and matches the system', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true }, ids);
-  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
 });
 
 test('keeps each named theme, and anything else matches the system', () => {
@@ -168,6 +171,7 @@ test('a state file from before the dock could be rearranged still loads everythi
     serviceOrder: ids,
     hiddenServiceIds: [],
     hibernatedServiceIds: [],
+    awayModes: {},
     streamroom: DEFAULT_SERVERS,
     enabledServiceIds: ids,
     welcomed: true,
@@ -198,4 +202,11 @@ test('a service that starts hibernated does so the first time the state knows it
   assert.deepEqual(parseAppState({ serviceOrder: ['proton-mail', 'discord'] }, ids, rules).hibernatedServiceIds, ['whatsapp'], 'added in a later version');
   assert.deepEqual(parseAppState({ serviceOrder: ids, hibernatedServiceIds: [] }, ids, rules).hibernatedServiceIds, [], 'woken by the user before');
   assert.deepEqual(parseAppState({ activeServiceId: 'whatsapp', serviceOrder: ['whatsapp'] }, ids, rules).hibernatedServiceIds, [], 'unless it is the one opened');
+});
+
+test('background picks are kept for known websites with a real mode, and only those', () => {
+  const state = parseAppState({ awayModes: { whatsapp: 'sleep', discord: 'hibernate', 'proton-mail': 'run', icq: 'run' } }, ids, rules);
+  assert.deepEqual(state.awayModes, { whatsapp: 'sleep', discord: 'hibernate' }, "Proton never hibernates here, so it has no pick; ICQ is gone");
+  assert.deepEqual(parseAppState({ awayModes: { whatsapp: 'nap', discord: 3 } }, ids).awayModes, {});
+  assert.deepEqual(parseAppState({ awayModes: ['whatsapp'] }, ids).awayModes, {});
 });

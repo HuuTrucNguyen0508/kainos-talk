@@ -184,11 +184,17 @@ let bus: PrivateBus | undefined;
 /** KAINOS_SMOKE_APP runs a packaged build (release/linux-unpacked/kainos-talk) instead of this checkout. */
 const packaged = process.env.KAINOS_SMOKE_APP;
 
-function launch(profile: string): Promise<ElectronApplication> {
+/**
+ * `env` adds to or overrides the app's environment, `args` adds Chromium switches. Pages hibernate
+ * after an hour unless `env` says otherwise, so no check finds a page closed by the clock.
+ */
+function launch(profile: string, extra: { env?: Record<string, string>; args?: string[] } = {}): Promise<ElectronApplication> {
   return _electron.launch({
     executablePath: packaged ?? electronPath,
-    args: ['--ozone-platform=headless', '--ozone-override-screen-size=1400,900', '--disable-gpu', '--mute-audio', ...(packaged ? [] : [desktop])],
+    args: ['--ozone-platform=headless', '--ozone-override-screen-size=1400,900', '--disable-gpu', '--mute-audio', ...(extra.args ?? []), ...(packaged ? [] : [desktop])],
     env: offDesktop({
+      KAINOS_HIBERNATE_AFTER_MS: String(60 * 60_000),
+      ...extra.env,
       KAINOS_USER_DATA: profile,
       KAINOS_BLOCK_EXTERNAL: '1',
       KAINOS_SYNC_PORT: String(syncPort),
@@ -577,6 +583,11 @@ let pcRoom = '';
 async function main(): Promise<void> {
   mkdirSync(verify, { recursive: true });
   bus = await privateBus();
+  // KAINOS_SMOKE_ONLY=background runs just the background section, which takes about a minute.
+  if (process.env.KAINOS_SMOKE_ONLY === 'background') {
+    await withBackgroundProfile();
+    return;
+  }
   const servers: Server[] = [];
   const profile = mkdtempSync(join(tmpdir(), 'kainos-smoke-'));
   try {
@@ -593,6 +604,113 @@ async function main(): Promise<void> {
     await welcome(fresh);
   } finally {
     rmSync(fresh, { recursive: true, force: true });
+  }
+  await withBackgroundProfile();
+}
+
+/** The background section, on a profile and a Streamroom stand-in of its own. */
+async function withBackgroundProfile(): Promise<void> {
+  const quiet = mkdtempSync(join(tmpdir(), 'kainos-smoke-background-'));
+  const roomServers: Server[] = [];
+  try {
+    room = await standInRoom('Streamroom stand-in', roomServers);
+    await background(quiet);
+  } finally {
+    for (const server of roomServers) server.close();
+    rmSync(quiet, { recursive: true, force: true });
+  }
+}
+
+/** Background timings for the background section: seconds instead of a minute and ten minutes. */
+const SLEEP_AFTER = 1500;
+const HIBERNATE_AFTER = 8000;
+
+/**
+ * Services in the background, on short timers: a page out of sight sleeps and still counts
+ * unread messages; Proton Mail and Streamroom hibernate by themselves,
+ * Streamroom only once its call has ended; Keep running keeps a page drawn; a hidden window puts
+ * even the open tab to sleep.
+ */
+async function background(profile: string): Promise<void> {
+  const stateFile = join(profile, 'kainos-state.json');
+  const saved = () => JSON.parse(readFileSync(stateFile, 'utf8')) as { hibernatedServiceIds?: string[]; awayModes?: Record<string, string> };
+  writeFileSync(stateFile, JSON.stringify({ activeServiceId: 'whatsapp', streamroom: { current: room } }));
+  bus!.setTrayHost(true);
+  const app = await launch(profile, {
+    env: { KAINOS_SLEEP_AFTER_MS: String(SLEEP_AFTER), KAINOS_HIBERNATE_AFTER_MS: String(HIBERNATE_AFTER) },
+    // A made-up microphone, so Streamroom can hold one open as a call would.
+    args: ['--use-fake-device-for-media-stream'],
+  });
+  /** Runs JavaScript in a service's page, found by its login partition (a hibernated service has none). */
+  const inPage = <T>(id: ServiceId, code: string, gesture = false) =>
+    app.evaluate(
+      ({ webContents, session }, { id, code, gesture }) => {
+        const ses = session.fromPartition(`persist:service-${id}`);
+        const contents = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.session === ses && !c.getURL().startsWith('devtools:'));
+        return contents ? contents.executeJavaScript(code, gesture) : 'no page';
+      },
+      { id, code, gesture },
+    ) as Promise<T | 'no page'>;
+  /**
+   * Whether the service's page is asleep (background throttling on), asked of Electron. The page
+   * itself cannot tell here: Playwright keeps every page it drives visible and at full speed.
+   * Outside Playwright a page asleep this way reads as hidden, with no animation frames and its
+   * timers at once a second, and still gets pushed messages at once.
+   */
+  const seen = (id: ServiceId) =>
+    app.evaluate(({ webContents, session }, id) => {
+      const ses = session.fromPartition(`persist:service-${id}`);
+      const contents = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.session === ses);
+      return contents ? (contents.getBackgroundThrottling() ? 'hidden' : 'visible') : 'no page';
+    }, id);
+  const win = (code: 'hide' | 'show') => app.evaluate(({ BaseWindow }, code) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)![code](), code);
+  try {
+    const page = await dockPage(app);
+    await stubMenusAndDialogs(app);
+    for (const id of AWAKE_IDS) await poll(() => status(page, id), (value) => value !== 'loading', 90_000);
+    check((await seen('whatsapp')) === 'visible', 'the open tab (WhatsApp) is drawn', await seen('whatsapp'));
+    const asleep = await poll(() => seen('discord'), (v) => v === 'hidden', SLEEP_AFTER + 5000);
+    check(asleep === 'hidden' && (await status(page, 'discord')) === 'ready', 'Discord in the background goes to sleep, and its tab stays awake', `${asleep}, ${await status(page, 'discord')}`);
+    await inPage('discord', `document.title = '(4) Discord'; 0`);
+    const counted = await poll(() => tabState(page, 'discord'), (v) => v.endsWith(':4'), 5000);
+    check(counted.endsWith(':4'), '... and still reports unread messages while asleep', counted);
+    check((await seen('messenger')) === 'hidden', 'Messenger sleeps too (sleep is the default)', await seen('messenger'));
+
+    const protonGone = await poll(() => status(page, 'proton-mail'), (v) => v === 'hibernated', HIBERNATE_AFTER + 10_000);
+    check(protonGone === 'hibernated' && (await tabState(page, 'proton-mail')) === 'asleep:', 'Proton Mail hibernates by itself after its time in the background, with a moon on its tab', `${protonGone} ${await tabState(page, 'proton-mail')}`);
+    check((await inPage('proton-mail', '1')) === 'no page', '... its page closed', String(await inPage('proton-mail', '1')));
+    check(saved().hibernatedServiceIds?.includes('proton-mail') === true, '... and saved as hibernating', JSON.stringify(saved().hibernatedServiceIds));
+    check((await status(page, 'whatsapp')) === 'ready' && (await status(page, 'discord')) === 'ready', '... while WhatsApp and Discord, set to sleep, stay running');
+
+    // The In the background submenu: Keep running wakes Discord and keeps it drawn out of sight.
+    await tab(page, 'discord').click({ button: 'right' });
+    await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Discord', 5000);
+    const choices = await submenuLabels(app, 'In the background');
+    check(JSON.stringify(choices) === '["Keep running","*Sleep, still notifying","Hibernate after 8 seconds"]', "a website's menu has In the background, with its mode ticked", JSON.stringify(choices));
+    await clickMenuItem(app, 'In the background > Keep running');
+    check((await poll(() => seen('discord'), (v) => v === 'visible', 3000)) === 'visible', 'Keep running wakes Discord and keeps it drawn in the background', await seen('discord'));
+    await sleep(SLEEP_AFTER + 1000);
+    check((await seen('discord')) === 'visible' && saved().awayModes?.discord === 'run', '... for good, and the pick is saved', JSON.stringify(saved().awayModes));
+
+    // Streamroom set to hibernate holds a microphone open (a call): it waits until the call ends.
+    await tab(page, 'streamroom').click();
+    check((await poll(() => status(page, 'streamroom'), (v) => v === 'ready', 60_000)) === 'ready', 'opening Streamroom wakes it');
+    const mic = await inPage<string>('streamroom', `navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => { window.__call = s; return s.getAudioTracks()[0].readyState; }, (e) => e.name)`, true);
+    check(mic === 'live', '... where a page can open the microphone', mic);
+    await tab(page, 'whatsapp').click();
+    await sleep(HIBERNATE_AFTER + 4000);
+    check((await status(page, 'streamroom')) === 'ready' && (await seen('streamroom')) === 'visible', 'Streamroom in a call stays awake past its time in the background, and is not even put to sleep', `${await status(page, 'streamroom')}, ${await seen('streamroom')}`);
+    await inPage('streamroom', `window.__call.getTracks().forEach((t) => t.stop()); 0`);
+    const ended = await poll(() => status(page, 'streamroom'), (v) => v === 'hibernated', HIBERNATE_AFTER * 2 + 5000);
+    check(ended === 'hibernated', '... and hibernates once the call has ended', String(ended));
+
+    // A hidden window: even the open tab sleeps, and wakes when the window comes back.
+    await win('hide');
+    check((await poll(() => seen('whatsapp'), (v) => v === 'hidden', SLEEP_AFTER + 5000)) === 'hidden', 'with the window hidden, the open tab sleeps too', await seen('whatsapp'));
+    await win('show');
+    check((await poll(() => seen('whatsapp'), (v) => v === 'visible', 3000)) === 'visible', '... and is drawn again as soon as the window is shown', await seen('whatsapp'));
+  } finally {
+    await shutdown(app);
   }
 }
 
@@ -1383,7 +1501,7 @@ async function run(profile: string): Promise<void> {
     const byMouse = (await poll(() => menus(app), (all) => all.length > 0, 5000)).at(-1);
     check(byMouse !== undefined && byMouse.x === undefined && byMouse.labels[0] === 'Reload Discord', 'a right-click opens the Discord menu at the pointer', JSON.stringify(byMouse));
     check(
-      JSON.stringify(byMouse?.labels.filter(Boolean)) === '["Reload Discord","Hibernate","Unmute notifications","Move left","Move right","Hide from dock","Sign out of Discord…"]',
+      JSON.stringify(byMouse?.labels.filter(Boolean)) === '["Reload Discord","Hibernate","In the background","Unmute notifications","Move left","Move right","Hide from dock","Sign out of Discord…"]',
       "a website's menu offers Reload, Hibernate, mute, moving and hiding its tab, and Sign out",
       JSON.stringify(byMouse?.labels),
     );
@@ -1662,7 +1780,7 @@ async function run(profile: string): Promise<void> {
 
       check(await openMenu('Reload Streamroom'), "Streamroom's menu opens");
       check(
-        JSON.stringify(await menuItems(app)) === '["Reload Streamroom","Hibernate","Mute notifications","Server","Move left","(Move right)","Hide from dock","Sign out of Streamroom…"]',
+        JSON.stringify(await menuItems(app)) === '["Reload Streamroom","Hibernate","In the background","Mute notifications","Server","Move left","(Move right)","Hide from dock","Sign out of Streamroom…"]',
         "an awake website's menu offers Hibernate",
         JSON.stringify(await menuItems(app)),
       );
@@ -1929,7 +2047,7 @@ async function run(profile: string): Promise<void> {
       // Move left and right from the tab's menu.
       await tab(page, 'discord').click({ button: 'right' });
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Discord', 5000);
-      check(JSON.stringify(await menuItems(app)) === '["Reload Discord","Hibernate","Unmute notifications","Move left","Move right","Hide from dock","Sign out of Discord…"]', "Discord's menu has Hibernate, Move left, Move right and Hide from dock", JSON.stringify(await menuItems(app)));
+      check(JSON.stringify(await menuItems(app)) === '["Reload Discord","Hibernate","In the background","Unmute notifications","Move left","Move right","Hide from dock","Sign out of Discord…"]', "Discord's menu has Hibernate, Move left, Move right and Hide from dock", JSON.stringify(await menuItems(app)));
       await clickMenuItem(app, 'Move left');
       check((await poll(() => tabOrder(page), (o) => o === 'inbox proton-mail discord whatsapp messenger streamroom', 3000)) === 'inbox proton-mail discord whatsapp messenger streamroom', 'Move left moves Discord one place left', await tabOrder(page));
       await tab(page, 'discord').click({ button: 'right' });
