@@ -170,13 +170,27 @@ try {
   const restored = await until(awake);
   check(awake(restored), '... and is drawn again when the window comes back', show(restored));
 
-  // Another window over the whole of Kainos Talk. Windows tells Chromium the window is covered;
-  // Linux compositors do not, so there it is only reported.
-  await inMain(`const b = win.getBounds(); globalThis.__cover = new BaseWindow({ ...b, x: b.x - 20, y: b.y - 20, width: b.width + 40, height: b.height + 40, frame: false, alwaysOnTop: true, backgroundColor: '#202020' }); globalThis.__cover.show(); return 0;`);
-  const covered = await until(asleep);
-  if (process.platform === 'win32') check(asleep(covered), 'the window covered by another, the open tab sleeps', show(covered));
-  else console.log(`INFO  the window covered by another: ${show(covered)} (only Windows and macOS report covered windows)`);
-  await inMain('globalThis.__cover.close(); win.focus(); return 0;');
+  // Another app's window over the whole screen, as a browser or a game would be. Windows tells
+  // Chromium the window is covered (unless the session is a remote one); Linux compositors do
+  // not, so there it is only reported.
+  if (process.platform === 'win32') {
+    const ps = (script: string) => spawn('powershell', ['-NoProfile', '-Command', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const session = ps('Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SystemInformation]::TerminalServerSession');
+    let remote = '';
+    session.stdout.on('data', (chunk) => (remote += String(chunk)));
+    await new Promise((resolve) => session.once('exit', resolve));
+    console.log(`INFO  remote desktop session: ${remote.trim()}`);
+    const cover = ps('Add-Type -AssemblyName System.Windows.Forms; $f = New-Object Windows.Forms.Form; $f.TopMost = $true; $f.FormBorderStyle = "None"; $f.WindowState = "Maximized"; $f.BackColor = "Black"; [void]$f.ShowDialog()');
+    await sleep(3000);
+    const covered = await until(asleep);
+    check(asleep(covered), 'the window covered by another app, the open tab sleeps', show(covered));
+    cover.kill();
+  } else {
+    await inMain(`const b = win.getBounds(); globalThis.__cover = new BaseWindow({ ...b, frame: false, alwaysOnTop: true, backgroundColor: '#202020' }); globalThis.__cover.show(); return 0;`);
+    console.log(`INFO  the window covered by another: ${show(await measure())} (only Windows and macOS report covered windows)`);
+    await inMain('globalThis.__cover.close(); return 0;');
+  }
+  await inMain('win.focus(); return 0;');
   const uncovered = await until(awake);
   check(awake(uncovered), '... and is drawn again once uncovered', show(uncovered));
   main.close();
