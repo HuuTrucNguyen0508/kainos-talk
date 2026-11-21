@@ -30,12 +30,14 @@ export interface ServiceRuntime {
   /** Does nothing while hibernating. `ignoreCache` fetches every file again (a hard reload). */
   reload(ignoreCache?: boolean): void;
   /**
-   * Stops drawing the page and slows its timers, as a browser does with a background tab, or
-   * brings it back. Its connections stay open, so messages and notifications keep arriving. Only
-   * for a page out of sight: one on screen must be awake. A new page (wake, sign-in) starts awake.
+   * Lets the page sleep whenever it is out of sight, as a browser does with a background tab: its
+   * view hidden, or the window hidden, minimised or (on Windows and macOS) covered by others. A
+   * sleeping page draws nothing and its timers run once a second; its connections stay open, so
+   * messages and notifications keep arriving. In sight it is drawn as usual. Not allowed, it keeps
+   * drawing even out of sight. A new page (wake, sign-in) starts not allowed.
    */
-  setAsleep(asleep: boolean): void;
-  asleep(): boolean;
+  setSleepAllowed(allowed: boolean): void;
+  sleepAllowed(): boolean;
   /**
    * Whether the page must stay fully awake, since sleeping or closing it would cut something off:
    * a call, a popup, sound playing, or a camera, microphone, screen share or peer connection
@@ -120,7 +122,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
   let fullscreen = false;
   /** What the page's preload last said about its calls and captures. */
   let pageBusy = false;
-  let asleep = false;
+  /** Whether the page may sleep out of sight (background throttling on). */
+  let sleepOk = false;
   /** Recomputes the unread count; a page that is not running has none. */
   const refreshUnread = () => {
     const next = status.kind === 'failed' || status.kind === 'hibernated' ? NO_UNREAD : unreadFromPage(titleUnread, counter);
@@ -150,8 +153,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     contextIsolation: true,
     sandbox: true,
     nodeIntegration: false,
-    // A page starts drawing and running as if on screen; main puts it to sleep (setAsleep) in
-    // the background. A call never sleeps.
+    // A page starts drawing and running even out of sight; main lets it sleep (setSleepAllowed)
+    // once it has loaded. A call never sleeps.
     backgroundThrottling: false,
     spellcheck: true,
   });
@@ -349,7 +352,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       return;
     }
     view = createView();
-    asleep = false;
+    sleepOk = false;
     pageBusy = false;
     options.onViewCreated(view);
     load(url);
@@ -370,12 +373,12 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     },
     status: () => status,
     unread: () => unread,
-    setAsleep(next) {
-      if (next === asleep || !view) return;
-      asleep = next;
+    setSleepAllowed(next) {
+      if (next === sleepOk || !view) return;
+      sleepOk = next;
       view.webContents.setBackgroundThrottling(next);
     },
-    asleep: () => asleep,
+    sleepAllowed: () => sleepOk,
     busy: () => call !== undefined || popups.size > 0 || pageBusy || view?.webContents.isCurrentlyAudible() === true,
     fullscreen: () => fullscreen,
     restart,
@@ -395,7 +398,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       // Closing the page ends its renderer process, which is where nearly all its memory is.
       if (!closing.webContents.isDestroyed()) closing.webContents.close({ waitForBeforeUnload: false });
       status = { kind: 'hibernated' };
-      asleep = false;
+      sleepOk = false;
       pageBusy = false;
       titleUnread = NO_UNREAD;
       counter = undefined;

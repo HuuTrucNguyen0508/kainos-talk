@@ -628,8 +628,8 @@ const HIBERNATE_AFTER = 8000;
 /**
  * Services in the background, on short timers: a page out of sight sleeps and still counts
  * unread messages; Proton Mail and Streamroom hibernate by themselves,
- * Streamroom only once its call has ended; Keep running keeps a page drawn; a hidden window puts
- * even the open tab to sleep.
+ * Streamroom only once its call has ended; Keep running keeps a page drawn; the open tab may
+ * sleep at once, and a tab just left only after a while.
  */
 async function background(profile: string): Promise<void> {
   const stateFile = join(profile, 'kainos-state.json');
@@ -652,29 +652,29 @@ async function background(profile: string): Promise<void> {
       { id, code, gesture },
     ) as Promise<T | 'no page'>;
   /**
-   * Whether the service's page is asleep (background throttling on), asked of Electron. The page
-   * itself cannot tell here: Playwright keeps every page it drives visible and at full speed.
-   * Outside Playwright a page asleep this way reads as hidden, with no animation frames and its
-   * timers at once a second, and still gets pushed messages at once.
+   * Whether the service's page may sleep out of sight (background throttling on), asked of
+   * Electron. The page itself cannot tell here: Playwright keeps every page it drives visible and
+   * at full speed. Outside Playwright such a page out of sight reads as hidden, with no animation
+   * frames and its timers at once a second, and still gets pushed messages at once
+   * (scripts/sleep-check.ts checks that on the packaged app, on Windows too).
    */
   const seen = (id: ServiceId) =>
     app.evaluate(({ webContents, session }, id) => {
       const ses = session.fromPartition(`persist:service-${id}`);
       const contents = webContents.getAllWebContents().find((c) => !c.isDestroyed() && c.session === ses);
-      return contents ? (contents.getBackgroundThrottling() ? 'hidden' : 'visible') : 'no page';
+      return contents ? (contents.getBackgroundThrottling() ? 'may sleep' : 'drawn') : 'no page';
     }, id);
-  const win = (code: 'hide' | 'show') => app.evaluate(({ BaseWindow }, code) => BaseWindow.getAllWindows().find((w) => w.contentView.children.length > 0)![code](), code);
   try {
     const page = await dockPage(app);
     await stubMenusAndDialogs(app);
     for (const id of AWAKE_IDS) await poll(() => status(page, id), (value) => value !== 'loading', 90_000);
-    check((await seen('whatsapp')) === 'visible', 'the open tab (WhatsApp) is drawn', await seen('whatsapp'));
-    const asleep = await poll(() => seen('discord'), (v) => v === 'hidden', SLEEP_AFTER + 5000);
-    check(asleep === 'hidden' && (await status(page, 'discord')) === 'ready', 'Discord in the background goes to sleep, and its tab stays awake', `${asleep}, ${await status(page, 'discord')}`);
+    check((await seen('whatsapp')) === 'may sleep', 'the open tab (WhatsApp) may sleep at once, so a hidden, minimised or covered window stops drawing it', await seen('whatsapp'));
+    const asleep = await poll(() => seen('discord'), (v) => v === 'may sleep', SLEEP_AFTER + 5000);
+    check(asleep === 'may sleep' && (await status(page, 'discord')) === 'ready', 'Discord in the background goes to sleep, and its tab stays awake', `${asleep}, ${await status(page, 'discord')}`);
     await inPage('discord', `document.title = '(4) Discord'; 0`);
     const counted = await poll(() => tabState(page, 'discord'), (v) => v.endsWith(':4'), 5000);
     check(counted.endsWith(':4'), '... and still reports unread messages while asleep', counted);
-    check((await seen('messenger')) === 'hidden', 'Messenger sleeps too (sleep is the default)', await seen('messenger'));
+    check((await seen('messenger')) === 'may sleep', 'Messenger sleeps too (sleep is the default)', await seen('messenger'));
 
     const protonGone = await poll(() => status(page, 'proton-mail'), (v) => v === 'hibernated', HIBERNATE_AFTER + 10_000);
     check(protonGone === 'hibernated' && (await tabState(page, 'proton-mail')) === 'asleep:', 'Proton Mail hibernates by itself after its time in the background, with a moon on its tab', `${protonGone} ${await tabState(page, 'proton-mail')}`);
@@ -688,9 +688,9 @@ async function background(profile: string): Promise<void> {
     const choices = await submenuLabels(app, 'In the background');
     check(JSON.stringify(choices) === '["Keep running","*Sleep, still notifying","Hibernate after 8 seconds"]', "a website's menu has In the background, with its mode ticked", JSON.stringify(choices));
     await clickMenuItem(app, 'In the background > Keep running');
-    check((await poll(() => seen('discord'), (v) => v === 'visible', 3000)) === 'visible', 'Keep running wakes Discord and keeps it drawn in the background', await seen('discord'));
+    check((await poll(() => seen('discord'), (v) => v === 'drawn', 3000)) === 'drawn', 'Keep running wakes Discord and keeps it drawn in the background', await seen('discord'));
     await sleep(SLEEP_AFTER + 1000);
-    check((await seen('discord')) === 'visible' && saved().awayModes?.discord === 'run', '... for good, and the pick is saved', JSON.stringify(saved().awayModes));
+    check((await seen('discord')) === 'drawn' && saved().awayModes?.discord === 'run', '... for good, and the pick is saved', JSON.stringify(saved().awayModes));
 
     // Streamroom set to hibernate holds a microphone open (a call): it waits until the call ends.
     await tab(page, 'streamroom').click();
@@ -699,16 +699,16 @@ async function background(profile: string): Promise<void> {
     check(mic === 'live', '... where a page can open the microphone', mic);
     await tab(page, 'whatsapp').click();
     await sleep(HIBERNATE_AFTER + 4000);
-    check((await status(page, 'streamroom')) === 'ready' && (await seen('streamroom')) === 'visible', 'Streamroom in a call stays awake past its time in the background, and is not even put to sleep', `${await status(page, 'streamroom')}, ${await seen('streamroom')}`);
+    check((await status(page, 'streamroom')) === 'ready' && (await seen('streamroom')) === 'drawn', 'Streamroom in a call stays awake past its time in the background, and is not even put to sleep', `${await status(page, 'streamroom')}, ${await seen('streamroom')}`);
     await inPage('streamroom', `window.__call.getTracks().forEach((t) => t.stop()); 0`);
     const ended = await poll(() => status(page, 'streamroom'), (v) => v === 'hibernated', HIBERNATE_AFTER * 2 + 5000);
     check(ended === 'hibernated', '... and hibernates once the call has ended', String(ended));
 
-    // A hidden window: even the open tab sleeps, and wakes when the window comes back.
-    await win('hide');
-    check((await poll(() => seen('whatsapp'), (v) => v === 'hidden', SLEEP_AFTER + 5000)) === 'hidden', 'with the window hidden, the open tab sleeps too', await seen('whatsapp'));
-    await win('show');
-    check((await poll(() => seen('whatsapp'), (v) => v === 'visible', 3000)) === 'visible', '... and is drawn again as soon as the window is shown', await seen('whatsapp'));
+    // Opening a tab: the one it replaces stays drawn a while, in case it is opened again.
+    await tab(page, 'messenger').click();
+    check((await seen('whatsapp')) === 'drawn' && (await seen('messenger')) === 'may sleep', 'opening Messenger keeps WhatsApp, just left, drawn for a while', `${await seen('whatsapp')}, Messenger ${await seen('messenger')}`);
+    const left = await poll(() => seen('whatsapp'), (v) => v === 'may sleep', SLEEP_AFTER + 5000);
+    check(left === 'may sleep', '... then lets it sleep', left);
   } finally {
     await shutdown(app);
   }

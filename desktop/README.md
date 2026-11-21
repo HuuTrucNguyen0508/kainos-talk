@@ -154,10 +154,14 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
     microphone or camera, playing sound or showing a popup is left alone, and tried again 10
     minutes later. The open tab never hibernates, and neither does a tab hidden from the dock.
 
-  A page sleeps a minute after it leaves the screen, so switching back and forth costs nothing,
-  and is drawn again the moment it is back. A page that has not finished loading does not sleep
-  yet, and one in a call (the same list as above) stays fully awake until the call ends. The open
-  tab sleeps too while the window is hidden or minimised.
+  A tab that another replaces sleeps a minute later, so switching back and forth costs nothing,
+  and is drawn again the moment it is back. The open tab sleeps whenever its window is out of
+  sight: hidden to the tray, minimised, or, on Windows and macOS, covered by other windows (Linux
+  compositors do not tell apps that). A page that has not finished loading does not sleep yet,
+  and one in a call (the same list as above) stays fully awake until the call ends.
+  `node scripts/sleep-check.ts [app]` checks all this from inside a page on the running app (the
+  Windows workflow runs it on the packaged .exe); the smoke test cannot, since Playwright keeps
+  every page it drives visible.
 - **Streamroom** is the [Streamroom](https://github.com/HuuTrucNguyen0508/streamroom) project's
   rooms for screen sharing and voice. Kainos holds no Streamroom server of its own: **Server**, in
   the tab's menu, picks which one the tab opens.

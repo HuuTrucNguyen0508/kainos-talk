@@ -14,7 +14,8 @@ interface FakePage extends AwayPage {
   isBusy: boolean;
   loaded: boolean;
   hibernated: boolean;
-  sleeping: boolean;
+  /** Background throttling on: the system puts the page to sleep whenever it is out of sight. */
+  mayRest: boolean;
 }
 
 function page(id: string, mode: AwayMode): FakePage {
@@ -26,15 +27,15 @@ function page(id: string, mode: AwayMode): FakePage {
     isBusy: false,
     loaded: true,
     hibernated: false,
-    sleeping: false,
+    mayRest: false,
     status() {
       return this.hibernated ? { kind: 'hibernated' } : this.loaded ? { kind: 'ready' } : { kind: 'loading' };
     },
-    asleep() {
-      return this.sleeping;
+    sleepAllowed() {
+      return this.mayRest;
     },
-    setAsleep(asleep) {
-      if (!this.hibernated) this.sleeping = asleep;
+    setSleepAllowed(allowed) {
+      if (!this.hibernated) this.mayRest = allowed;
     },
     busy() {
       return this.isBusy;
@@ -42,81 +43,99 @@ function page(id: string, mode: AwayMode): FakePage {
   };
 }
 
-/** A window of pages run by keepAway on mocked timers; `windowShown` stands for the window being on screen. */
+/** Pages run by keepAway on mocked timers. */
 function setup(...pages: FakePage[]) {
-  const world = { windowShown: true };
   const away = keepAway({
     pages: () => pages,
     mode: (p) => p.mode,
-    inSight: (p) => p.open && world.windowShown,
+    open: (p) => p.open,
     mayHibernate: (p) => !p.open && !p.hidden,
     hibernate: (p) => {
       p.hibernated = true;
-      p.sleeping = false;
+      p.mayRest = false;
     },
     sleepAfterMs: SLEEP,
     hibernateAfterMs: HIBERNATE,
   });
   away.update();
-  return { world, away };
+  return away;
+}
+
+/** Opens `next` in place of the open tab, as a click on its tab does. */
+function open(away: { update(): void }, from: FakePage, next: FakePage): void {
+  from.open = false;
+  next.open = true;
+  away.update();
 }
 
 test.beforeEach(() => mock.timers.enable({ apis: ['setTimeout'] }));
 test.afterEach(() => mock.timers.reset());
 
-test('a background page sleeps after the short delay and wakes the moment it is opened', () => {
+test('the open tab may sleep at once, so it sleeps whenever its window is hidden, minimised or covered', () => {
+  const whatsapp = page('whatsapp', 'sleep');
+  whatsapp.open = true;
+  setup(whatsapp);
+  assert.equal(whatsapp.mayRest, true);
+});
+
+test('a background tab is drawn a while longer, then may sleep; opening it again keeps it allowed', () => {
   const whatsapp = page('whatsapp', 'sleep');
   const discord = page('discord', 'sleep');
   whatsapp.open = true;
-  const { away } = setup(whatsapp, discord);
-  mock.timers.tick(SLEEP - 1);
-  assert.equal(discord.sleeping, false, 'still drawn just after leaving, for quick switching');
-  mock.timers.tick(1);
-  assert.deepEqual([whatsapp.sleeping, discord.sleeping], [false, true]);
-  whatsapp.open = false;
-  discord.open = true;
-  away.update();
-  assert.equal(discord.sleeping, false, 'awake at once when opened');
+  const away = setup(whatsapp, discord);
+  assert.equal(discord.mayRest, false, 'still drawn just after load, for quick switching');
+  mock.timers.tick(SLEEP);
+  assert.deepEqual([whatsapp.mayRest, discord.mayRest], [true, true]);
+  open(away, whatsapp, discord);
+  assert.deepEqual([whatsapp.mayRest, discord.mayRest], [false, true], 'WhatsApp, just left, is drawn a while longer');
+  mock.timers.tick(SLEEP);
+  assert.equal(whatsapp.mayRest, true);
   mock.timers.tick(HIBERNATE * 3);
-  assert.deepEqual([whatsapp.sleeping, whatsapp.hibernated], [true, false], 'sleep mode never hibernates');
+  assert.equal(whatsapp.hibernated, false, 'sleep mode never hibernates');
 });
 
-test('hiding the window puts even the open tab to sleep; showing it wakes the tab', () => {
+test('flicking back within the delay, the tab that left stays drawn and its delay starts again', () => {
   const whatsapp = page('whatsapp', 'sleep');
+  const discord = page('discord', 'sleep');
   whatsapp.open = true;
-  const { world, away } = setup(whatsapp);
-  world.windowShown = false;
-  away.update();
+  const away = setup(whatsapp, discord);
   mock.timers.tick(SLEEP);
-  assert.equal(whatsapp.sleeping, true);
-  world.windowShown = true;
-  away.update();
-  assert.equal(whatsapp.sleeping, false);
+  open(away, whatsapp, discord);
+  mock.timers.tick(SLEEP - 1);
+  open(away, discord, whatsapp);
+  open(away, whatsapp, discord);
+  mock.timers.tick(SLEEP - 1);
+  assert.equal(whatsapp.mayRest, false);
+  mock.timers.tick(1);
+  assert.equal(whatsapp.mayRest, true);
 });
 
-test('run mode keeps a background page drawn, and switching to it wakes a sleeping one', () => {
+test('run mode never sleeps, open or not, and switching to it wakes a sleeping page', () => {
   const discord = page('discord', 'sleep');
-  const { away } = setup(discord);
+  const away = setup(discord);
   mock.timers.tick(SLEEP);
-  assert.equal(discord.sleeping, true);
+  assert.equal(discord.mayRest, true);
   discord.mode = 'run';
   away.update();
+  assert.equal(discord.mayRest, false);
+  discord.open = true;
+  away.update();
   mock.timers.tick(HIBERNATE * 2);
-  assert.deepEqual([discord.sleeping, discord.hibernated], [false, false]);
+  assert.deepEqual([discord.mayRest, discord.hibernated], [false, false]);
 });
 
-test('hibernate mode sleeps first, then closes the page after its delay out of sight', () => {
+test('hibernate mode sleeps first, then closes the page after its delay in the background', () => {
   const proton = page('proton-mail', 'hibernate');
   setup(proton);
   mock.timers.tick(SLEEP);
-  assert.deepEqual([proton.sleeping, proton.hibernated], [true, false]);
+  assert.deepEqual([proton.mayRest, proton.hibernated], [true, false]);
   mock.timers.tick(HIBERNATE - SLEEP);
   assert.equal(proton.hibernated, true);
 });
 
 test('coming back to a tab restarts its hibernate delay from the next time it leaves', () => {
   const proton = page('proton-mail', 'hibernate');
-  const { away } = setup(proton);
+  const away = setup(proton);
   mock.timers.tick(HIBERNATE - 1);
   proton.open = true;
   away.update();
@@ -143,24 +162,42 @@ test('a busy page (a call, a screen share) is not hibernated; it tries again a f
   assert.equal(streamroom.hibernated, true);
 });
 
+test('a busy page never sleeps, open or not, and a sleeping page that gets busy wakes on the next update', () => {
+  const streamroom = page('streamroom', 'sleep');
+  const messenger = page('messenger', 'sleep');
+  streamroom.isBusy = true;
+  messenger.open = true;
+  messenger.isBusy = true;
+  const away = setup(streamroom, messenger);
+  mock.timers.tick(SLEEP * 10);
+  assert.deepEqual([streamroom.mayRest, messenger.mayRest], [false, false], 'a call keeps drawing, in the background or in a covered window');
+  streamroom.isBusy = false;
+  away.update();
+  mock.timers.tick(SLEEP);
+  assert.equal(streamroom.mayRest, true);
+  streamroom.isBusy = true;
+  away.update();
+  assert.equal(streamroom.mayRest, false);
+});
+
 test('a page hidden from the dock keeps running in hibernate mode, asleep; a loading page is left alone', () => {
   const gmail = page('gmail', 'hibernate');
   gmail.hidden = true;
   const messenger = page('messenger', 'sleep');
   messenger.loaded = false;
-  const { away } = setup(gmail, messenger);
+  messenger.open = true;
+  const away = setup(gmail, messenger);
   mock.timers.tick(HIBERNATE * 2);
-  assert.deepEqual([gmail.sleeping, gmail.hibernated], [true, false]);
-  assert.equal(messenger.sleeping, false, 'it sleeps once loaded, not while loading');
+  assert.deepEqual([gmail.mayRest, gmail.hibernated], [true, false]);
+  assert.equal(messenger.mayRest, false, 'it may sleep once loaded, not while loading');
   messenger.loaded = true;
   away.update();
-  mock.timers.tick(SLEEP);
-  assert.equal(messenger.sleeping, true);
+  assert.equal(messenger.mayRest, true);
 });
 
 test('switching a sleeping page to hibernate starts its delay from the switch', () => {
   const whatsapp = page('whatsapp', 'sleep');
-  const { away } = setup(whatsapp);
+  const away = setup(whatsapp);
   mock.timers.tick(HIBERNATE * 5);
   whatsapp.mode = 'hibernate';
   away.update();
@@ -168,19 +205,4 @@ test('switching a sleeping page to hibernate starts its delay from the switch', 
   assert.equal(whatsapp.hibernated, false);
   mock.timers.tick(1);
   assert.equal(whatsapp.hibernated, true);
-});
-
-test('a busy page never sleeps, and a sleeping page that gets busy wakes on the next update', () => {
-  const streamroom = page('streamroom', 'sleep');
-  streamroom.isBusy = true;
-  const { away } = setup(streamroom);
-  mock.timers.tick(SLEEP * 10);
-  assert.equal(streamroom.sleeping, false, 'a call in the background keeps drawing');
-  streamroom.isBusy = false;
-  away.update();
-  mock.timers.tick(SLEEP);
-  assert.equal(streamroom.sleeping, true);
-  streamroom.isBusy = true;
-  away.update();
-  assert.equal(streamroom.sleeping, false);
 });

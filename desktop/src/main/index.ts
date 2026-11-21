@@ -298,20 +298,15 @@ async function start(): Promise<void> {
 
   /** What the service does in the background: the user's pick in its menu, else its own default. */
   const awayMode = (runtime: ServiceRuntime): AwayMode => state.awayModes[runtime.service.id] ?? defaultAwayMode(runtime.service);
-  const windowShown = () => win.isVisible() && !win.isMinimized();
   const away = keepAway({
     pages: () => runtimes,
     mode: awayMode,
-    inSight: (runtime) => runtime.service.id === state.activeServiceId && windowShown(),
+    open: (runtime) => runtime.service.id === state.activeServiceId,
     mayHibernate: ({ service }) => canHibernate(service) && isOn(service.id) && service.id !== state.activeServiceId && !state.hiddenServiceIds.includes(service.id),
     hibernate: ({ service }) => hibernate(service.id),
     sleepAfterMs: SLEEP_AFTER_MS,
     hibernateAfterMs: HIBERNATE_AFTER_MS,
   });
-  win.on('show', away.update);
-  win.on('hide', away.update);
-  win.on('minimize', away.update);
-  win.on('restore', away.update);
 
   /** A link leaving a service: a service that claims its host (Streamroom's invites) opens it, else the browser. */
   function openLink(url: string): void {

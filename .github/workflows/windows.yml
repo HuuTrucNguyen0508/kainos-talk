@@ -1,5 +1,5 @@
 # Builds the Windows app on Windows, runs the desktop unit tests there, and checks the packaged
-# app starts. The installer and portable .exe are kept as the run's artifact for a release.
+# app starts and that its pages really sleep in the background, minimised and covered. The installer and portable .exe are kept as the run's artifact for a release.
 name: Windows build
 
 on:
@@ -26,6 +26,9 @@ jobs:
         working-directory: desktop
         shell: pwsh
         run: ./scripts/windows-launch-check.ps1
+      - name: Sleep check
+        working-directory: desktop
+        run: node scripts/sleep-check.ts release/win-unpacked/kainos-talk.exe
       - uses: actions/upload-artifact@v4
         with:
           name: kainos-talk-windows
