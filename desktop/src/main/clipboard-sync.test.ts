@@ -131,7 +131,8 @@ test('text is read as UTF-8 when the app offers it', () => {
   assert.equal(textType(['image/png']), undefined, 'a picture is not text');
 });
 
-test('under Wayland, text a password manager marks secret is not read', async (t) => {
+// The stand-in wl-paste is a shell script, which Windows can't run; Wayland is Linux only anyway.
+test('under Wayland, text a password manager marks secret is not read', { skip: process.platform === 'win32' }, async (t) => {
   const bin = mkdtempSync(join(tmpdir(), 'kainos-wl-'));
   t.after(() => rmSync(bin, { recursive: true, force: true }));
   // A stand-in for wl-paste that serves what the test puts beside it.
