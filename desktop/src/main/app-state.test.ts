@@ -26,6 +26,7 @@ test('round-trips through the state file', () => {
       streamroom: { current: 'https://rooms.example.org', saved: ['https://rooms.example.org', 'http://localhost:8090'], localPort: 8081 },
       enabledServiceIds: ['proton-mail', 'whatsapp'],
       welcomed: true,
+      sendClipboard: false,
     };
     saveAppState(file, state);
     assert.deepEqual(loadAppState(file, ids), state);
@@ -72,6 +73,7 @@ test('a missing or broken file gives defaults', () => {
       streamroom: DEFAULT_SERVERS,
       enabledServiceIds: [],
       welcomed: false,
+      sendClipboard: true,
     });
     writeFileSync(file, '{ not json');
     assert.equal(loadAppState(file, ids).activeServiceId, 'proton-mail');
@@ -106,6 +108,7 @@ test('drops unknown services and bad fields one by one', () => {
     streamroom: DEFAULT_SERVERS,
     enabledServiceIds: ids,
     welcomed: true,
+    sendClipboard: true,
   });
   assert.equal(parseAppState({ bounds: { x: 0, y: 0, width: 100, height: 100 } }, ids).bounds, undefined, 'too small');
 });
@@ -138,19 +141,19 @@ test('a state file from before the websites stayed awake still loads, and drops 
 test('a state file from the side bar still loads bounds, active service and muting, and drops the side and auto-hide', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true }, ids);
-  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
+  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true });
 });
 
 test('a state file from the aligned dock still loads bounds, active service and muting, drops the alignment and hides the dock', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlign: 'end' }, ids);
-  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true });
 });
 
 test('a state file from before themes still loads everything else and matches the system', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true }, ids);
-  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true });
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true });
 });
 
 test('keeps each named theme, and anything else matches the system', () => {
@@ -175,6 +178,7 @@ test('a state file from before the dock could be rearranged still loads everythi
     streamroom: DEFAULT_SERVERS,
     enabledServiceIds: ids,
     welcomed: true,
+    sendClipboard: true,
   });
 });
 
@@ -209,4 +213,10 @@ test('background picks are kept for known websites with a real mode, and only th
   assert.deepEqual(state.awayModes, { whatsapp: 'sleep', discord: 'hibernate' }, "Proton never hibernates here, so it has no pick; ICQ is gone");
   assert.deepEqual(parseAppState({ awayModes: { whatsapp: 'nap', discord: 3 } }, ids).awayModes, {});
   assert.deepEqual(parseAppState({ awayModes: ['whatsapp'] }, ids).awayModes, {});
+});
+
+test('sending copied text to the phone is on unless the user turned it off', () => {
+  assert.equal(parseAppState({}, ids).sendClipboard, true);
+  assert.equal(parseAppState({ sendClipboard: 'no' }, ids).sendClipboard, true);
+  assert.equal(parseAppState({ sendClipboard: false }, ids).sendClipboard, false);
 });

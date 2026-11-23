@@ -1,10 +1,11 @@
 // Preload for each service page. It routes the page's web notifications through Kainos Talk,
 // so muting works and clicking one opens the right service (Electron gives the main process no
 // other hook into a page's notifications), reads the page's own unread counter for services
-// that have one, says whether the page has a call going (so it is never hibernated mid-call), and
-// reports the pointer at the bottom edge for the auto-hiding dock.
+// that have one, says whether the page rings or has a call going (so it is never hibernated
+// mid-call, and opening the window shows the call), and reports the pointer at the bottom edge
+// for the auto-hiding dock.
 import { contextBridge, ipcRenderer } from 'electron';
-import { Channel, type NotificationRequest } from '../shared/ipc.ts';
+import { Channel, type NotificationRequest, type PageActivity } from '../shared/ipc.ts';
 import { findService } from '../shared/services.ts';
 import type { CounterReading } from '../shared/unread.ts';
 import { reportBottomEdge } from './bottom-edge.ts';
@@ -159,27 +160,49 @@ if (counter) {
 }
 
 /**
- * Runs in the page's own world, so it must not use anything from this module's scope. Keeps the
- * camera, microphone and screen tracks the page opens and the peer connections it makes, and
- * says whether any is going: a page in a call or sharing its screen must stay awake. Busy is
- * reported at once (a request for a capture, a peer connecting); idle on the next check, since
- * a stopped track tells nobody.
+ * Runs in the page's own world, so it must not use anything from this module's scope. Says what
+ * the page has going: a ringtone, a call (a peer connecting, connected or reconnecting), or a
+ * camera, microphone or screen capture. A ringtone is taken to be a looping sound that plays,
+ * which is how Messenger and Discord ring; a looping sound that is not a ringtone would count
+ * too. A change is reported at once when it starts (a sound playing, a capture asked for, a peer
+ * connecting); one that stops is seen on the next check, since a stopped track tells nobody.
  */
-function watchCalls(report: (busy: boolean) => void, everyMs: number): void {
+function watchActivity(report: (activity: 'ringing' | 'call' | 'capture' | null) => void, everyMs: number): void {
   const tracks = new Set<MediaStreamTrack>();
   const peers = new Set<RTCPeerConnection>();
+  const sounds = new Set<HTMLAudioElement>();
   /** Capture requests still waiting for an answer, such as an open screen picker. */
   let asking = 0;
-  let last = false;
+  let last: 'ringing' | 'call' | 'capture' | null = null;
   const check = () => {
     for (const track of tracks) if (track.readyState === 'ended') tracks.delete(track);
     for (const peer of peers) if (peer.connectionState === 'closed') peers.delete(peer);
+    for (const sound of sounds) if (sound.paused) sounds.delete(sound);
+    // Playing for real: a sound still loading or stalled has nothing to play yet.
+    const ringing = [...sounds].some((sound) => sound.loop && !sound.muted && sound.volume > 0 && sound.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA);
     // A failed peer may still restart; a disconnected one is reconnecting, so it counts.
-    const busy = asking > 0 || tracks.size > 0 || [...peers].some((peer) => ['connecting', 'connected', 'disconnected'].includes(peer.connectionState));
-    if (busy === last) return;
-    last = busy;
-    report(busy);
+    const inCall = [...peers].some((peer) => ['connecting', 'connected', 'disconnected'].includes(peer.connectionState));
+    const activity = ringing ? 'ringing' : inCall ? 'call' : asking > 0 || tracks.size > 0 ? 'capture' : null;
+    if (activity === last) return;
+    last = activity;
+    report(activity);
   };
+  const media = window.HTMLMediaElement?.prototype;
+  const play = media?.play;
+  if (media && typeof play === 'function') {
+    media.play = function (this: HTMLMediaElement) {
+      const playing = play.call(this);
+      if (this instanceof HTMLAudioElement) {
+        sounds.add(this);
+        check();
+        // A ringtone starts once it has loaded, and stops by pausing; a refused play pauses it too.
+        this.addEventListener('playing', check, { once: true });
+        this.addEventListener('pause', check, { once: true });
+        playing.catch(() => {}).finally(check);
+      }
+      return playing;
+    };
+  }
   const devices = window.MediaDevices?.prototype;
   for (const name of ['getUserMedia', 'getDisplayMedia'] as const) {
     const native = devices?.[name];
@@ -217,6 +240,6 @@ function watchCalls(report: (busy: boolean) => void, everyMs: number): void {
   setInterval(check, everyMs);
 }
 
-contextBridge.executeInMainWorld({ func: watchCalls, args: [(busy: boolean) => ipcRenderer.send(Channel.pageBusy, busy), 2000] });
+contextBridge.executeInMainWorld({ func: watchActivity, args: [(activity: PageActivity | null) => ipcRenderer.send(Channel.pageActivity, activity), 2000] });
 
 reportBottomEdge();

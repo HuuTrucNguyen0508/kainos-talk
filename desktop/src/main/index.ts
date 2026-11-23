@@ -1,4 +1,4 @@
-import { BaseWindow, Menu, powerMonitor, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, type IpcMainEvent, type WebContents } from 'electron';
+import { BaseWindow, Menu, powerMonitor, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, shell, type IpcMainEvent, type WebContents } from 'electron';
 import { join } from 'node:path';
 import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
@@ -14,14 +14,18 @@ import { forwardNotifications } from './notifications.ts';
 import { startVencord } from './vencord.ts';
 import { startSmsSync, type SmsSync } from './sms-sync.ts';
 import { startCallAudio } from './call-audio.ts';
+import { startClipboardSync, systemClipboard, type ClipboardSync } from './clipboard-sync.ts';
+import { startMediaPause } from './media-pause.ts';
 import { openAppsPage, type AppsPage } from './apps-page.ts';
 import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
 import { CLOUDFLARE_GUIDE, LOCAL_GUIDE, STREAMROOM_ID, parseServer, serverChoices, serverLabel, thisPc, withCurrent, withLocalPort, withServers, withoutServer, type StreamroomServers } from '../shared/streamroom.ts';
 import { askServerAddress, type ServerDialogMode } from './server-dialog.ts';
 import { createCallPopup } from './call-popup.ts';
+import { callTab } from './call-tab.ts';
+import { watchHyprland } from './hyprland.ts';
 
-import { claimingService } from './navigation.ts';
+import { claimingService, sharedLink } from './navigation.ts';
 import { openExternal } from './open-external.ts';
 import { createServiceRuntime, type ServiceRuntime } from './service-runtime.ts';
 import { shortcutFor } from './shortcuts.ts';
@@ -37,6 +41,8 @@ const CALL_STRIP_HEIGHT = 40;
 const SLEEP_AFTER_MS = Number(process.env.KAINOS_SLEEP_AFTER_MS) || 60_000;
 /** How long a page set to hibernate stays in the background before its page closes. */
 const HIBERNATE_AFTER_MS = Number(process.env.KAINOS_HIBERNATE_AFTER_MS) || 10 * 60_000;
+/** A window brought up this soon after the user picked a tab (a notification, a link) keeps that tab. */
+const PICKED_MS = 2_000;
 
 app.setName(APP_NAME);
 if (process.env.KAINOS_USER_DATA) app.setPath('userData', process.env.KAINOS_USER_DATA);
@@ -126,7 +132,6 @@ async function start(): Promise<void> {
   callStrip.setVisible(false);
   callStrip.webContents.on('will-navigate', (event) => event.preventDefault());
   callStrip.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  void callStrip.webContents.loadFile(join(__dirname, 'renderer', 'call-strip.html'));
   /** Last told to the call strip; a reloaded strip page starts on 'call', as does a new call. */
   let sentShowing: 'call' | 'chats' | undefined;
   callStrip.webContents.on('did-finish-load', () => (sentShowing = undefined));
@@ -155,8 +160,9 @@ async function start(): Promise<void> {
   });
 
   // The Texts page: the phone's SMS and RCS conversations, over the local network. It starts
-  // before the service views, so the page's first request finds it ready.
-  const smsView = () => runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view()?.webContents;
+  // before the service views, so the page's first request finds it ready. A change from the phone
+  // can come before the views exist; the page asks for the state once it loads.
+  const smsView = () => (runtimesReady ? runtimes.find((runtime) => runtime.service.localPage === 'inbox')?.view()?.webContents : undefined);
   /** Shows a desktop notification for a new text; a click opens that conversation. */
   function notifyFromInbox(key: string, title: string, body: string): void {
     const muted = state.mutedServiceIds.includes('inbox');
@@ -166,8 +172,7 @@ async function start(): Promise<void> {
     }
     const notification = new Notification({ title, body, icon: icons.plain });
     notification.on('click', () => {
-      showWindow();
-      activate('inbox');
+      showOnTab('inbox');
       smsView()?.send(SmsChannel.openKey, key);
     });
     notification.show();
@@ -188,10 +193,7 @@ async function start(): Promise<void> {
   function notifyCall(who: string): Notification | undefined {
     if (!Notification.isSupported()) return undefined;
     const notification = new Notification({ title: `${who} is calling`, body: 'Answer on the Texts page or on your phone.', icon: icons.plain, urgency: 'critical' });
-    notification.on('click', () => {
-      showWindow();
-      activate('inbox');
-    });
+    notification.on('click', () => showOnTab('inbox'));
     notification.show();
     return notification;
   }
@@ -234,11 +236,44 @@ async function start(): Promise<void> {
   powerMonitor.on('resume', () => {
     if (sms?.state().phone?.connected) connectCallAudio();
   });
+  // Music and videos on this PC pause while a call rings or is on.
+  const mediaPause = await startMediaPause();
+  /** The PC's clipboard and the phone's, while the phone sync runs. */
+  let clipboardSync: ClipboardSync | undefined;
+  const phoneName = () => sms?.state().phone?.name.slice(0, PHONE_NAME_MAX) ?? 'your phone';
+  /**
+   * What the phone sent or a file sent to it came to. Shown even while Texts is muted: the user
+   * asked for each of these on the phone or the PC.
+   */
+  function notifyPhone(title: string, body: string, onClick?: () => void): void {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({ title, body, icon: icons.plain });
+    if (onClick) notification.on('click', onClick);
+    notification.show();
+  }
+  const toClipboard = (text: string) => (clipboardSync ? clipboardSync.apply(text) : void clipboard.writeText(text));
   let smsStarting: Promise<void> | undefined;
   function startSms(): Promise<void> {
     if (sms) return Promise.resolve();
     smsStarting ??= startSmsSync({
       dir: join(app.getPath('userData'), 'sms-sync'),
+      downloads: process.env.KAINOS_DOWNLOADS || app.getPath('downloads'),
+      onClip: (text) => {
+        toClipboard(text);
+        notifyPhone(`Copied from ${phoneName()}`, 'Paste it anywhere on this PC.');
+      },
+      onShareText: (text) => {
+        const link = sharedLink(text);
+        if (link) return openLink(link);
+        toClipboard(text);
+        notifyPhone(`Text from ${phoneName()} copied`, text.length > 120 ? `${text.slice(0, 120)}…` : text);
+      },
+      onFileReceived: (outcome) =>
+        outcome.ok
+          ? notifyPhone(`Received ${outcome.name}`, `From ${phoneName()}, in Downloads. Click to open it.`, () => void shell.openPath(outcome.path))
+          : notifyPhone(`Could not receive ${outcome.name}`, outcome.error),
+      onFileSent: (outcome) =>
+        outcome.ok ? notifyPhone(`Sent ${outcome.name}`, `It is in the Downloads of ${phoneName()}.`) : notifyPhone(`Could not send ${outcome.name}`, outcome.error),
       ...(process.env.KAINOS_SYNC_PORT && { port: Number(process.env.KAINOS_SYNC_PORT) }),
       advertise: process.env.KAINOS_SYNC_MDNS !== '0',
       callAudio: () => callAudio.state(),
@@ -247,19 +282,28 @@ async function start(): Promise<void> {
         const linked = now?.phone?.connected === true;
         const callId = now?.call?.id ?? null;
         if (linked && (!seen.linked || (callId !== null && callId !== seen.call))) connectCallAudio();
+        const relink = linked !== seen.linked;
         seen = { linked, call: callId };
+        mediaPause.update(callId !== null);
         sendSmsState();
         showRinging();
-        // The window title and tray lamp follow the inbox.
-        if (runtimesReady) render();
+        // The window title and tray lamp follow the inbox; the tray's Send files follows the link.
+        if (runtimesReady) {
+          render();
+          if (relink) tray?.setContextMenu(trayMenu());
+        }
       },
       onIncoming: (conversation, message) => {
         const who = conversation.isGroup && message.sender ? `${message.sender} in ${conversation.title}` : conversation.title;
         notifyFromInbox(conversation.key, who, message.text || 'Picture or attachment');
       },
     })
-      .then((started) => {
+      .then(async (started) => {
         sms = started;
+        clipboardSync = await startClipboardSync(systemClipboard(clipboard), {
+          send: (text) => sms?.sendClip(text) ?? false,
+          enabled: () => state.sendClipboard,
+        });
       })
       .finally(() => {
         smsStarting = undefined;
@@ -270,6 +314,10 @@ async function start(): Promise<void> {
     await smsStarting?.catch(() => {});
     const running = sms;
     sms = undefined;
+    clipboardSync?.stop();
+    clipboardSync = undefined;
+    mediaPause.update(false);
+    tray?.setContextMenu(trayMenu());
     showRinging();
     await running?.stop();
   }
@@ -343,8 +391,7 @@ async function start(): Promise<void> {
     // Woken straight onto the link, not its start page first.
     if (state.hibernatedServiceIds.includes(id)) updateState({ hibernatedServiceIds: state.hibernatedServiceIds.filter((other) => other !== id) }, 0);
     runtime.open(url);
-    showWindow();
-    activate(id);
+    showOnTab(id);
   }
   function paintThemeBackground(): void {
     win.setBackgroundColor(themeBackground());
@@ -354,6 +401,14 @@ async function start(): Promise<void> {
 
   let tray: Tray | undefined;
   let quitting = false;
+  function trayMenu(): Menu {
+    return Menu.buildFromTemplate([
+      { label: `Show ${APP_NAME}`, click: showWindow },
+      sendFilesItem(),
+      { type: 'separator' },
+      { label: `Quit ${APP_NAME}`, click: () => app.quit() },
+    ]);
+  }
 
   function snapshot(): Snapshot {
     const phone = sms?.state().phone;
@@ -574,6 +629,36 @@ async function start(): Promise<void> {
     win.show();
     win.focus();
   }
+
+  let pickedAt = 0;
+  /** Brings the window up on a tab the user picked; a call does not take its place. */
+  function showOnTab(serviceId: string): void {
+    pickedAt = Date.now();
+    showWindow();
+    activate(serviceId);
+  }
+
+  /**
+   * As the window comes on screen, a tab with a call opens, the call in front: a website ringing
+   * or in a call, or Texts with the phone's call. Websites come first, so a Messenger call wins
+   * over the unknown number an older phone app rings for it.
+   */
+  function openCall(): void {
+    if (Date.now() - pickedAt < PICKED_MS) return;
+    const websites = state.serviceOrder.filter(isOn).map(runtimeById).filter((runtime): runtime is ServiceRuntime => runtime !== undefined && !runtime.service.localPage);
+    // The phone sync runs only while Texts is on.
+    const phone = sms?.state().call;
+    const id = callTab([
+      ...websites.map((runtime) => ({ id: runtime.service.id, phase: runtime.callPhase() })),
+      { id: 'inbox', phase: !phone ? undefined : phone.phase === 'ringing' ? 'ringing' : 'call' },
+    ]);
+    if (!id) return;
+    runtimeById(id)?.setCallInFront(true);
+    activate(id);
+  }
+  watchHyprland(() => win.getTitle(), openCall);
+  win.on('show', openCall);
+  win.on('restore', openCall);
 
   function setAwayMode(serviceId: string, mode: AwayMode): void {
     updateState({ awayModes: { ...state.awayModes, [serviceId]: mode } }, 0);
@@ -843,7 +928,27 @@ async function start(): Promise<void> {
         label: 'Theme',
         submenu: choices.map(({ id, name }) => ({ label: name, type: 'radio', checked: state.theme === id, click: () => chooseTheme(id) })),
       },
+      { type: 'separator' },
+      sendFilesItem(),
+      {
+        label: 'Send copied text to the phone',
+        type: 'checkbox',
+        checked: state.sendClipboard,
+        click: () => updateState({ sendClipboard: !state.sendClipboard }, 0),
+      },
     ]).popup(menuOptions(at));
+  }
+
+  /** Picks files and sends them to the phone's Downloads, one at a time. */
+  async function sendFilesToPhone(): Promise<void> {
+    const options: Electron.OpenDialogOptions = { title: 'Send files to phone', buttonLabel: 'Send', properties: ['openFile', 'multiSelections'] };
+    const { canceled, filePaths } = win.isVisible() ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    if (canceled || filePaths.length === 0) return;
+    if (!sms?.sendFiles(filePaths)) notifyPhone('Files not sent', 'The phone is not connected.');
+  }
+  /** Only while the phone is connected. */
+  function sendFilesItem(): MenuItemConstructorOptions {
+    return { label: 'Send files to phone…', enabled: sms?.state().phone?.connected === true, click: () => void sendFilesToPhone() };
   }
 
   async function confirmForgetPhone(name: string): Promise<void> {
@@ -869,6 +974,7 @@ async function start(): Promise<void> {
     const name = phone.name.slice(0, PHONE_NAME_MAX);
     Menu.buildFromTemplate([
       { label: 'Open Texts', click: () => activate(inbox.service.id) },
+      sendFilesItem(),
       { type: 'separator' },
       { label: `Forget ${name}…`, click: () => void confirmForgetPhone(name) },
     ]).popup(menuOptions(at));
@@ -1008,23 +1114,14 @@ async function start(): Promise<void> {
   forwardNotifications({
     runtimeFor: runtimeOf,
     isMuted: (id) => state.mutedServiceIds.includes(id),
-    focusService: (id) => {
-      showWindow();
-      activate(id);
-    },
+    focusService: showOnTab,
     fallbackIcon: icons.plain,
   });
 
   try {
     tray = new Tray(icons.plain);
     tray.setToolTip(APP_NAME);
-    tray.setContextMenu(
-      Menu.buildFromTemplate([
-        { label: `Show ${APP_NAME}`, click: showWindow },
-        { type: 'separator' },
-        { label: `Quit ${APP_NAME}`, click: () => app.quit() },
-      ]),
-    );
+    tray.setContextMenu(trayMenu());
     tray.on('click', showWindow);
   } catch (error) {
     console.warn('No system tray; closing the window will quit.', error);
@@ -1074,7 +1171,10 @@ async function start(): Promise<void> {
     updateState({}, 0);
   });
 
+  // The local pages load once their IPC handlers exist: a page that asks for its theme earlier
+  // gets no answer and stays on the system theme.
   dockContents.loadFile(join(__dirname, 'renderer', 'index.html')).catch((error: unknown) => console.error(error));
+  callStrip.webContents.loadFile(join(__dirname, 'renderer', 'call-strip.html')).catch((error: unknown) => console.error(error));
   // First launch, or nothing left on: Kainos opens on Choose your apps.
   if (!state.welcomed || state.enabledServiceIds.length === 0) showApps();
   render();

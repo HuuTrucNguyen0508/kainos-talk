@@ -14,8 +14,10 @@ import { isIP } from 'node:net';
  *    A conversation's `sender` is additive: an older phone leaves it out and it parses as `person`.
  * 5: phone calls (`call`, `callLog`, `answer`, `hangUp`, `dial`). An older PC closes the connection
  *    on a frame type it does not know, so the number moves and both apps update together.
+ * 6: clipboard text, text shared from the phone and files both ways (`clip`, `shareText`,
+ *    `fileOffer`, `fileChunk`, `fileEnd`, `fileResult`, `fileCancel`). Again both apps update together.
  */
-export const SYNC_VERSION = 5;
+export const SYNC_VERSION = 6;
 export const SYNC_PORT = 48090;
 /** mDNS service type: `_kainos-talk._tcp`. */
 export const SYNC_SERVICE = 'kainos-talk';
@@ -126,6 +128,31 @@ export interface CallEntry {
 
 export const MAX_CALL_LOG = 100;
 
+/** Longest clipboard or shared text, in UTF-16 units (JavaScript's and Kotlin's `length`). */
+export const MAX_TEXT_CHARS = 100_000;
+/** Largest file either side offers: 2 GiB. */
+export const MAX_FILE_BYTES = 2_147_483_648;
+/** Most bytes one `fileChunk` carries, before base64. */
+export const MAX_CHUNK_BYTES = 262_144;
+/** A full chunk in base64. */
+const MAX_CHUNK_BASE64 = 349_528;
+
+/**
+ * Clipboard text and files, which travel both ways. One file at a time each way: the sender
+ * waits for `fileResult` before it offers the next one.
+ */
+export type TransferFrame =
+  | { readonly t: 'clip'; readonly text: string }
+  /** A file follows. `name` is untrusted: the receiver saves it under `safeFileName(name)`. */
+  | { readonly t: 'fileOffer'; readonly id: string; readonly name: string; readonly size: number; readonly mime: string | null }
+  /** The next bytes of the open file, in base64. */
+  | { readonly t: 'fileChunk'; readonly id: string; readonly data: string }
+  | { readonly t: 'fileEnd'; readonly id: string }
+  /** How a file the other side sent ended. */
+  | { readonly t: 'fileResult'; readonly id: string; readonly ok: boolean; readonly error: string | null }
+  /** Either side stops a transfer; the receiver deletes what it has. */
+  | { readonly t: 'fileCancel'; readonly id: string };
+
 /** Frames the phone sends. */
 export type PhoneFrame =
   | { readonly t: 'pair'; readonly v: number; readonly device: string; readonly nonce: string }
@@ -146,7 +173,10 @@ export type PhoneFrame =
   /** The newest calls, newest first. */
   | { readonly t: 'callLog'; readonly calls: readonly CallEntry[] }
   /** A picture the PC asked for: JPEG in base64, or why it is missing. */
-  | { readonly t: 'image'; readonly id: string; readonly mime: string | null; readonly data: string | null; readonly error: string | null };
+  | { readonly t: 'image'; readonly id: string; readonly mime: string | null; readonly data: string | null; readonly error: string | null }
+  /** Text or a link shared from the phone: a link opens on the PC, other text goes on its clipboard. */
+  | { readonly t: 'shareText'; readonly text: string }
+  | TransferFrame;
 
 /** Frames the PC sends. */
 export type PcFrame =
@@ -173,7 +203,8 @@ export type PcFrame =
   /** Ends the call, or declines it while it rings. */
   | { t: 'hangUp'; id: string; call: string; phase: CallPhase }
   /** Calls a number, or the one number of a text conversation: exactly one of the two is set. */
-  | { t: 'dial'; id: string; number: string | null; key: string | null };
+  | { t: 'dial'; id: string; number: string | null; key: string | null }
+  | TransferFrame;
 
 const str = (value: unknown, max = 10_000): value is string => typeof value === 'string' && value.length <= max;
 const num = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -220,6 +251,42 @@ function parseCallEntry(raw: unknown): CallEntry | undefined {
   const { id, kind, number, name, key, timeMs, seconds } = raw;
   if (!str(id, 100) || !CALL_KINDS.includes(kind) || !nullable(number, 40) || !nullable(name, 500) || !nullable(key, 500) || !time(timeMs) || !num(seconds)) return undefined;
   return { id, kind: kind as CallKind, number, name, key, timeMs, seconds: Math.max(0, Math.floor(seconds)) };
+}
+
+const text = (value: unknown): value is string => str(value, MAX_TEXT_CHARS) && value.length > 0;
+/** Standard base64 with padding, as both apps write it. */
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function parseTransfer(raw: Record<string, unknown>): TransferFrame | undefined {
+  switch (raw.t) {
+    case 'clip':
+      return text(raw.text) ? { t: 'clip', text: raw.text } : undefined;
+    case 'fileOffer': {
+      const { id, name, size, mime } = raw;
+      if (!str(id, 100) || !str(name, 255) || name.length === 0 || !nullable(mime, 255)) return undefined;
+      if (typeof size !== 'number' || !Number.isInteger(size) || size < 0 || size > MAX_FILE_BYTES) return undefined;
+      return { t: 'fileOffer', id, name, size, mime };
+    }
+    case 'fileChunk':
+      return str(raw.id, 100) && str(raw.data, MAX_CHUNK_BASE64) && BASE64.test(raw.data) ? { t: 'fileChunk', id: raw.id, data: raw.data } : undefined;
+    case 'fileEnd':
+      return str(raw.id, 100) ? { t: 'fileEnd', id: raw.id } : undefined;
+    case 'fileResult':
+      return str(raw.id, 100) && bool(raw.ok) && nullable(raw.error, 100) ? { t: 'fileResult', id: raw.id, ok: raw.ok, error: raw.error } : undefined;
+    case 'fileCancel':
+      return str(raw.id, 100) ? { t: 'fileCancel', id: raw.id } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The name a received file is saved under: what follows the last `/` or `\`, without control
+ * characters or surrounding spaces, and `file` when nothing usable is left.
+ */
+export function safeFileName(offered: string): string {
+  const name = offered.slice(Math.max(offered.lastIndexOf('/'), offered.lastIndexOf('\\')) + 1).replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+  return name === '' || name === '.' || name === '..' ? 'file' : name;
 }
 
 /** One line from the phone: untrusted input, checked field by field. */
@@ -269,7 +336,9 @@ export function parsePhoneFrame(line: string): PhoneFrame | undefined {
       if (!str(id, 100) || !(mime === null || mime === 'image/jpeg') || !(data === null || str(data, MAX_FRAME_BYTES)) || !(error === null || str(error, 100))) return undefined;
       return { t: 'image', id, mime, data, error };
     }
+    case 'shareText':
+      return text(raw.text) ? { t: 'shareText', text: raw.text } : undefined;
     default:
-      return undefined;
+      return parseTransfer(raw);
   }
 }

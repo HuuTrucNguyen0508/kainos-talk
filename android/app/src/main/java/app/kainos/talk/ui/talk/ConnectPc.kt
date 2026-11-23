@@ -231,6 +231,7 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
     )
     SmsAccess(onGranted = onSmsAccess)
     CallAccess(onGranted = onSmsAccess)
+    FileNotificationAccess()
     Text(
         "If the computer gets a new address on your Wi-Fi, this phone finds it again by itself.",
         style = MaterialTheme.typography.bodyMedium,
@@ -302,6 +303,36 @@ private fun CallAccess(onGranted: () -> Unit) {
         color = c.ink,
     )
     LinkButton("Allow calls", onClick = { ask.launch(CALL_PERMISSIONS) })
+}
+
+/**
+ * Offers a notification when files arrive from the computer, so tapping it opens the file.
+ * Without this permission files still save to Downloads.
+ */
+@Composable
+private fun FileNotificationAccess() {
+    val context = LocalContext.current
+    val c = MaterialTheme.switchboard
+    var granted by remember {
+        mutableStateOf(context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+    }
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
+        granted = allowed || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    }
+    if (granted) {
+        Text(
+            "Files from the computer save to Downloads and show a notification to open them.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = c.soft,
+        )
+        return
+    }
+    Text(
+        "Show a notification when files arrive from the computer? Without it, files still save to Downloads.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = c.ink,
+    )
+    LinkButton("Allow file notifications", onClick = { ask.launch(Manifest.permission.POST_NOTIFICATIONS) })
 }
 
 private val PairingSaver = androidx.compose.runtime.saveable.Saver<Pairing, String>(

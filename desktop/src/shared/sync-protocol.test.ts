@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { frameHash, isLocalAddress, pairingCode, parsePhoneFrame } from './sync-protocol.ts';
+import { frameHash, isLocalAddress, pairingCode, parsePhoneFrame, safeFileName, type PcFrame } from './sync-protocol.ts';
 
 const vectors = JSON.parse(readFileSync(new URL('../../../protocol/sms-sync-vectors.json', import.meta.url), 'utf8')) as {
   pairing: { pcFingerprint: string; phoneFingerprint: string; phoneNonce: string; pcNonce: string; code: string }[];
@@ -10,6 +10,9 @@ const vectors = JSON.parse(readFileSync(new URL('../../../protocol/sms-sync-vect
   conversationFrames: { frame: string; sender: string }[];
   callFrames: { frame: string; call: unknown }[];
   callLogFrames: { frame: string; calls: unknown[] }[];
+  transferFrames: { frame: string; from: 'either' | 'phone'; parsed: PcFrame }[];
+  invalidTransferFrames: string[];
+  fileNames: { offered: string; saved: string }[];
 };
 
 test('pairing codes match the shared vectors', () => {
@@ -80,4 +83,25 @@ test('a call frame with a field out of range is refused', () => {
   assert.equal(parsePhoneFrame(log([{ ...entry, kind: 'voicemail' }])), undefined);
   assert.equal(parsePhoneFrame(log([{ ...entry, timeMs: -1e17 }])), undefined);
   assert.equal(parsePhoneFrame(log(Array.from({ length: 101 }, () => entry))), undefined);
+});
+
+test('transfer frames parse to what the vectors name, and the PC builds those it sends exactly', () => {
+  assert.equal(vectors.transferFrames.length, 9);
+  for (const v of vectors.transferFrames) {
+    assert.deepEqual(parsePhoneFrame(v.frame), v.parsed, v.frame);
+    // Only the phone shares text; every other frame the PC sends too, keys in the order given.
+    if (v.from === 'either') assert.equal(JSON.stringify(v.parsed), v.frame);
+  }
+});
+
+test('transfer frames out of range are refused', () => {
+  assert.equal(vectors.invalidTransferFrames.length, 17);
+  for (const frame of vectors.invalidTransferFrames) assert.equal(parsePhoneFrame(frame), undefined, frame.slice(0, 120));
+  assert.equal(parsePhoneFrame('{"t":"fileChunk","id":"f1","data":"not base64!"}'), undefined);
+  assert.equal(parsePhoneFrame(`{"t":"clip","text":"${'x'.repeat(100_000)}"}`)?.t, 'clip', 'the longest text');
+  assert.equal(parsePhoneFrame(`{"t":"fileChunk","id":"f1","data":"${'A'.repeat(349_528)}"}`)?.t, 'fileChunk', 'a full 256 KiB chunk');
+});
+
+test('an offered file name is saved under the name the vectors give', () => {
+  for (const v of vectors.fileNames) assert.equal(safeFileName(v.offered), v.saved, JSON.stringify(v.offered));
 });

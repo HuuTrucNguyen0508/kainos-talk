@@ -1,11 +1,13 @@
 package app.kainos.talk.sync
 
 import android.content.Context
-import android.os.Build
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
+import android.os.Build
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.first
@@ -115,6 +117,14 @@ class SyncClient(
     private val lanWaitMs: Long = LAN_WAIT_MS,
     /** The phone's calls: reported to the PC, and answered, ended or placed from it. */
     private val calls: CallControl = NoCalls,
+    /** Clipboard writes from the PC. */
+    private val clipboard: ClipboardBridge = AndroidClipboard(context),
+    /** Opens shared content URIs for upload to the PC. */
+    private val outgoingFiles: OutgoingFileSource = ContentResolverFileSource(context),
+    /** Creates pending files in Downloads for incoming files from the PC. */
+    private val incomingFiles: IncomingFileSink = MediaStoreDownloadSink(context),
+    /** Notifies the user when a file from the PC lands in Downloads. */
+    private val fileNotifier: FileNotifier = AndroidFileNotifier(context),
 ) : SyncControl {
     private val settings = SyncSettings(context)
     private val discovery = PcDiscovery(context)
@@ -127,6 +137,48 @@ class SyncClient(
     override val discovered: StateFlow<List<FoundPc>> = discovery.found
     private var loop: Job? = null
     @Volatile private var pendingConfirmation: CompletableDeferred<Boolean>? = null
+    @Volatile private var activeOutbox: Channel<OutgoingRequest>? = null
+    @Volatile private var lastClipFromPc: String? = null
+
+    /** True while a welcomed TLS session with the PC is open. */
+    val isConnected: Boolean get() = activeOutbox != null
+
+    /** Sends clipboard text to the PC, suppressing echo of text just received from it. */
+    fun sendClip(text: String): OutboxResult {
+        val outbox = activeOutbox ?: return OutboxResult.NOT_CONNECTED
+        if (text.isEmpty()) return OutboxResult.EMPTY
+        if (text.length > SyncProtocol.MAX_CLIP_CHARS) return OutboxResult.TOO_LONG
+        if (text == lastClipFromPc) return OutboxResult.UNCHANGED
+        lastClipFromPc = null
+        return if (outbox.trySend(OutgoingRequest.Clip(text)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
+    }
+
+    /** Sends text or a link from Android's share sheet to the PC. */
+    fun shareText(text: String): OutboxResult {
+        val outbox = activeOutbox ?: return OutboxResult.NOT_CONNECTED
+        if (text.isEmpty()) return OutboxResult.EMPTY
+        if (text.length > SyncProtocol.MAX_CLIP_CHARS) return OutboxResult.TOO_LONG
+        return if (outbox.trySend(OutgoingRequest.ShareText(text)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
+    }
+
+    /** Queues content URIs to stream to the PC; queues nothing when disconnected. */
+    fun shareFiles(uris: List<Uri>): OutboxResult {
+        val outbox = activeOutbox ?: return OutboxResult.NOT_CONNECTED
+        if (uris.isEmpty()) return OutboxResult.EMPTY
+        return if (outbox.trySend(OutgoingRequest.SendUris(uris)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
+    }
+
+    /** Queues already-opened files (preserving temporary share URI grants after activity finish). */
+    fun sharePreparedFiles(files: List<OutgoingFile>): OutboxResult {
+        val outbox = activeOutbox ?: run {
+            files.forEach(OutgoingFile::close)
+            return OutboxResult.NOT_CONNECTED
+        }
+        if (files.isEmpty()) return OutboxResult.EMPTY
+        if (outbox.trySend(OutgoingRequest.SendFiles(files)).isSuccess) return OutboxResult.QUEUED
+        files.forEach(OutgoingFile::close)
+        return OutboxResult.NOT_CONNECTED
+    }
 
     fun start() {
         if (loop?.isActive == true || settings.load() == null) return
@@ -297,11 +349,23 @@ class SyncClient(
             // The PC pings every 60 s; silence for 90 s means the connection is dead.
             socket.soTimeout = 90_000
             val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
+            val outbox = Channel<OutgoingRequest>(Channel.UNLIMITED)
+            val transfers = TransferSession(
+                send = ::send,
+                outgoingFiles = outgoingFiles,
+                incomingFiles = incomingFiles,
+                fileNotifier = fileNotifier,
+                onIncomingClip = { text ->
+                    lastClipFromPc = text
+                    clipboard.setText(text)
+                },
+            )
             send(SyncProtocol.hello(pc.deviceId))
             val welcome = when (val answer = SyncProtocol.parse(reader.readLine() ?: return@coroutineScope Outcome.CLOSED)) {
                 is PcFrame.Welcome -> {
                     val name = answer.name.ifBlank { pc.host }
                     if (name != pc.pcName) settings.save(pc.copy(pcName = name))
+                    activeOutbox = outbox
                     statusState.value = SyncStatus.Connected(name)
                     onWelcome()
                     answer
@@ -313,6 +377,7 @@ class SyncClient(
             }
             val syncer = launch { syncConversations(welcome, ::send) }
             val caller = launch { syncCalls(::send) }
+            val sender = launch { transfers.drainOutbox(outbox) }
             try {
                 while (isActive) {
                     val line = withContext(Dispatchers.IO) { reader.readLine() } ?: break
@@ -343,12 +408,27 @@ class SyncClient(
                             }
                             send(SyncProtocol.replyResult(frame.id, error))
                         }
+                        is PcFrame.Clip,
+                        is PcFrame.FileOffer,
+                        is PcFrame.FileChunk,
+                        is PcFrame.FileEnd,
+                        is PcFrame.FileResult,
+                        is PcFrame.FileCancel,
+                        -> transfers.onFrame(frame)
                         else -> Unit
                     }
                 }
             } finally {
+                if (activeOutbox === outbox) activeOutbox = null
+                outbox.close()
+                while (true) {
+                    val pending = outbox.tryReceive().getOrNull() ?: break
+                    if (pending is OutgoingRequest.SendFiles) pending.files.forEach(OutgoingFile::close)
+                }
+                transfers.abortIncoming()
                 syncer.cancel()
                 caller.cancel()
+                sender.cancel()
             }
             Outcome.CLOSED_AFTER_WELCOME
         } finally {

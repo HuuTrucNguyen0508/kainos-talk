@@ -173,6 +173,89 @@ class SyncProtocolTest {
         assertNull(SyncProtocol.parse("""{"t":"hangUp","id":"x","call":"c","phase":"held"}"""))
     }
 
+    @Test
+    fun transferFramesMatchTheVectorsExactly() {
+        assertEquals(6, SyncProtocol.VERSION)
+        val cases = vectors.getJSONArray("transferFrames")
+        assertTrue(cases.length() > 0)
+        for (i in 0 until cases.length()) {
+            val v = cases.getJSONObject(i)
+            val from = v.getString("from")
+            val frame = v.getString("frame")
+            val p = v.getJSONObject("parsed")
+            val type = p.getString("t")
+            if (from == "either" || from == "phone") {
+                val built = when (type) {
+                    "clip" -> SyncProtocol.clip(p.getString("text"))
+                    "shareText" -> SyncProtocol.shareText(p.getString("text"))
+                    "fileOffer" -> SyncProtocol.fileOffer(
+                        p.getString("id"),
+                        p.getString("name"),
+                        p.getLong("size"),
+                        p.optString("mime").takeUnless { p.isNull("mime") },
+                    )
+                    "fileChunk" -> SyncProtocol.fileChunk(p.getString("id"), p.getString("data"))
+                    "fileEnd" -> SyncProtocol.fileEnd(p.getString("id"))
+                    "fileResult" -> SyncProtocol.fileResult(
+                        p.getString("id"),
+                        p.optString("error").takeUnless { p.isNull("error") },
+                    )
+                    "fileCancel" -> SyncProtocol.fileCancel(p.getString("id"))
+                    else -> error("unexpected vector type: $type")
+                }
+                assertEquals("vector $i ($type) built frame", frame, built)
+            }
+            if (from == "either") {
+                val expected: PcFrame = when (type) {
+                    "clip" -> PcFrame.Clip(p.getString("text"))
+                    "fileOffer" -> PcFrame.FileOffer(
+                        p.getString("id"),
+                        p.getString("name"),
+                        p.getLong("size"),
+                        p.optString("mime").takeUnless { p.isNull("mime") },
+                    )
+                    "fileChunk" -> PcFrame.FileChunk(p.getString("id"), p.getString("data"))
+                    "fileEnd" -> PcFrame.FileEnd(p.getString("id"))
+                    "fileResult" -> PcFrame.FileResult(
+                        p.getString("id"),
+                        p.getBoolean("ok"),
+                        p.optString("error").takeUnless { p.isNull("error") },
+                    )
+                    "fileCancel" -> PcFrame.FileCancel(p.getString("id"))
+                    else -> error("unexpected pc vector type: $type")
+                }
+                assertEquals("vector $i ($type) parsed frame", expected, SyncProtocol.parse(frame))
+            } else if (from == "phone") {
+                assertNull("phone-only frame $type must not parse from PC", SyncProtocol.parse(frame))
+            }
+        }
+    }
+
+    @Test
+    fun invalidTransferFramesAreRejected() {
+        val invalid = vectors.getJSONArray("invalidTransferFrames")
+        assertTrue(invalid.length() > 0)
+        for (i in 0 until invalid.length()) {
+            val frame = invalid.getString(i)
+            assertNull("invalid vector $i should be rejected", SyncProtocol.parse(frame))
+        }
+        assertNull(SyncProtocol.parse("""{"t":"fileResult","id":"f1","ok":true,"error":"unexpected"}"""))
+        assertNull(SyncProtocol.parse("""{"t":"fileResult","id":"f1","ok":false,"error":null}"""))
+        assertNull(SyncProtocol.parse("""{"t":"fileOffer","id":"","name":"a.txt","size":1,"mime":null}"""))
+        assertNull(SyncProtocol.parse("""{"t":"fileEnd","id":""}"""))
+        assertNull(SyncProtocol.parse("""{"t":"fileCancel","id":""}"""))
+    }
+
+    @Test
+    fun safeFileNameMatchesTheVectors() {
+        val cases = vectors.getJSONArray("fileNames")
+        assertTrue(cases.length() > 0)
+        for (i in 0 until cases.length()) {
+            val v = cases.getJSONObject(i)
+            assertEquals("fileName vector $i", v.getString("saved"), SyncProtocol.safeFileName(v.getString("offered")))
+        }
+    }
+
     /** org.json on the JVM does not keep key order, so frames compare as JSON values. */
     private fun assertJsonEquals(expected: String, actual: String) = assertEquals(actual, plain(JSONObject(expected)), plain(JSONObject(actual)))
 

@@ -15,6 +15,8 @@ import android.os.Looper
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
+import android.telephony.SubscriptionManager
+import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +77,53 @@ object NoCalls : CallControl {
  */
 class PhoneCalls(private val context: Context, private val sms: SmsStore, private val scope: CoroutineScope) : CallControl {
     private val telecom = context.getSystemService(TelecomManager::class.java)
+    private val telephony = context.getSystemService(TelephonyManager::class.java)
+    private val subscriptions = context.getSystemService(SubscriptionManager::class.java)
     private val tracker = CallTracker()
+
+    /** A tablet or a phone without calling has no SIM calls, and its telephony calls throw. */
+    private val hasSims = context.packageManager.let {
+        it.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_CALLING) && it.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_SUBSCRIPTION)
+    }
+
+    /**
+     * Each SIM's call state, which is what the PC follows. Android's phone-state broadcast says the
+     * same for another app's call (Messenger, WhatsApp), and stays quiet when a SIM call ends while
+     * that app's call is on hold. Needs READ_PHONE_STATE.
+     */
+    @SuppressLint("MissingPermission")
+    private fun simStates(): List<Int> =
+        if (!hasSims) emptyList()
+        else subscriptions.activeSubscriptionInfoList.orEmpty().map { telephony.createForSubscriptionId(it.subscriptionId).callStateForSubscription }
+
+    /** The SIMs whose call state is watched, by subscription id. */
+    private var watched: Map<Int, Pair<TelephonyManager, TelephonyCallback>> = emptyMap()
+
+    /** Watches each SIM's call state, once READ_PHONE_STATE is granted and again whenever the SIMs change. */
+    @SuppressLint("MissingPermission")
+    @Synchronized
+    private fun watchSims() {
+        if (!hasSims || !granted(Manifest.permission.READ_PHONE_STATE)) return
+        val ids = subscriptions.activeSubscriptionInfoList.orEmpty().map { it.subscriptionId }.toSet()
+        for ((id, sim) in watched) if (id !in ids) sim.first.unregisterTelephonyCallback(sim.second)
+        watched = ids.associateWith { id ->
+            watched[id] ?: run {
+                val sim = telephony.createForSubscriptionId(id)
+                val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) = onPhoneState(number = null)
+                }
+                sim.registerTelephonyCallback(context.mainExecutor, callback)
+                sim to callback
+            }
+        }
+        // A SIM taken out mid-call reports nothing more: the remaining ones decide now.
+        onPhoneState(number = null)
+    }
+
+    private fun onPhoneState(number: String?) {
+        tracker.onState(simCallState(simStates()), number, System.currentTimeMillis())
+        describeCurrent()
+    }
 
     /** Text conversations by phone number, to link a call to its conversation on the PC. */
     private val conversations = sms.conversations.stateIn(scope, SharingStarted.Eagerly, emptyList())
@@ -85,26 +133,28 @@ class PhoneCalls(private val context: Context, private val sms: SmsStore, privat
     init {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                val state = when (intent.getStringExtra(TelephonyManager.EXTRA_STATE)) {
-                    TelephonyManager.EXTRA_STATE_RINGING -> PhoneState.RINGING
-                    TelephonyManager.EXTRA_STATE_OFFHOOK -> PhoneState.OFFHOOK
-                    TelephonyManager.EXTRA_STATE_IDLE -> PhoneState.IDLE
-                    else -> return
-                }
                 @Suppress("DEPRECATION") // Still the only way a non-dialer app learns the ringing number.
                 val number = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
-                tracker.onState(state, number?.takeIf { it.isNotBlank() }, System.currentTimeMillis())
-                describeCurrent()
+                onPhoneState(number?.takeIf { it.isNotBlank() })
             }
         }
         // A system broadcast: it reaches a receiver that is not exported.
         context.registerReceiver(receiver, IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED), Context.RECEIVER_NOT_EXPORTED)
+        if (hasSims) {
+            subscriptions.addOnSubscriptionsChangedListener(
+                context.mainExecutor,
+                object : SubscriptionManager.OnSubscriptionsChangedListener() {
+                    override fun onSubscriptionsChanged() = watchSims()
+                },
+            )
+        }
     }
 
     private val refreshes = MutableStateFlow(0)
 
     override fun refresh() {
         refreshes.value++
+        watchSims()
     }
 
     /** Watching the call log needs its permission; asked for later, the watch starts again. */
@@ -230,6 +280,13 @@ internal fun callKind(type: Int): CallKind? = when (type) {
 /** The three states Android tells an app that is not the phone app. */
 internal enum class PhoneState { IDLE, RINGING, OFFHOOK }
 
+/** The phone's state from its SIMs' own (`TelephonyManager.CALL_STATE_*`, one per SIM); a SIM ringing comes first. */
+internal fun simCallState(states: List<Int>): PhoneState = when {
+    TelephonyManager.CALL_STATE_RINGING in states -> PhoneState.RINGING
+    TelephonyManager.CALL_STATE_OFFHOOK in states -> PhoneState.OFFHOOK
+    else -> PhoneState.IDLE
+}
+
 /**
  * Turns Android's phone states into the one call the PC shows. Ringing starts an incoming call;
  * off the hook makes a ringing call active, or starts an outgoing one; idle ends it. The ringing
@@ -296,7 +353,9 @@ internal class CallTracker {
             PhoneState.IDLE -> null
         }
         if (phoneState != PhoneState.RINGING) underneath = null
-        if (phoneState != PhoneState.RINGING) expected = null
+        // Off the hook takes the dialled number; idle ends a call. An idle reading with no call is
+        // nothing new, and leaves a dial that has not started yet to its own expiry.
+        if (phoneState == PhoneState.OFFHOOK || (phoneState == PhoneState.IDLE && now != null)) expected = null
     }
 
     private companion object {

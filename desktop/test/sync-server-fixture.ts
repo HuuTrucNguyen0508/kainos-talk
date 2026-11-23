@@ -2,11 +2,18 @@
 // (android/app/src/test/java/app/kainos/talk/sync/SyncInteropTest.kt).
 //   argv: <port> <dir>        stdin: "accept" | "reply <key> <text>" | "read <key>" | "send <number> <text>"
 //                                    | "answer" | "hangup" | "dial <number>" | "dialkey <key>"
+//                                    | "clip <text>" | "sendfile <path>"
 //                                    | "drop" (ends every connection) | "traffic" | "state" | "quit"
 //   stdout: "ready", then "state <json>" on every change (and on "state").
+//   What the PC receives: "clip <json text>", "shareText <json text>",
+//   "fileReceived {"ok":true,"name":…,"path":…,"data":"<base64 of the saved bytes>"}" (or ok false with
+//   "error"), and for each "sendfile", once the phone answered, "fileSent {"ok":…,"name":…,…}".
+//   Received files go to <dir>/downloads.
 //   "traffic" prints `traffic {"in":{"conversation":2,…},"inBytes":n,"out":{…},"outBytes":n}`, the frames
 //   and bytes (before TLS) each way since the last "traffic", then starts counting again.
+import { readFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import tls from 'node:tls';
 import { startSmsSync } from '../src/main/sms-sync.ts';
@@ -47,8 +54,14 @@ const sync = await startSmsSync({
   dir: dir!,
   port: Number(port),
   advertise: false,
+  downloads: join(dir!, 'downloads'),
   onChange: () => console.log(`state ${JSON.stringify(sync.state())}`),
   onIncoming: () => undefined,
+  onClip: (text) => console.log(`clip ${JSON.stringify(text)}`),
+  onShareText: (text) => console.log(`shareText ${JSON.stringify(text)}`),
+  onFileReceived: (outcome) =>
+    console.log(`fileReceived ${JSON.stringify(outcome.ok ? { ...outcome, data: readFileSync(outcome.path).toString('base64') } : outcome)}`),
+  onFileSent: (outcome) => console.log(`fileSent ${JSON.stringify(outcome)}`),
 });
 console.log('ready');
 for await (const line of createInterface({ input: process.stdin })) {
@@ -61,6 +74,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   else if (command === 'hangup') console.log(`hungup ${sync.hangUp()}`);
   else if (command === 'dial') console.log(`dialled ${sync.dial({ number: [key, ...rest].join(' ') })}`);
   else if (command === 'dialkey') console.log(`dialled ${sync.dial({ key: key! })}`);
+  else if (command === 'clip') console.log(`clipped ${sync.sendClip(line.slice('clip '.length))}`);
+  else if (command === 'sendfile') console.log(`sending ${sync.sendFiles([line.slice('sendfile '.length)])}`);
   else if (command === 'image') {
     const picture = await sync.image(key!);
     console.log(`image ${picture ? `data:image/jpeg;base64,${picture.toString('base64')}` : 'null'}`);

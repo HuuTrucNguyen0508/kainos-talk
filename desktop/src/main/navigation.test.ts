@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SERVICES, findService } from '../shared/services.ts';
 import { withServers } from '../shared/streamroom.ts';
-import { claimingService, decideNavigation, decidePopupNavigation, decideWindowOpen, popupTitle } from './navigation.ts';
+import { claimingService, decideNavigation, decidePopupNavigation, decideWindowOpen, popupTitle, sharedLink } from './navigation.ts';
 
 const proton = findService('proton-mail')!;
 const discord = findService('discord')!;
@@ -92,4 +92,14 @@ test('Streamroom on this PC keeps its plain-http pages in the tab and claims the
   assert.equal(decideNavigation(local, 'http://127.0.0.1:8080/'), 'external', 'another name for this PC is another host');
   assert.equal(claimingService(SERVICES, 'http://localhost:8080/?invite=x')?.id, 'streamroom');
   assert.equal(decideNavigation(findService('discord')!, 'http://localhost:8080/'), 'external', 'other services never trust plain http');
+});
+
+test('shared text that is one web link opens; anything else is text for the clipboard', () => {
+  assert.equal(sharedLink('  https://example.com/watch?v=42\n'), 'https://example.com/watch?v=42');
+  assert.equal(sharedLink('http://192.168.1.20:8080/'), 'http://192.168.1.20:8080/');
+  assert.equal(sharedLink('Look at this https://example.com'), undefined);
+  assert.equal(sharedLink('https://a.example https://b.example'), undefined);
+  assert.equal(sharedLink('javascript:alert(1)'), undefined);
+  assert.equal(sharedLink('file:///etc/passwd'), undefined);
+  assert.equal(sharedLink('example.com'), undefined);
 });

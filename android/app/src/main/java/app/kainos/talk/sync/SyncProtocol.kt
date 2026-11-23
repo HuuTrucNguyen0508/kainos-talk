@@ -18,8 +18,10 @@ object SyncProtocol {
      * 4: the welcome lists what the PC still holds, so a reconnect sends only what changed.
      * 5: phone calls (`call`, `callLog`, `answer`, `hangUp`, `dial`). An older PC closes the
      *    connection on a frame type it does not know, so both apps update together.
+     * 6: clipboard sync, shared text/links, and two-way file transfers (`clip`, `shareText`,
+     *    `fileOffer`, `fileChunk`, `fileEnd`, `fileResult`, `fileCancel`).
      */
-    const val VERSION = 5
+    const val VERSION = 6
     const val PORT = 48090
 
     /** mDNS service type of a PC running Kainos Talk. */
@@ -31,6 +33,16 @@ object SyncProtocol {
 
     /** Call log entries sent, newest first. */
     const val MAX_CALL_LOG = 100
+
+    /** Protocol 6 limits for clipboard, share text, and file transfers. */
+    const val MAX_CLIP_CHARS = 100_000
+    const val MAX_TRANSFER_ID = 100
+    const val MAX_FILE_NAME = 255
+    const val MAX_MIME = 255
+    const val MAX_FILE_ERROR = 100
+    const val MAX_FILE_SIZE = 2L * 1024 * 1024 * 1024 // 2 GiB
+    const val MAX_CHUNK_BYTES = 262_144 // 256 KiB
+    const val MAX_CHUNK_BASE64 = 349_528 // ceil(262_144 / 3) * 4
 
     /**
      * The 6-digit code both screens show while pairing. It covers both devices' certificates, so
@@ -179,7 +191,84 @@ object SyncProtocol {
         put("error", if (jpeg == null) (error ?: "not found") else JSONObject.NULL)
     }
 
+    /** Clipboard text sent to the PC. */
+    fun clip(text: String): String = jsonObject("t" to "clip", "text" to text)
+
+    /** Text or a link shared from the Android share sheet. */
+    fun shareText(text: String): String = jsonObject("t" to "shareText", "text" to text)
+
+    /** Announces a file transfer; chunks follow, then [fileEnd]. */
+    fun fileOffer(id: String, name: String, size: Long, mime: String?): String =
+        jsonObject("t" to "fileOffer", "id" to id, "name" to name, "size" to size, "mime" to mime)
+
+    /** Next bytes of an open file transfer, encoded as base64. */
+    fun fileChunk(id: String, data: String): String = jsonObject("t" to "fileChunk", "id" to id, "data" to data)
+
+    /** Next bytes of an open file transfer. */
+    fun fileChunk(id: String, bytes: ByteArray, length: Int = bytes.size): String {
+        val slice = if (length == bytes.size) bytes else bytes.copyOf(length)
+        return fileChunk(id, java.util.Base64.getEncoder().encodeToString(slice))
+    }
+
+    /** Marks the last chunk sent for [id]. */
+    fun fileEnd(id: String): String = jsonObject("t" to "fileEnd", "id" to id)
+
+    /** How a received file transfer ended; null [error] means success. */
+    fun fileResult(id: String, error: String?): String =
+        jsonObject("t" to "fileResult", "id" to id, "ok" to (error == null), "error" to error?.take(MAX_FILE_ERROR))
+
+    /** Stops an in-flight file transfer in either direction. */
+    fun fileCancel(id: String): String = jsonObject("t" to "fileCancel", "id" to id)
+
+    /**
+     * Turns an untrusted offered filename into a safe single file name before collision numbering:
+     * keeps only what follows the last `/` or `\`, drops control characters, trims spaces, and
+     * replaces empty, `.` or `..` with `file`.
+     */
+    fun safeFileName(offered: String): String {
+        val sep = maxOf(offered.lastIndexOf('/'), offered.lastIndexOf('\\'))
+        val base = (if (sep >= 0) offered.substring(sep + 1) else offered)
+            .filterNot { it.isISOControl() }
+            .trim()
+        return if (base.isEmpty() || base == "." || base == "..") "file" else base
+    }
+
     private inline fun frame(type: String, fill: JSONObject.() -> Unit): String = JSONObject().put("t", type).apply(fill).toString()
+
+    /** Deterministic flat JSON object preserving key order and leaving `/` unescaped. */
+    private fun jsonObject(vararg fields: Pair<String, Any?>): String = buildString {
+        append('{')
+        fields.forEachIndexed { index, (key, value) ->
+            if (index > 0) append(',')
+            appendJsonString(key)
+            append(':')
+            when (value) {
+                null -> append("null")
+                is Boolean -> append(if (value) "true" else "false")
+                is Int, is Long -> append(value.toString())
+                is String -> appendJsonString(value)
+                else -> error("unsupported JSON field type: ${value.javaClass.name}")
+            }
+        }
+        append('}')
+    }
+
+    private fun StringBuilder.appendJsonString(value: String) {
+        append('"')
+        for (ch in value) {
+            when (ch) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> if (ch.code < 0x20) append("\\u%04x".format(ch.code)) else append(ch)
+            }
+        }
+        append('"')
+    }
 
     // --- Frames the PC sends: untrusted input ---
 
@@ -190,6 +279,15 @@ object SyncProtocol {
             return null
         }
         fun text(name: String, max: Int = 10_000): String? = o.optString(name, "").takeIf { o.has(name) && o.get(name) is String && it.length <= max }
+        fun wholeLong(name: String, range: LongRange): Long? {
+            val v = o.opt(name)
+            val n = when (v) {
+                is Int -> v.toLong()
+                is Long -> v
+                else -> return null
+            }
+            return n.takeIf { it in range }
+        }
         return when (o.optString("t")) {
             "pairCode" -> text("nonce", 100)?.let { PcFrame.PairCode(it) }
             "paired" -> text("deviceId", 100)?.let { PcFrame.Paired(it) }
@@ -228,6 +326,35 @@ object SyncProtocol {
                 val key = text("key", 500)
                 if (id != null && (number == null) != (key == null)) PcFrame.Dial(id, number, key) else null
             }
+            "clip" -> text("text", MAX_CLIP_CHARS)?.takeIf { it.isNotEmpty() }?.let { PcFrame.Clip(it) }
+            "fileOffer" -> {
+                val id = text("id", MAX_TRANSFER_ID)?.takeIf { it.isNotEmpty() }
+                val name = text("name", MAX_FILE_NAME)?.takeIf { it.isNotEmpty() }
+                val size = wholeLong("size", 0L..MAX_FILE_SIZE)
+                val hasMime = o.has("mime")
+                val mime = if (hasMime && o.isNull("mime")) null else text("mime", MAX_MIME)
+                val mimeValid = hasMime && (o.isNull("mime") || mime != null)
+                if (id != null && name != null && size != null && mimeValid) PcFrame.FileOffer(id, name, size, mime) else null
+            }
+            "fileChunk" -> {
+                val id = text("id", MAX_TRANSFER_ID)?.takeIf { it.isNotEmpty() }
+                val data = text("data", MAX_CHUNK_BASE64)
+                if (id != null && data != null) PcFrame.FileChunk(id, data) else null
+            }
+            "fileEnd" -> text("id", MAX_TRANSFER_ID)?.takeIf { it.isNotEmpty() }?.let { PcFrame.FileEnd(it) }
+            "fileResult" -> {
+                val id = text("id", MAX_TRANSFER_ID)?.takeIf { it.isNotEmpty() }
+                val ok = o.opt("ok") as? Boolean
+                val hasError = o.has("error")
+                val error = if (hasError && o.isNull("error")) null else text("error", MAX_FILE_ERROR)
+                val errorValid = hasError && when (ok) {
+                    true -> o.isNull("error")
+                    false -> error != null
+                    null -> false
+                }
+                if (id != null && ok != null && errorValid) PcFrame.FileResult(id, ok, error) else null
+            }
+            "fileCancel" -> text("id", MAX_TRANSFER_ID)?.takeIf { it.isNotEmpty() }?.let { PcFrame.FileCancel(it) }
             else -> null
         }
     }
@@ -314,6 +441,24 @@ sealed interface PcFrame {
 
     /** Call [number], or the one number of the text conversation [key]: exactly one is set. */
     data class Dial(val id: String, val number: String?, val key: String?) : PcFrame
+
+    /** Clipboard text copied on the PC. */
+    data class Clip(val text: String) : PcFrame
+
+    /** The PC is about to stream a file. */
+    data class FileOffer(val id: String, val name: String, val size: Long, val mime: String?) : PcFrame
+
+    /** Next base64-encoded chunk of the open file transfer. */
+    data class FileChunk(val id: String, val data: String) : PcFrame
+
+    /** Last chunk was sent for [id]. */
+    data class FileEnd(val id: String) : PcFrame
+
+    /** How a file this phone sent ended on the PC. */
+    data class FileResult(val id: String, val ok: Boolean, val error: String?) : PcFrame
+
+    /** The PC stopped a transfer in flight. */
+    data class FileCancel(val id: String) : PcFrame
 }
 
 /** Android tells a normal app only ringing and off the hook, so a call placed is active at once. */

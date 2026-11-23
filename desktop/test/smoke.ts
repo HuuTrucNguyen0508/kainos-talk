@@ -199,6 +199,8 @@ function launch(profile: string, extra: { env?: Record<string, string>; args?: s
       KAINOS_BLOCK_EXTERNAL: '1',
       KAINOS_SYNC_PORT: String(syncPort),
       KAINOS_SYNC_MDNS: '0',
+      // Files from the fake phone land in the profile, never in the user's Downloads.
+      KAINOS_DOWNLOADS: join(profile, 'Downloads'),
       // The fake phone must not make the app connect the real one over Bluetooth.
       KAINOS_CALL_AUDIO: '0',
       DBUS_SESSION_BUS_ADDRESS: bus!.address,
@@ -1007,6 +1009,34 @@ async function run(profile: string): Promise<void> {
       ], 0),
     });
     check((await poll(smsText, (t) => t.includes('Coming at 18:00'), 5000)).includes('Coming at 18:00'), 'the sent reply shows in the thread');
+
+    // Share and clipboard (protocol 6). Off screen there is no Wayland, so the app polls Electron's clipboard.
+    const sharedLink = nextAppEvent<string>(app, 'kainos-external');
+    smsPhone.send({ t: 'shareText', text: ' https://example.com/watch?v=42\n' });
+    check((await sharedLink) === 'https://example.com/watch?v=42', 'a link shared from the phone opens as any link does');
+    // Only clips from here on count: copying a code on the Texts page sends one too.
+    smsPhone.frames.splice(0, Infinity, ...smsPhone.frames.filter((frame) => frame.t !== 'clip'));
+    smsPhone.send({ t: 'clip', text: 'Code 4821 from the phone' });
+    const pcClipboard = await poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), (text) => text === 'Code 4821 from the phone', 5000);
+    check(pcClipboard === 'Code 4821 from the phone', "the phone's clipboard text lands on the PC's clipboard", pcClipboard);
+    await sleep(1500);
+    check(!smsPhone.frames.some((frame) => frame.t === 'clip'), '... and is not sent back to the phone');
+    await app.evaluate(({ clipboard }) => clipboard.writeText('Copied on the PC'));
+    const phoneClip = await smsPhone.next('clip', 5000);
+    check(phoneClip.text === 'Copied on the PC', 'text copied on the PC reaches the phone', JSON.stringify(phoneClip));
+    const pass = Buffer.from('%PDF-1.4 boarding pass');
+    smsPhone.sendAll([
+      { t: 'fileOffer', id: 'smoke-f1', name: 'Boarding pass.pdf', size: pass.length, mime: 'application/pdf' },
+      { t: 'fileChunk', id: 'smoke-f1', data: pass.toString('base64') },
+      { t: 'fileEnd', id: 'smoke-f1' },
+    ]);
+    const fileResult = await smsPhone.next('fileResult');
+    const saved = join(profile, 'Downloads', 'Boarding pass.pdf');
+    check(fileResult.ok && readFileSync(saved).equals(pass), 'a file shared from the phone lands in Downloads, byte for byte', JSON.stringify(fileResult));
+    await page.locator('#phone').click();
+    await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Open Texts', 5000);
+    const linkedItems = await menuItems(app);
+    check(JSON.stringify(linkedItems) === '["Open Texts","Send files to phone…","Forget Pixel 9…"]', 'with the phone connected, its menu offers Send files to phone…', JSON.stringify(linkedItems));
     await inService(app, 'inbox', `document.querySelector('.row[data-key="sms|0|s:mum"]').click(); 1`, true);
     await smsPhone.next('read');
     check((await poll(() => tabState(page, 'inbox'), (t) => t === ':', 5000)) === ':', 'reading every text clears the Texts count');
@@ -1645,8 +1675,13 @@ async function run(profile: string): Promise<void> {
     // The dock options: keep the dock shown in its own strip, saved with the window state.
     await revealDock(app, page, 'whatsapp');
     await page.locator('#dock-options').click();
-    const dockMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000)).at(-1);
-    check(JSON.stringify(dockMenu?.labels) === '["Always show the dock","Hidden services","Choose apps…","Theme"]', 'the Kainos mark opens the dock options: Always show the dock, Hidden services, Choose apps…, Theme', JSON.stringify(dockMenu?.labels));
+    await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
+    const dockOptions = await menuItems(app);
+    check(
+      JSON.stringify(dockOptions) === '["Always show the dock","(Hidden services)","Choose apps…","Theme","(Send files to phone…)","Send copied text to the phone"]',
+      'the Kainos mark opens the dock options: Always show the dock, Hidden services, Choose apps…, Theme, then Send files to phone… (greyed out, the phone is away) and Send copied text to the phone',
+      JSON.stringify(dockOptions),
+    );
     const themeItems = await submenuLabels(app, 'Theme');
     check(JSON.stringify(themeItems) === '["*Match system","Switchboard","Daylight","Bakelite","Carbon","Aubergine"]', 'Theme offers Match system (picked) and the five themes', JSON.stringify(themeItems));
     await clickMenuItem(app, 'Always show the dock');
@@ -1720,8 +1755,9 @@ async function run(profile: string): Promise<void> {
 
     // The phone island: forgetting the phone is one menu away from any service.
     await page.locator('#phone').click();
-    const phoneMenu = (await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Open Texts', 5000)).at(-1);
-    check(JSON.stringify(phoneMenu?.labels.filter(Boolean)) === '["Open Texts","Forget Pixel 9…"]', 'the phone island opens Open Texts and Forget this phone', JSON.stringify(phoneMenu?.labels));
+    await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Open Texts', 5000);
+    const phoneItems = await menuItems(app);
+    check(JSON.stringify(phoneItems) === '["Open Texts","(Send files to phone…)","Forget Pixel 9…"]', 'the phone island opens Open Texts, Send files to phone… (greyed out, the phone is away) and Forget this phone', JSON.stringify(phoneItems));
     check(await clickMenuItem(app, 'Forget'), 'the phone menu has Forget');
     check((await boxes(app)).some((b) => b.message === 'Forget Pixel 9?'), 'Forget asks first');
     check(/No phone/.test(await poll(() => page.locator('#phone').innerText(), (t) => /No phone/.test(t), 5000)), 'after Forget, the phone island says there is no phone');
@@ -2068,7 +2104,7 @@ async function run(profile: string): Promise<void> {
       const full = (await revealDock(app, page, 'messenger'))!;
       await page.locator('#dock-options').click();
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
-      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Choose apps…","Theme"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
+      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Choose apps…","Theme","(Send files to phone…)","Send copied text to the phone"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
       await tab(page, 'messenger').click({ button: 'right' });
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Messenger', 5000);
       await clickMenuItem(app, 'Hide from dock');

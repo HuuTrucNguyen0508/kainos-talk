@@ -12,8 +12,8 @@ export const Channel = {
   notificationClick: 'kainos:notification-click',
   /** Service preload to main: what the page's own unread counter says. */
   unreadCounter: 'kainos:unread-counter',
-  /** Service preload to main: whether the page has a call, a capture or a peer connection going (boolean). */
-  pageBusy: 'kainos:page-busy',
+  /** Service preload to main: what the page has going (PageActivity, or null for nothing). */
+  pageActivity: 'kainos:page-activity',
   /** Main to the dock: put keyboard focus on the active service's tab. */
   focusDock: 'kainos:focus-dock',
   /** Dock to main: open the dock options menu. */
@@ -84,6 +84,17 @@ export function parseDockSize(raw: unknown): DockSize | undefined {
   const { width, height } = raw as Record<string, unknown>;
   const ok = (n: unknown, max: number): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= max;
   return ok(width, 100_000) && ok(height, DOCK_HEIGHT * 4) ? { width: Math.ceil(width), height: Math.ceil(height) } : undefined;
+}
+
+/**
+ * What a page has going that must not be cut off: a ringtone looping (a call coming in, or one
+ * it is placing), a call connected, or only a camera, microphone or screen capture.
+ */
+export type PageActivity = 'ringing' | 'call' | 'capture';
+
+/** The page's report is untrusted input; anything unknown is nothing going. */
+export function parsePageActivity(raw: unknown): PageActivity | null {
+  return raw === 'ringing' || raw === 'call' || raw === 'capture' ? raw : null;
 }
 
 export type ServiceStatus =

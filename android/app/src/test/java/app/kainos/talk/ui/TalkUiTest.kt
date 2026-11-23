@@ -59,6 +59,7 @@ class TalkUiTest {
         sync.answer.complete(PairResult.Paired)
         compose.waitForIdle()
         compose.onNodeWithText("Connected. Your texts show on this computer.").assertExists()
+        compose.onNodeWithText("Allow file notifications").assertExists()
         compose.onNodeWithText("Forget this computer").performClick()
         assertTrue(sync.forgotten)
         compose.onNodeWithContentDescription("Connect to studio-desktop").assertExists()

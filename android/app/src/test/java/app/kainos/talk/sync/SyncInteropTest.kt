@@ -1,40 +1,55 @@
 package app.kainos.talk.sync
 
+import android.content.ClipboardManager
+import android.content.Context
+import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import app.kainos.talk.hub.ChatThread
 import app.kainos.talk.hub.InboxChat
 import app.kainos.talk.hub.ThreadMessage
 import app.kainos.talk.store.MessageStatus
 import app.kainos.talk.ui.FakeTalkHub
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
+import org.json.JSONTokener
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assume.assumeTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
-import java.nio.file.Files
+import java.util.Base64
+import java.util.Random
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
  * The phone's real SyncClient against the PC's real sync server (desktop/src/main/sms-sync.ts,
- * run with Node through desktop/test/sync-server-fixture.ts): pairing, texts, a reply, a read, a
- * picture and a new text.
+ * run with Node through desktop/test/sync-server-fixture.ts): pairing, messages, calls, clipboard
+ * and file sharing.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class SyncInteropTest {
+    @get:Rule
+    val temp = TemporaryFolder()
+
     private val desktop = File("../../desktop").canonicalFile
     private val port = 49_600 + (Math.random() * 300).toInt()
     private lateinit var server: Process
@@ -45,7 +60,7 @@ class SyncInteropTest {
     fun startServer() {
         val node = listOf("/usr/bin/node", "/usr/local/bin/node").firstOrNull { File(it).canExecute() }
         assumeTrue("needs Node to run the desktop's sync server", node != null)
-        val dir = Files.createTempDirectory("kainos-interop").toFile()
+        val dir = temp.newFolder("server")
         server = ProcessBuilder(node, "test/sync-server-fixture.ts", port.toString(), dir.path)
             .directory(desktop)
             .redirectErrorStream(true)
@@ -89,6 +104,8 @@ class SyncInteropTest {
 
     private fun JSONObject.frames(type: String) = getJSONObject("in").optInt(type)
 
+    private fun awaitEvent(event: String): String = await(event) { it.startsWith("$event ") }.removePrefix("$event ")
+
     /** The PC ends the connection; [whileAway] runs once the phone is off, then it reconnects. */
     private fun reconnect(whileAway: () -> Unit = {}) {
         command("drop")
@@ -130,10 +147,30 @@ class SyncInteropTest {
 
     @Test
     fun pairsSyncsTextsAndCarriesRepliesAndReads() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
         val hub = hub()
         val store = FakeSmsStore().apply { images["mms-part:1"] = byteArrayOf(-1, -40, -1) }
         val calls = FakeCalls()
-        val client = SyncClient(ApplicationProvider.getApplicationContext(), hub, store, scope, identity("phone.p12"), port, lanAvailable = kotlinx.coroutines.flow.flowOf(true), calls = calls)
+        val download = CompletableDeferred<Pair<SavedFile, ByteArray>>()
+        val client = SyncClient(
+            context, hub, store, scope, identity("phone.p12"), port,
+            lanAvailable = kotlinx.coroutines.flow.flowOf(true), calls = calls,
+            incomingFiles = IncomingFileSink { name, mime ->
+                object : IncomingFileHandle {
+                    override val output = ByteArrayOutputStream()
+
+                    override fun commit(): SavedFile {
+                        val saved = SavedFile(Uri.parse("content://test/download"), name, mime)
+                        download.complete(saved to output.toByteArray())
+                        return saved
+                    }
+
+                    override fun abort() {
+                        output.reset()
+                    }
+                }
+            },
+        )
         val impostor = client.pairAt(listOf("127.0.0.1"), expectedFingerprint = "00".repeat(32), name = "Test PC") {}
         assertEquals("a PC whose certificate differs from its mDNS record is refused", true, impostor is PairResult.Failed)
         val phoneCode = java.util.concurrent.atomic.AtomicReference("")
@@ -223,6 +260,8 @@ class SyncInteropTest {
         command("dialkey sms|0|s:mum")
         awaitState("the phone's refusal to dial") { s -> s.getJSONObject("callAction").optString("failure") == "no single number for this conversation" }
 
+        exchangeClipboardAndFiles(client, context.getSystemService(ClipboardManager::class.java)!!, download)
+
         // Another device with its own certificate cannot take the phone's place, even with its id.
         // Same app storage, so the same device id and PC pin; only the certificate differs.
         val stranger = SyncClient(ApplicationProvider.getApplicationContext(), hub, store, scope, identity("impostor.p12"), port, lanAvailable = kotlinx.coroutines.flow.flowOf(true))
@@ -235,6 +274,55 @@ class SyncInteropTest {
         awaitState("the phone to disconnect") { it.optJSONObject("phone")?.optBoolean("connected") == false }
         assertEquals(SyncStatus.NotPaired, client.status.value)
         command("quit")
+    }
+
+    private suspend fun exchangeClipboardAndFiles(
+        client: SyncClient,
+        clipboard: ClipboardManager,
+        download: CompletableDeferred<Pair<SavedFile, ByteArray>>,
+    ) {
+        traffic()
+        val pcClip = "Copié sur le PC 🌻"
+        command("clip $pcClip")
+        assertEquals("true", awaitEvent("clipped"))
+        val copied = withTimeout(5_000) {
+            while (!clipboard.hasPrimaryClip()) delay(10)
+            clipboard.primaryClip!!.getItemAt(0).text.toString()
+        }
+        assertEquals(pcClip, copied)
+        assertEquals(OutboxResult.UNCHANGED, client.sendClip(copied))
+
+        val phoneClip = "Téléphone 🌙\nDeuxième ligne"
+        assertEquals(OutboxResult.QUEUED, client.sendClip(phoneClip))
+        assertEquals(phoneClip, JSONTokener(awaitEvent("clip")).nextValue())
+
+        val phoneBytes = ByteArray(1_100_123).also { Random(42).nextBytes(it) }
+        val phoneFile = OutgoingFile("Du téléphone.bin", phoneBytes.size.toLong(), "application/octet-stream", ByteArrayInputStream(phoneBytes))
+        assertEquals(OutboxResult.QUEUED, client.sharePreparedFiles(listOf(phoneFile)))
+        // This uses the same outbox as the file, which blocks until the PC's result arrives.
+        val sharedText = "https://example.com/été\nPartagé depuis le téléphone 📎"
+        assertEquals(OutboxResult.QUEUED, client.shareText(sharedText))
+        val received = JSONObject(awaitEvent("fileReceived"))
+        assertEquals(received.optString("error"), true, received.getBoolean("ok"))
+        assertEquals(phoneFile.name, received.getString("name"))
+        assertArrayEquals(phoneBytes, Base64.getDecoder().decode(received.getString("data")))
+        assertEquals(sharedText, JSONTokener(awaitEvent("shareText")).nextValue())
+
+        val pcBytes = ByteArray(1_100_321).also { Random(97).nextBytes(it) }
+        val pcFile = temp.newFile("Du PC.bin").apply { writeBytes(pcBytes) }
+        command("sendfile ${pcFile.absolutePath}")
+        assertEquals("true", awaitEvent("sending"))
+        val sent = JSONObject(awaitEvent("fileSent"))
+        assertEquals(sent.optString("error"), true, sent.getBoolean("ok"))
+        assertEquals(pcFile.name, sent.getString("name"))
+        val (saved, savedBytes) = withTimeout(5_000) { download.await() }
+        assertEquals(pcFile.name, saved.displayName)
+        assertArrayEquals(pcBytes, savedBytes)
+
+        val exchange = traffic()
+        assertEquals("only the phone's own clip goes to the PC", 1, exchange.frames("clip"))
+        assertEquals("the phone stayed on the same connection", 0, exchange.frames("hello"))
+        assertEquals("the PC acknowledged the phone's file", 1, exchange.getJSONObject("out").optInt("fileResult"))
     }
 }
 

@@ -40,6 +40,8 @@ export interface AppState {
   readonly enabledServiceIds: readonly string[];
   /** Whether the user has chosen their apps; until then Kainos opens on Choose your apps. */
   readonly welcomed: boolean;
+  /** Text copied on the PC goes to the phone's clipboard. Text from the phone always lands. */
+  readonly sendClipboard: boolean;
 }
 
 /** What the registry says about the services, for reading and defaulting the state. */
@@ -73,6 +75,7 @@ export function defaultState(serviceIds: readonly string[], rules: StateRules = 
     streamroom: DEFAULT_SERVERS,
     enabledServiceIds: [],
     welcomed: false,
+    sendClipboard: true,
   };
 }
 
@@ -144,6 +147,7 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
     enabledServiceIds,
     // A state saved before the welcome existed belongs to someone who already set Kainos up.
     welcomed: Array.isArray(raw.enabledServiceIds) ? raw.welcomed === true : true,
+    sendClipboard: raw.sendClipboard !== false,
   };
 }
 

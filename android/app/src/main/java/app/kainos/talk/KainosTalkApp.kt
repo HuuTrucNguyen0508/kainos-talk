@@ -17,6 +17,8 @@ import app.kainos.talk.listener.NotificationIngest
 import app.kainos.talk.store.MessageStore
 import app.kainos.talk.store.TalkDatabase
 import app.kainos.talk.hub.SmsAwareHub
+import app.kainos.talk.sync.DeviceIdentity
+import app.kainos.talk.sync.KeystoreIdentity
 import app.kainos.talk.sync.PhoneCalls
 import app.kainos.talk.sync.SmsInbox
 import app.kainos.talk.sync.SyncClient
@@ -25,14 +27,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
 open class KainosTalkApp : Application() {
-    val graph: AppGraph by lazy { AppGraph(this, watchedPackages()) }
+    val graph: AppGraph by lazy { AppGraph(this, watchedPackages(), deviceIdentity()) }
 
     /** The SMS apps whose notifications are read. The instrumented test adds its fake sender. */
     protected open fun watchedPackages(): Set<String> = smsPackages(Telephony.Sms.getDefaultSmsPackage(this))
+
+    /** This phone's TLS certificate; Robolectric tests provide one without AndroidKeyStore. */
+    protected open fun deviceIdentity(): DeviceIdentity = KeystoreIdentity()
 }
 
 /** Wires the hub together by hand; there are few enough parts that a DI framework would cost more. */
-class AppGraph(context: Context, watched: Set<String>) {
+class AppGraph(context: Context, watched: Set<String>, identity: DeviceIdentity = KeystoreIdentity()) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -70,7 +75,7 @@ class AppGraph(context: Context, watched: Set<String>) {
     val calls = PhoneCalls(appContext, sms, scope)
 
     /** SMS sync with the paired PC; it runs whenever the app's process does. */
-    val sync = SyncClient(appContext, hub, sms, scope, pictures = { id -> images.load(id) ?: sms.image(id) }, calls = calls).also { it.start() }
+    val sync = SyncClient(appContext, hub, sms, scope, identity = identity, pictures = { id -> images.load(id) ?: sms.image(id) }, calls = calls).also { it.start() }
 }
 
 fun Context.talkGraph(): AppGraph = (applicationContext as KainosTalkApp).graph

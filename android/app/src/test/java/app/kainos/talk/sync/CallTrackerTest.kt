@@ -1,6 +1,7 @@
 package app.kainos.talk.sync
 
 import android.provider.CallLog
+import android.telephony.TelephonyManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
@@ -77,6 +78,37 @@ class CallTrackerTest {
         tracker.onState(PhoneState.OFFHOOK, null, 4_000)
         assertEquals(first, tracker.call.value)
         assertEquals(false, tracker.waiting)
+    }
+
+    @Test
+    fun onlyTheSimDecidesSoAMessengerOrWhatsAppCallNeverReachesThePc() {
+        // Android announces another app's call (Messenger, WhatsApp) like a SIM call, without its number.
+        assertEquals(PhoneState.IDLE, simCallState(listOf(TelephonyManager.CALL_STATE_IDLE)))
+        assertEquals(PhoneState.RINGING, simCallState(listOf(TelephonyManager.CALL_STATE_RINGING)))
+        assertEquals(PhoneState.OFFHOOK, simCallState(listOf(TelephonyManager.CALL_STATE_OFFHOOK)))
+        assertEquals("no SIM", PhoneState.IDLE, simCallState(emptyList()))
+        assertEquals("a second SIM rings during a call", PhoneState.RINGING, simCallState(listOf(TelephonyManager.CALL_STATE_OFFHOOK, TelephonyManager.CALL_STATE_RINGING)))
+        assertEquals(PhoneState.OFFHOOK, simCallState(listOf(TelephonyManager.CALL_STATE_IDLE, TelephonyManager.CALL_STATE_OFFHOOK)))
+
+        // While a Messenger call rings during a SIM call, the SIM call stays the one on the PC.
+        val tracker = CallTracker()
+        tracker.onState(simCallState(listOf(TelephonyManager.CALL_STATE_RINGING)), "+33612345678", 1_000)
+        tracker.onState(simCallState(listOf(TelephonyManager.CALL_STATE_OFFHOOK)), null, 2_000)
+        val simCall = tracker.call.value!!
+        tracker.onState(simCallState(listOf(TelephonyManager.CALL_STATE_OFFHOOK)), null, 3_000)
+        assertEquals(simCall, tracker.call.value)
+        assertEquals(false, tracker.waiting)
+    }
+
+    @Test
+    fun anIdleReadingBeforeTheDialledCallStartsKeepsItsNumber() {
+        // Each SIM's watcher reports the state it starts with, which can land between the PC's dial and the call.
+        val tracker = CallTracker()
+        tracker.expectOutgoing("+33612345678", 1_000)
+        tracker.onState(PhoneState.IDLE, null, 1_100)
+        assertEquals("a second dial is still refused", false, tracker.expectOutgoing("+33600000000", 1_200))
+        tracker.onState(PhoneState.OFFHOOK, null, 2_000)
+        assertEquals("+33612345678", tracker.call.value!!.number)
     }
 
     @Test

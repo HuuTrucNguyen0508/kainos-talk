@@ -1,6 +1,6 @@
 import { BrowserWindow, Menu, WebContentsView, clipboard, session, type MenuItemConstructorOptions, type WebContents } from 'electron';
 import { join } from 'node:path';
-import { Channel, type ServiceStatus } from '../shared/ipc.ts';
+import { Channel, parsePageActivity, type PageActivity, type ServiceStatus } from '../shared/ipc.ts';
 import { partitionFor, type ServiceDefinition } from '../shared/services.ts';
 import { NO_UNREAD, parseCounterReading, sameUnread, unreadFromPage, type CounterReading, type Unread } from '../shared/unread.ts';
 import { decideNavigation, decidePopupNavigation, decideWindowOpen, isExternalSafe, popupTitle, type PageNavigation } from './navigation.ts';
@@ -44,6 +44,8 @@ export interface ServiceRuntime {
    * going. Its changes come through `onChange`.
    */
   busy(): boolean;
+  /** The call on this tab: one ringing (in or out), one connecting, connected or in its call window, or none. */
+  callPhase(): 'ringing' | 'call' | undefined;
   /** Closes the page and its popups, ending its renderer process; the login stays. */
   hibernate(): void;
   /** A new page on the start page. Does nothing unless hibernating. */
@@ -120,8 +122,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
   let counter: CounterReading | undefined;
   let unread: Unread = NO_UNREAD;
   let fullscreen = false;
-  /** What the page's preload last said about its calls and captures. */
-  let pageBusy = false;
+  /** What the page's preload last said it has going. */
+  let activity: PageActivity | null = null;
   /** Whether the page may sleep out of sight (background throttling on). */
   let sleepOk = false;
   /** Recomputes the unread count; a page that is not running has none. */
@@ -176,21 +178,26 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     contents.on('dom-ready', () => applyLive({ kind: 'dom-ready' }));
     contents.on('did-stop-loading', () => applyLive({ kind: 'stop-loading' }));
     contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => applyLive({ kind: 'fail-load', code, description, url, isMainFrame }));
-    contents.on('render-process-gone', (_event, details) => applyLive({ kind: 'gone', reason: details.reason, host: new URL(service.url).host }));
+    contents.on('render-process-gone', (_event, details) => {
+      // A crashed page rings and calls no more.
+      if (live()) activity = null;
+      applyLive({ kind: 'gone', reason: details.reason, host: new URL(service.url).host });
+    });
     contents.on('page-title-updated', (_event, title) => {
       if (!live()) return;
       titleUnread = service.unread(title);
       if (refreshUnread()) options.onChange();
     });
-    contents.ipc.on(Channel.pageBusy, (_event, busy: unknown) => {
-      if (!live() || pageBusy === (busy === true)) return;
-      pageBusy = busy === true;
+    contents.ipc.on(Channel.pageActivity, (_event, raw: unknown) => {
+      const next = parsePageActivity(raw);
+      if (!live() || activity === next) return;
+      activity = next;
       options.onChange();
     });
     // The page in the window now is another document, whose preload starts idle. A navigation
     // that was cancelled (a link sent to the browser) leaves the old document and its calls.
     contents.on('did-navigate', () => {
-      if (live()) pageBusy = false;
+      if (live()) activity = null;
     });
     contents.on('audio-state-changed', () => {
       if (live()) options.onChange();
@@ -301,6 +308,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       return { action: 'deny' };
     });
     contents.on('context-menu', (_event, params) => showPageMenu(contents, params));
+    // A crashed call is over; its page goes like a hung-up one.
+    contents.on('render-process-gone', () => setImmediate(endCall));
     contents.once('destroyed', () => {
       if (call !== created) return;
       call = undefined;
@@ -353,7 +362,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
     }
     view = createView();
     sleepOk = false;
-    pageBusy = false;
+    activity = null;
     options.onViewCreated(view);
     load(url);
   };
@@ -379,7 +388,8 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       view.webContents.setBackgroundThrottling(next);
     },
     sleepAllowed: () => sleepOk,
-    busy: () => call !== undefined || popups.size > 0 || pageBusy || view?.webContents.isCurrentlyAudible() === true,
+    busy: () => call !== undefined || popups.size > 0 || activity !== null || view?.webContents.isCurrentlyAudible() === true,
+    callPhase: () => (activity === 'ringing' ? 'ringing' : call !== undefined || activity === 'call' ? 'call' : undefined),
     fullscreen: () => fullscreen,
     restart,
     reload: (ignoreCache = false) => {
@@ -399,7 +409,7 @@ export function createServiceRuntime(initial: ServiceDefinition, options: Runtim
       if (!closing.webContents.isDestroyed()) closing.webContents.close({ waitForBeforeUnload: false });
       status = { kind: 'hibernated' };
       sleepOk = false;
-      pageBusy = false;
+      activity = null;
       titleUnread = NO_UNREAD;
       counter = undefined;
       fullscreen = false;

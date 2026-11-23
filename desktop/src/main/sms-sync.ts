@@ -2,10 +2,12 @@ import { randomBytes, randomUUID, timingSafeEqual, X509Certificate } from 'node:
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { announce } from './mdns.ts';
+import { createTransfers, isFileFrame, type FileOutcome, type TransferWire, type Transfers } from './file-transfer.ts';
 import { join } from 'node:path';
 import { createServer, type TLSSocket } from 'node:tls';
 import {
   MAX_FRAME_BYTES,
+  MAX_TEXT_CHARS,
   SYNC_PORT,
   SYNC_SERVICE,
   SYNC_VERSION,
@@ -33,6 +35,15 @@ export interface SmsSyncOptions {
   readonly onIncoming: (conversation: SyncConversation, message: SyncMessage) => void;
   /** Whether call sound reaches this PC; kept outside, by the Bluetooth link. */
   readonly callAudio?: () => CallAudio | null;
+  /** Where files from the phone go: the Downloads folder. */
+  readonly downloads: string;
+  /** The phone sent its clipboard. */
+  readonly onClip?: (text: string) => void;
+  /** Text or a link was shared from the phone. */
+  readonly onShareText?: (text: string) => void;
+  readonly onFileReceived?: (outcome: FileOutcome) => void;
+  /** A file sent with `sendFiles` reached the phone, or did not. */
+  readonly onFileSent?: (outcome: FileOutcome) => void;
 }
 
 export interface SmsSync {
@@ -50,6 +61,10 @@ export interface SmsSync {
   hangUp(): boolean;
   /** Calls a number, or the one number of a text conversation, from the phone. */
   dial(to: { readonly number: string } | { readonly key: string }): boolean;
+  /** Puts text on the phone's clipboard; false when no phone is connected or the text is empty or too long. */
+  sendClip(text: string): boolean;
+  /** Sends files to the phone's Downloads, one at a time; false when no phone is connected. */
+  sendFiles(paths: readonly string[]): boolean;
   /** A picture from a message (JPEG bytes); fetched from the phone once, then cached. */
   image(id: string): Promise<Buffer | null>;
   /** Closes the server and every connection. */
@@ -120,17 +135,20 @@ async function loadTls(dir: string): Promise<Tls> {
 }
 
 /** One line-delimited JSON connection. */
-class Line {
+class Line implements TransferWire {
   private buffer = '';
   readonly socket: TLSSocket;
   constructor(socket: TLSSocket, onFrame: (frame: PhoneFrame, line: string) => void) {
     this.socket = socket;
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
+      // Only the new data can hold the end of the line: a file chunk comes in many pieces.
+      let from = this.buffer.length;
       this.buffer += chunk;
       if (this.buffer.length > MAX_FRAME_BYTES) return socket.destroy();
       let end: number;
-      while ((end = this.buffer.indexOf('\n')) >= 0) {
+      while ((end = this.buffer.indexOf('\n', from)) >= 0) {
+        from = 0;
         const line = this.buffer.slice(0, end);
         this.buffer = this.buffer.slice(end + 1);
         const frame = parsePhoneFrame(line);
@@ -139,8 +157,28 @@ class Line {
       }
     });
   }
-  send(frame: PcFrame): void {
-    if (!this.socket.destroyed) this.socket.write(`${JSON.stringify(frame)}\n`);
+  /** False when the socket's buffer is full. */
+  send(frame: PcFrame): boolean {
+    return this.socket.destroyed || this.socket.write(`${JSON.stringify(frame)}\n`);
+  }
+  drained(): Promise<void> {
+    const { socket } = this;
+    if (socket.destroyed || !socket.writableNeedDrain) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        socket.off('drain', done);
+        socket.off('close', done);
+        resolve();
+      };
+      socket.on('drain', done);
+      socket.on('close', done);
+    });
+  }
+  pause(): void {
+    this.socket.pause();
+  }
+  resume(): void {
+    this.socket.resume();
   }
 }
 
@@ -161,6 +199,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
 
   let listenError: string | undefined;
   let connection: Line | undefined;
+  /** The connected phone's files. */
+  let transfers: Transfers | undefined;
   let connectedAt = 0;
   let pairing:
     | { line: Line; device: string; code: string; phoneFingerprint: string; pcAccepted: boolean; phoneConfirmed: boolean; timer: NodeJS.Timeout }
@@ -215,6 +255,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
 
   function receive(frame: PhoneFrame, line: string): void {
     if (frame.t === 'ignored') return;
+    if (frame.t === 'clip') return options.onClip?.(frame.text);
+    if (frame.t === 'shareText') return options.onShareText?.(frame.text);
     if (frame.t === 'conversation') {
       const { conversation } = frame;
       conversations.set(conversation.key, conversation);
@@ -297,12 +339,13 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       pongDue = setTimeout(() => socket.destroy(), PONG_GRACE_MS);
     };
     let role: 'unknown' | 'pairing' | 'phone' = 'unknown';
+    let ownTransfers: Transfers | undefined;
     const first = setTimeout(() => role === 'unknown' && socket.destroy(), 10_000);
     const line: Line = new Line(socket, (frame, text) => {
       lastHeard = Date.now();
       pongPending = false;
       clearTimeout(pongDue);
-      if (role === 'phone') return receive(frame, text);
+      if (role === 'phone') return isFileFrame(frame) ? ownTransfers!.receive(frame) : receive(frame, text);
       if (role === 'pairing') {
         if (frame.t === 'pairConfirm' && pairing?.line === line) {
           pairing.phoneConfirmed = true;
@@ -342,6 +385,12 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
           connection?.socket.destroy();
           connection = line;
           connectedAt = Date.now();
+          ownTransfers = transfers = createTransfers({
+            wire: line,
+            dir: options.downloads,
+            onReceived: (outcome) => options.onFileReceived?.(outcome),
+            onSent: (outcome) => options.onFileSent?.(outcome),
+          });
           const held = Object.fromEntries([...conversations.keys()].map((key) => [key, hashes.get(key) ?? '']));
           line.send({ t: 'welcome', name: hostname(), conversations: held });
           changed();
@@ -376,6 +425,8 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       clearTimeout(pongDue);
       clearTimeout(first);
       if (pairing?.line === line) endPairing();
+      ownTransfers?.close();
+      if (transfers === ownTransfers) transfers = undefined;
       if (connection === line) {
         connection = undefined;
         // Out of touch, the PC can't tell when the call ends; a stale ringing bar is worse than none.
@@ -448,6 +499,16 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       if (!connection || call || callPending()) return false;
       if ('key' in to) return conversations.has(to.key) && request(CALL, (id) => ({ t: 'dial', id, number: null, key: to.key }));
       return isPhoneNumber(to.number) && request(CALL, (id) => ({ t: 'dial', id, number: to.number.trim(), key: null }));
+    },
+    sendClip(text) {
+      if (!connection || text.length === 0 || text.length > MAX_TEXT_CHARS) return false;
+      connection.send({ t: 'clip', text });
+      return true;
+    },
+    sendFiles(paths) {
+      if (!transfers) return false;
+      transfers.send(paths);
+      return true;
     },
     image(id) {
       const cached = images.get(id);

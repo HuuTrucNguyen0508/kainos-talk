@@ -17,6 +17,14 @@ export function isExternalSafe(url: string): boolean {
   return parsed !== undefined && ['https:', 'http:', 'mailto:'].includes(parsed.protocol);
 }
 
+/** Text shared from the phone that is one web link and nothing else, as the link to open. */
+export function sharedLink(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (/\s/.test(trimmed)) return undefined;
+  const parsed = parse(trimmed);
+  return parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:') ? trimmed : undefined;
+}
+
 export type PageNavigation = 'stay' | 'external' | 'block';
 
 /** A top-level navigation inside a service view: its own pages stay, anything else goes to the browser. */
