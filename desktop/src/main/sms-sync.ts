@@ -35,8 +35,8 @@ export interface SmsSyncOptions {
   readonly onIncoming: (conversation: SyncConversation, message: SyncMessage) => void;
   /** Whether call sound reaches this PC; kept outside, by the Bluetooth link. */
   readonly callAudio?: () => CallAudio | null;
-  /** Where files from the phone go: the Downloads folder. */
-  readonly downloads: string;
+  /** Where files from the phone go, asked as each one starts: the folder the user chose. */
+  readonly downloads: () => string;
   /** The phone sent its clipboard. */
   readonly onClip?: (text: string) => void;
   /** Text or a link was shared from the phone. */

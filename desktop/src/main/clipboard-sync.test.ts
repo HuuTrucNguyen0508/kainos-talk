@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
-import { polledClipboard, startClipboardSync, textType, waylandClipboard, type ClipboardBackend } from './clipboard-sync.ts';
+import { WATCH_COMMAND, polledClipboard, startClipboardSync, textType, waylandClipboard, type ClipboardBackend } from './clipboard-sync.ts';
 
 /** A clipboard the test copies to, as another app would. */
 function fakeClipboard(initial: string | undefined) {
@@ -198,4 +199,25 @@ test('polling withholds clipboard text marked private by Linux or Windows', asyn
     isPrivate = false;
     assert.equal(await clipboard.read(), 'clipboard text', platform);
   }
+});
+
+/**
+ * Runs WATCH_COMMAND for one copy the way `wl-paste --watch` does, under a stand-in parent that
+ * would otherwise live 10 s. Resolves with how the stand-in ended.
+ */
+function watchOnce(read: boolean): Promise<{ signal: NodeJS.Signals | null; lines: number }> {
+  const parent = spawn('sh', ['-c', 'sleep 0.3; printf copied | sh -c "$0"; sleep 10', WATCH_COMMAND], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let lines = 0;
+  if (read) parent.stdout.on('data', (chunk: Buffer) => (lines += chunk.toString().split('\n').length - 1));
+  else parent.stdout.destroy();
+  const timer = setTimeout(() => parent.kill('SIGKILL'), 2000);
+  return new Promise((resolve) => parent.on('exit', (_code, signal) => {
+    clearTimeout(timer);
+    resolve({ signal, lines });
+  }));
+}
+
+test('the clipboard watcher ends itself at the next copy once Kainos no longer reads it', { skip: process.platform === 'win32' }, async () => {
+  assert.deepEqual(await watchOnce(true), { signal: 'SIGKILL', lines: 1 }, 'while read, each copy is a line and the watcher keeps running');
+  assert.equal((await watchOnce(false)).signal, 'SIGTERM', 'unread, the copy ends the watcher');
 });

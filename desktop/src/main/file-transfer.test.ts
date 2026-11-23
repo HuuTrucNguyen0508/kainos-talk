@@ -26,7 +26,7 @@ before(async () => {
     dir,
     port,
     advertise: false,
-    downloads,
+    downloads: () => downloads,
     onChange: () => undefined,
     onIncoming: () => undefined,
     onClip: (text) => clips.push(text),
@@ -273,7 +273,7 @@ test('sending waits for the socket to drain before each next chunk', async () =>
   const path = join(dir, 'three-chunks.bin');
   writeFileSync(path, randomBytes(3 * MAX_CHUNK_BYTES));
   const { wire, frames, release } = stuckWire();
-  const transfers = createTransfers({ wire, dir: join(dir, 'unused'), onReceived: () => undefined, onSent: () => undefined });
+  const transfers = createTransfers({ wire, dir: () => join(dir, 'unused'), onReceived: () => undefined, onSent: () => undefined });
   transfers.send([path]);
   const kinds = () => frames.map((frame) => frame.t).join(' ');
   assert.ok(await until(() => kinds() === 'fileOffer fileChunk'));
@@ -292,7 +292,7 @@ test('receiving faster than the disk writes pauses reading from the phone until 
   const { wire, frames, calls } = stuckWire();
   const outcomes: FileOutcome[] = [];
   const target = join(dir, 'fast');
-  const transfers = createTransfers({ wire, dir: target, onReceived: (outcome) => outcomes.push(outcome), onSent: () => undefined });
+  const transfers = createTransfers({ wire, dir: () => target, onReceived: (outcome) => outcomes.push(outcome), onSent: () => undefined });
   const chunk = randomBytes(MAX_CHUNK_BYTES).toString('base64');
   transfers.receive({ t: 'fileOffer', id: 'x', name: 'burst.bin', size: 40 * MAX_CHUNK_BYTES, mime: null });
   for (let i = 0; i < 40; i++) transfers.receive({ t: 'fileChunk', id: 'x', data: chunk });
@@ -308,7 +308,7 @@ function startIncomingFile(t: TestContext, subdir: string, text: string) {
   const dirPath = join(dir, subdir);
   const { wire, frames } = stuckWire();
   const outcomes: FileOutcome[] = [];
-  const transfers = createTransfers({ wire, dir: dirPath, onReceived: (outcome) => outcomes.push(outcome), onSent: () => undefined });
+  const transfers = createTransfers({ wire, dir: () => dirPath, onReceived: (outcome) => outcomes.push(outcome), onSent: () => undefined });
   t.after(() => transfers.close());
   transfers.receive({ t: 'fileOffer', id: 'id', name: 'report.txt', size: Buffer.byteLength(text), mime: null });
   transfers.receive({ t: 'fileChunk', id: 'id', data: Buffer.from(text).toString('base64') });

@@ -32,8 +32,8 @@ export type FileOutcome =
 
 export interface TransferOptions {
   readonly wire: TransferWire;
-  /** Where received files go: the user's Downloads folder. */
-  readonly dir: string;
+  /** Where received files go, asked when each one starts: the folder the user chose. */
+  readonly dir: () => string;
   readonly onReceived: (outcome: FileOutcome) => void;
   readonly onSent: (outcome: FileOutcome) => void;
 }
@@ -58,6 +58,8 @@ interface Incoming {
   readonly id: string;
   readonly name: string;
   readonly size: number;
+  /** The folder it goes to, fixed when it starts so its temporary file sits beside it. */
+  readonly dir: string;
   received: number;
   /** Bytes received and not on disk yet. */
   queued: number;
@@ -163,17 +165,19 @@ export function createTransfers({ wire, dir, onReceived, onSent }: TransferOptio
   function offered(frame: Extract<FileFrame, { t: 'fileOffer' }>): void {
     // A new offer while one is open: the phone gave up on the open one.
     if (incoming) drop(incoming, 'replaced by another file', false);
+    const target = dir();
     const file: Incoming = {
       id: frame.id,
       name: safeFileName(frame.name),
       size: frame.size,
+      dir: target,
       received: 0,
       queued: 0,
-      tempPath: join(dir, `.kainos-${randomBytes(8).toString('hex')}.part`),
+      tempPath: join(target, `.kainos-${randomBytes(8).toString('hex')}.part`),
       handle: undefined,
       written: Promise.resolve(),
     };
-    file.written = mkdir(dir, { recursive: true })
+    file.written = mkdir(target, { recursive: true })
       .then(() => open(file.tempPath, 'wx', 0o600))
       .then((handle) => {
         file.handle = handle;
@@ -218,7 +222,7 @@ export function createTransfers({ wire, dir, onReceived, onSent }: TransferOptio
       if (!isCurrent()) return;
       await file.handle!.close();
       file.handle = undefined;
-      const path = await place(file.tempPath, dir, file.name, isCurrent);
+      const path = await place(file.tempPath, file.dir, file.name, isCurrent);
       if (path === undefined) return;
       // Published: the whole file is in place and from here on belongs to the user, so a late
       // cancel or drop only loses the answer. Only the temporary file is ours to clean up.

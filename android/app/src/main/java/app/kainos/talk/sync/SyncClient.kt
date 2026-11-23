@@ -121,9 +121,9 @@ class SyncClient(
     private val clipboard: ClipboardBridge = AndroidClipboard(context),
     /** Opens shared content URIs for upload to the PC. */
     private val outgoingFiles: OutgoingFileSource = ContentResolverFileSource(context),
-    /** Creates pending files in Downloads for incoming files from the PC. */
-    private val incomingFiles: IncomingFileSink = MediaStoreDownloadSink(context),
-    /** Notifies the user when a file from the PC lands in Downloads. */
+    /** Saves incoming files from the PC to the chosen folder, else Downloads. */
+    private val incomingFiles: IncomingFileSink = ChosenFolderSink(context),
+    /** Notifies the user when a file from the PC is saved. */
     private val fileNotifier: FileNotifier = AndroidFileNotifier(context),
 ) : SyncControl {
     private val settings = SyncSettings(context)

@@ -65,11 +65,13 @@ fun interface OutgoingFileSource {
     fun open(uri: Uri): OutgoingFile?
 }
 
-/** Metadata of a file received from the PC after it has been finalized in Downloads. */
+/** Metadata of a file received from the PC after it has been saved. */
 data class SavedFile(
     val uri: Uri,
     val displayName: String,
     val mime: String?,
+    /** The folder it was saved in, as the user knows it. */
+    val folder: String = "Downloads",
 )
 
 /** One open incoming file being written before `fileEnd` commits it. */
@@ -469,7 +471,7 @@ class AndroidFileNotifier(private val context: Context) : FileNotifier {
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_file_received)
             .setContentTitle(file.displayName)
-            .setContentText("Saved to Downloads")
+            .setContentText("Saved to ${file.folder}")
             .setContentIntent(pending)
             .setAutoCancel(true)
             .build()

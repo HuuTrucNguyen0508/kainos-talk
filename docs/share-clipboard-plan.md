@@ -16,12 +16,13 @@ later. Everything stays on the LAN link the texts and calls already use.
   clipboard. The phone gets a Quick Settings tile, "Send clipboard to PC". Tapping it sends the copied
   text, and the PC puts it on its own clipboard.
 - **Share, phone to PC.** "Kainos Talk" appears in Android's share sheet. A link opens on the PC as
-  any link from a website does. Other text goes onto the PC's clipboard. Files go to the PC's
-  Downloads folder. A notification on the PC says what arrived; clicking it opens the file or shows it
+  any link from a website does. Other text goes onto the PC's clipboard. Files go to the folder
+  chosen with "Folder for phone files…" in the Kainos mark menu, else `~/Downloads` (not the
+  system's downloads setting, which on some PCs is the home folder). A notification on the PC says what arrived; clicking it opens the file or shows it
   in its folder.
 - **Share, PC to phone.** "Send files to phone…" in the Kainos mark menu and the tray menu opens a
-  file picker. The files go to the phone's Downloads folder, and a notification on the phone opens
-  them.
+  file picker. The files go to the folder chosen on Connect to PC (Android's folder picker), else the
+  phone's Downloads folder, and a notification on the phone opens them.
 
 ## Wire format (protocol 6)
 
@@ -92,7 +93,9 @@ one, and the side that builds a frame must produce exactly the string given.
 - A Quick Settings tile that opens a see-through activity. That activity reads the clipboard once it
   has focus, sends it and closes.
 - Receiving: `clip` sets the phone's clipboard. Files go to Downloads through `MediaStore`, which
-  needs no storage permission. A notification opens the file when the app may post notifications.
+  needs no storage permission, or to a folder the user picked, through its persisted document-tree
+  access: written under a hidden name, then renamed, and the provider picks a free name. A picked
+  folder that is gone or no longer allowed falls back to Downloads. A notification opens the file when the app may post notifications.
   Connect to PC asks for that permission like the others.
 
 ## After both apps update

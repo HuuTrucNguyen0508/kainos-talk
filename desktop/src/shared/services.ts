@@ -1,5 +1,5 @@
 import { DEFAULT_LOCAL_PORT, localServer } from './streamroom.ts';
-import { unreadFromGmailTitle, unreadFromTitlePrefix, type Unread } from './unread.ts';
+import { NO_UNREAD, unreadFromGmailTitle, unreadFromTitlePrefix, type Unread } from './unread.ts';
 
 /**
  * Every service Kainos Talk hosts. Adding a service means adding one entry here.
@@ -231,6 +231,26 @@ export const SERVICES: readonly ServiceDefinition[] = [
     unread: unreadFromGmailTitle,
     optIn: true,
     googleSignIn: true,
+  },
+  {
+    id: 'proton-drive',
+    name: 'Proton Drive',
+    about: "Proton's encrypted cloud storage, in its web app.",
+    url: 'https://drive.proton.me',
+    hosts: ['drive.proton.me', 'account.proton.me'],
+    popupHosts: ['account.proton.me', 'verify.proton.me'],
+    iconHosts: ['drive.proton.me', 'account.proton.me'],
+    icon: {
+      // Proton's purple. Proton Mail's tile already carries Proton's logo, so Drive is a line
+      // drawing of a folder instead of a second copy of it.
+      color: '#6D4AFF',
+      paint: 'stroke',
+      glyph: 'M3.5 7A1.5 1.5 0 0 1 5 5.5h4l2 2h8A1.5 1.5 0 0 1 20.5 9v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z M3.5 10.5h17',
+    },
+    unread: () => NO_UNREAD,
+    // An upload or download runs in the page; sleeping it would slow or stall the transfer.
+    whenAway: 'run',
+    optIn: true,
   },
 ];
 

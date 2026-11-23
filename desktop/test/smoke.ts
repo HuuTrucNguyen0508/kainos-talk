@@ -1678,8 +1678,8 @@ async function run(profile: string): Promise<void> {
     await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
     const dockOptions = await menuItems(app);
     check(
-      JSON.stringify(dockOptions) === '["Always show the dock","(Hidden services)","Choose apps…","Theme","(Send files to phone…)","Send copied text to the phone"]',
-      'the Kainos mark opens the dock options: Always show the dock, Hidden services, Choose apps…, Theme, then Send files to phone… (greyed out, the phone is away) and Send copied text to the phone',
+      JSON.stringify(dockOptions) === '["Always show the dock","(Hidden services)","Choose apps…","Theme","(Send files to phone…)","Send copied text to the phone","Folder for phone files (Downloads)…"]',
+      'the Kainos mark opens the dock options: Always show the dock, Hidden services, Choose apps…, Theme, then Send files to phone… (greyed out, the phone is away), Send copied text to the phone, and the folder for phone files',
       JSON.stringify(dockOptions),
     );
     const themeItems = await submenuLabels(app, 'Theme');
@@ -2104,7 +2104,7 @@ async function run(profile: string): Promise<void> {
       const full = (await revealDock(app, page, 'messenger'))!;
       await page.locator('#dock-options').click();
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Always show the dock', 5000);
-      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Choose apps…","Theme","(Send files to phone…)","Send copied text to the phone"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
+      check(JSON.stringify(await menuItems(app)) === '["Always show the dock","(Hidden services)","Choose apps…","Theme","(Send files to phone…)","Send copied text to the phone","Folder for phone files (Downloads)…"]', 'with nothing hidden, Hidden services is there but greyed out', JSON.stringify(await menuItems(app)));
       await tab(page, 'messenger').click({ button: 'right' });
       await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Reload Messenger', 5000);
       await clickMenuItem(app, 'Hide from dock');

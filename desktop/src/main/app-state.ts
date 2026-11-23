@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { normalizeHidden, normalizeOrder, visibleServices } from '../shared/dock-order.ts';
 import { DEFAULT_SERVERS, parseServers, type StreamroomServers } from '../shared/streamroom.ts';
 import { isAwayMode, type AwayMode } from '../shared/services.ts';
@@ -42,6 +42,8 @@ export interface AppState {
   readonly welcomed: boolean;
   /** Text copied on the PC goes to the phone's clipboard. Text from the phone always lands. */
   readonly sendClipboard: boolean;
+  /** The folder the user chose for files from the phone; without one they go to ~/Downloads. */
+  readonly receiveFolder?: string;
 }
 
 /** What the registry says about the services, for reading and defaulting the state. */
@@ -148,6 +150,7 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
     // A state saved before the welcome existed belongs to someone who already set Kainos up.
     welcomed: Array.isArray(raw.enabledServiceIds) ? raw.welcomed === true : true,
     sendClipboard: raw.sendClipboard !== false,
+    ...(typeof raw.receiveFolder === 'string' && isAbsolute(raw.receiveFolder) && { receiveFolder: raw.receiveFolder }),
   };
 }
 

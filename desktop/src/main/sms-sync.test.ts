@@ -15,7 +15,7 @@ const sync: Promise<SmsSync> = startSmsSync({
   dir,
   port,
   advertise: false,
-  downloads: join(dir, 'downloads'),
+  downloads: () => join(dir, 'downloads'),
   onChange: () => changes++,
   onIncoming: (c, m) => incoming.push([c, m]),
 });

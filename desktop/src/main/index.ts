@@ -1,5 +1,6 @@
 import { BaseWindow, Menu, powerMonitor, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, shell, type IpcMainEvent, type WebContents } from 'electron';
-import { join } from 'node:path';
+import { statSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
 import { moveService, successor, visibleServices } from '../shared/dock-order.ts';
@@ -257,7 +258,7 @@ async function start(): Promise<void> {
     if (sms) return Promise.resolve();
     smsStarting ??= startSmsSync({
       dir: join(app.getPath('userData'), 'sms-sync'),
-      downloads: process.env.KAINOS_DOWNLOADS || app.getPath('downloads'),
+      downloads: receiveFolder,
       onClip: (text) => {
         toClipboard(text);
         notifyPhone(`Copied from ${phoneName()}`, 'Paste it anywhere on this PC.');
@@ -270,10 +271,10 @@ async function start(): Promise<void> {
       },
       onFileReceived: (outcome) =>
         outcome.ok
-          ? notifyPhone(`Received ${outcome.name}`, `From ${phoneName()}, in Downloads. Click to open it.`, () => void shell.openPath(outcome.path))
+          ? notifyPhone(`Received ${outcome.name}`, `From ${phoneName()}, in ${basename(dirname(outcome.path))}. Click to open it.`, () => void shell.openPath(outcome.path))
           : notifyPhone(`Could not receive ${outcome.name}`, outcome.error),
       onFileSent: (outcome) =>
-        outcome.ok ? notifyPhone(`Sent ${outcome.name}`, `It is in the Downloads of ${phoneName()}.`) : notifyPhone(`Could not send ${outcome.name}`, outcome.error),
+        outcome.ok ? notifyPhone(`Sent ${outcome.name}`, `It is on ${phoneName()}.`) : notifyPhone(`Could not send ${outcome.name}`, outcome.error),
       ...(process.env.KAINOS_SYNC_PORT && { port: Number(process.env.KAINOS_SYNC_PORT) }),
       advertise: process.env.KAINOS_SYNC_MDNS !== '0',
       callAudio: () => callAudio.state(),
@@ -936,10 +937,33 @@ async function start(): Promise<void> {
         checked: state.sendClipboard,
         click: () => updateState({ sendClipboard: !state.sendClipboard }, 0),
       },
+      { label: `Folder for phone files (${basename(receiveFolder())})…`, click: () => void chooseReceiveFolder() },
     ]).popup(menuOptions(at));
   }
 
-  /** Picks files and sends them to the phone's Downloads, one at a time. */
+  /**
+   * Where files from the phone go: the folder the user chose while it still exists, else
+   * ~/Downloads, whatever the system's downloads setting says (on some PCs that is the home folder).
+   */
+  function receiveFolder(): string {
+    if (process.env.KAINOS_DOWNLOADS) return process.env.KAINOS_DOWNLOADS;
+    const chosen = state.receiveFolder;
+    if (chosen && statSync(chosen, { throwIfNoEntry: false })?.isDirectory()) return chosen;
+    return join(app.getPath('home'), 'Downloads');
+  }
+
+  async function chooseReceiveFolder(): Promise<void> {
+    const options: Electron.OpenDialogOptions = {
+      title: 'Save files from the phone to',
+      buttonLabel: 'Choose',
+      defaultPath: receiveFolder(),
+      properties: ['openDirectory', 'createDirectory'],
+    };
+    const { canceled, filePaths } = win.isVisible() ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    if (!canceled && filePaths[0]) updateState({ receiveFolder: filePaths[0] }, 0);
+  }
+
+  /** Picks files and sends them to the phone's chosen folder, one at a time. */
   async function sendFilesToPhone(): Promise<void> {
     const options: Electron.OpenDialogOptions = { title: 'Send files to phone', buttonLabel: 'Send', properties: ['openFile', 'multiSelections'] };
     const { canceled, filePaths } = win.isVisible() ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
@@ -1170,6 +1194,8 @@ async function start(): Promise<void> {
     quitting = true;
     updateState({}, 0);
   });
+  // Stopping Texts stops the clipboard watcher; quitting has to as well, or wl-paste outlives Kainos.
+  app.on('will-quit', () => clipboardSync?.stop());
 
   // The local pages load once their IPC handlers exist: a page that asks for its theme earlier
   // gets no answer and stays on the system theme.

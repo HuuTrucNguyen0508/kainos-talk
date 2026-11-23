@@ -54,7 +54,7 @@ const sync = await startSmsSync({
   dir: dir!,
   port: Number(port),
   advertise: false,
-  downloads: join(dir!, 'downloads'),
+  downloads: () => join(dir!, 'downloads'),
   onChange: () => console.log(`state ${JSON.stringify(sync.state())}`),
   onIncoming: () => undefined,
   onClip: (text) => console.log(`clip ${JSON.stringify(text)}`),

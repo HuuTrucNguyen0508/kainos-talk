@@ -8,6 +8,9 @@ import { accessSync, constants } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
+/** Run by `wl-paste --watch` for each copy; $PPID is that wl-paste. */
+export const WATCH_COMMAND = 'trap "" PIPE; cat >/dev/null; echo 2>/dev/null || kill $PPID';
+
 export interface ClipboardBackend {
   /** The text on the clipboard now; undefined when it holds no text, or text marked secret. */
   read(): Promise<string | undefined>;
@@ -129,7 +132,8 @@ export function waylandClipboard(): ClipboardBackend {
       let retry: NodeJS.Timeout | undefined;
       const start = () => {
         // wl-paste pipes each new selection into the command, which drops it and prints a line.
-        child = spawn('wl-paste', ['--watch', 'sh', '-c', 'cat >/dev/null; echo'], { stdio: ['ignore', 'pipe', 'ignore'] });
+        // Once nobody reads that line (Kainos died without stopping it), the command ends wl-paste.
+        child = spawn('wl-paste', ['--watch', 'sh', '-c', WATCH_COMMAND], { stdio: ['ignore', 'pipe', 'ignore'] });
         createInterface({ input: child.stdout! }).on('line', onChange);
         child.on('error', () => undefined);
         child.on('exit', () => {

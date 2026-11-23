@@ -220,3 +220,10 @@ test('sending copied text to the phone is on unless the user turned it off', () 
   assert.equal(parseAppState({ sendClipboard: 'no' }, ids).sendClipboard, true);
   assert.equal(parseAppState({ sendClipboard: false }, ids).sendClipboard, false);
 });
+
+test('a chosen folder for phone files is kept only as an absolute path', () => {
+  assert.equal(parseAppState({ receiveFolder: '/home/me/Phone files' }, ids).receiveFolder, '/home/me/Phone files');
+  assert.equal('receiveFolder' in parseAppState({}, ids), false);
+  assert.equal('receiveFolder' in parseAppState({ receiveFolder: 'relative/dir' }, ids), false);
+  assert.equal('receiveFolder' in parseAppState({ receiveFolder: 42 }, ids), false);
+});

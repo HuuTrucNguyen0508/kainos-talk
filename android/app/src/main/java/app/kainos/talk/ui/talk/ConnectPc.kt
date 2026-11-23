@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.kainos.talk.sync.FoundPc
 import app.kainos.talk.sync.PairResult
+import app.kainos.talk.sync.SaveFolder
 import app.kainos.talk.sync.SyncControl
 import app.kainos.talk.sync.SyncStatus
 import app.kainos.talk.ui.theme.SwitchboardShapes
@@ -231,6 +232,7 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
     )
     SmsAccess(onGranted = onSmsAccess)
     CallAccess(onGranted = onSmsAccess)
+    SaveFolderChoice()
     FileNotificationAccess()
     Text(
         "If the computer gets a new address on your Wi-Fi, this phone finds it again by itself.",
@@ -306,9 +308,46 @@ private fun CallAccess(onGranted: () -> Unit) {
 }
 
 /**
- * Offers a notification when files arrive from the computer, so tapping it opens the file.
- * Without this permission files still save to Downloads.
+ * Where files from the computer save: Downloads, or a folder picked with Android's folder picker.
+ * A picked folder that is gone or no longer allowed falls back to Downloads, and says so.
  */
+@Composable
+private fun SaveFolderChoice() {
+    val context = LocalContext.current
+    val c = MaterialTheme.switchboard
+    val folder = remember { SaveFolder(context) }
+    var name by remember { mutableStateOf(folder.name()) }
+    var lost by remember { mutableStateOf(folder.isLost()) }
+    fun refresh() {
+        name = folder.name()
+        lost = folder.isLost()
+    }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        if (tree != null) runCatching { folder.choose(tree) }
+        refresh()
+    }
+    val chosen = name
+    when {
+        chosen != null -> Text("Files from the computer save to $chosen.", style = MaterialTheme.typography.bodyMedium, color = c.soft)
+        lost -> Text(
+            "The folder you chose for files from the computer can't be reached, so they save to Downloads. Choose it again.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = c.alert,
+        )
+        else -> Text("Files from the computer save to Downloads.", style = MaterialTheme.typography.bodyMedium, color = c.soft)
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(MaterialTheme.spacing.xl)) {
+        LinkButton(if (chosen != null) "Change folder" else "Choose folder", onClick = { pick.launch(null) })
+        if (chosen != null || lost) {
+            LinkButton("Save to Downloads", onClick = {
+                folder.useDownloads()
+                refresh()
+            })
+        }
+    }
+}
+
+/** Offers a notification when files arrive from the computer, so tapping it opens the file. */
 @Composable
 private fun FileNotificationAccess() {
     val context = LocalContext.current
@@ -319,16 +358,9 @@ private fun FileNotificationAccess() {
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
         granted = allowed || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     }
-    if (granted) {
-        Text(
-            "Files from the computer save to Downloads and show a notification to open them.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = c.soft,
-        )
-        return
-    }
+    if (granted) return
     Text(
-        "Show a notification when files arrive from the computer? Without it, files still save to Downloads.",
+        "Show a notification when files arrive from the computer? Without it, files still save.",
         style = MaterialTheme.typography.bodyMedium,
         color = c.ink,
     )
