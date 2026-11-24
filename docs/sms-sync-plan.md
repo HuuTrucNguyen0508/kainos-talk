@@ -39,6 +39,19 @@ step can send texts directly (`SEND_SMS`) to lift the second limit.
 - **LAN only.** The phone connects only to private addresses (RFC 1918, link-local, IPv6 ULA)
   and the PC drops connections from anywhere else. TLS 1.3 with the pinned self-signed
   certificate the PC generates once.
+- **Tailscale (added 2026-11-24).** Tailscale's addresses (100.64.0.0/10, and
+  fd7a:115c:a1e0::/48, already inside the IPv6 ULA range) count as local too, so texts, calls,
+  clipboard and files keep working when the phone is away from the Wi-Fi. mDNS doesn't cross
+  Tailscale, so the PC lists its own Tailscale addresses in the `welcome` (`tailnet`, at most 4;
+  an older phone ignores the key, so `SYNC_VERSION` stays 6). The phone keeps the last ones it
+  got and tries them after the Wi-Fi addresses, or first when no Wi-Fi or Ethernet is up, in
+  which case it skips the 60 s wait for Wi-Fi. A session saves them only while its pairing is
+  still the one on disk, so it can't undo Forget. The PC sends them only in the welcome: if
+  Tailscale comes up on it mid-session, the phone learns them on its next reconnect. The PC doesn't announce its
+  Tailscale address over mDNS and refuses `pair` from one (`denied`, reason `tailnet`):
+  pairing stays on the Wi-Fi, so other people's devices on a shared tailnet can't ask to pair.
+  Both devices must be on the same tailnet, and the phone must connect on the Wi-Fi once after
+  updating so it learns the PC's addresses.
 - **Protocol** (JSON frames, versioned): `hello` (device id, secret, protocol version) →
   `snapshot` (SMS conversations and their messages since a timestamp) → live `upsert` frames as
   texts arrive → `reply` from the PC with a request id → `replyResult` from the phone. `read`

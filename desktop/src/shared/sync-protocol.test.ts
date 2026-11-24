@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { frameHash, isLocalAddress, pairingCode, parsePhoneFrame, safeFileName, type PcFrame } from './sync-protocol.ts';
+import { frameHash, isLocalAddress, isTailnetAddress, pairingCode, tailnetAddresses, parsePhoneFrame, safeFileName, type PcFrame } from './sync-protocol.ts';
 
 const vectors = JSON.parse(readFileSync(new URL('../../../protocol/sms-sync-vectors.json', import.meta.url), 'utf8')) as {
   pairing: { pcFingerprint: string; phoneFingerprint: string; phoneNonce: string; pcNonce: string; code: string }[];
-  addresses: { local: string[]; remote: string[] };
+  addresses: { local: string[]; remote: string[]; tailnet: string[]; notTailnet: string[] };
   frameHash: { frame: string; hash: string }[];
   conversationFrames: { frame: string; sender: string }[];
   callFrames: { frame: string; call: unknown }[];
@@ -34,6 +34,28 @@ test('a conversation frame parses to the sender kind the vectors name', () => {
 test('only local addresses count as local', () => {
   for (const address of vectors.addresses.local) assert.equal(isLocalAddress(address), true, address);
   for (const address of vectors.addresses.remote) assert.equal(isLocalAddress(address), false, address);
+});
+
+test('Tailscale addresses are told apart from the rest', () => {
+  for (const address of vectors.addresses.tailnet) assert.equal(isTailnetAddress(address), true, address);
+  for (const address of vectors.addresses.notTailnet) assert.equal(isTailnetAddress(address), false, address);
+});
+
+test('the welcome lists only Tailscale addresses, IPv4 first', () => {
+  const interfaces = {
+    lo: [{ address: '127.0.0.1', internal: true }],
+    wlan0: [{ address: '192.168.1.20', internal: false }, { address: 'fe80::1', internal: false }],
+    tailscale0: [{ address: 'fd7a:115c:a1e0::1234', internal: false }, { address: '100.101.102.103', internal: false }],
+    docker0: [{ address: '172.17.0.1', internal: false }],
+  };
+  assert.deepEqual(tailnetAddresses(interfaces), ['100.101.102.103', 'fd7a:115c:a1e0::1234']);
+  assert.deepEqual(tailnetAddresses({ wlan0: [{ address: '192.168.1.20', internal: false }] }), []);
+  // A carrier's 100.64/10 addresses on another interface don't push Tailscale's out.
+  const crowded = {
+    wwan0: ['100.64.0.1', '100.64.0.2', '100.64.0.3', '100.64.0.4'].map((address) => ({ address, internal: false })),
+    Tailscale: [{ address: 'fd7a:115c:a1e0::1234', internal: false }, { address: '100.101.102.103', internal: false }],
+  };
+  assert.deepEqual(tailnetAddresses(crowded).slice(0, 2), ['100.101.102.103', 'fd7a:115c:a1e0::1234']);
 });
 
 test('phone frames are checked field by field', () => {

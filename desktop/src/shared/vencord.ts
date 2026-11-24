@@ -3,8 +3,32 @@
  * build ("Vencord Web"), loaded into the Discord session with Electron's extension support.
  */
 
-/** The official build, rebuilt by Vencord's CI on every commit. */
+import { createHash } from 'node:crypto';
+
+/** The official build, rebuilt by Vencord's CI on every commit and replaced in place. */
 export const VENCORD_URL = 'https://github.com/Vendicated/Vencord/releases/download/devbuild/extension-chrome.zip';
+
+/**
+ * The one build Kainos loads: code that runs in the signed-in Discord page changes only with a
+ * Kainos build. Vencord publishes no fixed versions, only `devbuild` replaced in place, so a
+ * newer download is refused until this is moved on. To move it: download VENCORD_URL, check
+ * it, and put its `sha256sum` and its manifest's version here.
+ */
+export const VENCORD_BUILD = {
+  version: '1.15.18',
+  sha256: 'a11ebfd94b7bc4b89297f0943e5e3af93c226cc597c0979f1c107f9cc5ec85b7',
+} as const;
+
+/** SHA-256 of a download, lower-case hex, as `sha256sum` prints it. */
+export const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+
+/** Throws unless the download is the pinned build. */
+export function checkPinned(zip: Uint8Array): void {
+  const got = sha256(zip);
+  if (got !== VENCORD_BUILD.sha256) {
+    throw new Error(`Vencord's download (sha256 ${got}) is not the build Kainos is pinned to (${VENCORD_BUILD.version}, ${VENCORD_BUILD.sha256}); Kainos goes on without a newer one until the pin moves`);
+  }
+}
 
 const REQUIRED = ['manifest.json', 'content.js', 'dist/Vencord.js', 'dist/Vencord.css'];
 

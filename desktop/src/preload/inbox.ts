@@ -10,7 +10,7 @@ const api: SmsApi = {
   onState: (listener) => ipcRenderer.on(SmsChannel.state, (_event, state: SmsState) => listener(state)),
   reply: (key, text) => ipcRenderer.send(SmsChannel.reply, key, text),
   markRead: (key) => ipcRenderer.send(SmsChannel.markRead, key),
-  answerPairing: (accept) => ipcRenderer.send(SmsChannel.answerPairing, accept === true),
+  answerPairing: (accept, code) => ipcRenderer.send(SmsChannel.answerPairing, accept === true, code),
   forgetPhone: () => ipcRenderer.send(SmsChannel.forgetPhone),
   send: (to, text) => ipcRenderer.send(SmsChannel.send, to, text),
   answer: () => ipcRenderer.send(SmsChannel.answer),

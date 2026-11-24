@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extensionFiles, vencordHeaders } from './vencord.ts';
+import { VENCORD_BUILD, checkPinned, extensionFiles, sha256, vencordHeaders } from './vencord.ts';
 
 const text = (value: string) => new TextEncoder().encode(value);
 const manifest = {
@@ -62,4 +62,12 @@ test('serves GitHub raw stylesheets as CSS, and nothing else', () => {
     vencordHeaders({ url: 'https://raw.githubusercontent.com.evil.example/x.css', resourceType: 'stylesheet' }, { 'Content-Type': ['text/plain'] }),
     { 'Content-Type': ['text/plain'] },
   );
+});
+
+test('only the pinned Vencord build gets through', () => {
+  assert.match(VENCORD_BUILD.sha256, /^[0-9a-f]{64}$/);
+  assert.match(VENCORD_BUILD.version, /^\d+\.\d+\.\d+$/);
+  const newer = text('a build Vencord published after the pin');
+  assert.throws(() => checkPinned(newer), new RegExp(sha256(newer)));
+  assert.equal(sha256(text('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 });

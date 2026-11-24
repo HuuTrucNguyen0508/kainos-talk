@@ -299,14 +299,20 @@ class SyncInteropTest {
         val phoneBytes = ByteArray(1_100_123).also { Random(42).nextBytes(it) }
         val phoneFile = OutgoingFile("Du téléphone.bin", phoneBytes.size.toLong(), "application/octet-stream", ByteArrayInputStream(phoneBytes))
         assertEquals(OutboxResult.QUEUED, client.sharePreparedFiles(listOf(phoneFile)))
-        // This uses the same outbox as the file, which blocks until the PC's result arrives.
+        // Shared text bypasses the file queue, so it and the file may finish in either order.
         val sharedText = "https://example.com/été\nPartagé depuis le téléphone 📎"
         assertEquals(OutboxResult.QUEUED, client.shareText(sharedText))
-        val received = JSONObject(awaitEvent("fileReceived"))
+        var received: JSONObject? = null
+        var gotShareText: String? = null
+        while (received == null || gotShareText == null) {
+            val line = await("fileReceived or shareText") { it.startsWith("fileReceived ") || it.startsWith("shareText ") }
+            if (line.startsWith("fileReceived ")) received = JSONObject(line.removePrefix("fileReceived "))
+            else gotShareText = JSONTokener(line.removePrefix("shareText ")).nextValue() as String
+        }
         assertEquals(received.optString("error"), true, received.getBoolean("ok"))
         assertEquals(phoneFile.name, received.getString("name"))
         assertArrayEquals(phoneBytes, Base64.getDecoder().decode(received.getString("data")))
-        assertEquals(sharedText, JSONTokener(awaitEvent("shareText")).nextValue())
+        assertEquals(sharedText, gotShareText)
 
         val pcBytes = ByteArray(1_100_321).also { Random(97).nextBytes(it) }
         val pcFile = temp.newFile("Du PC.bin").apply { writeBytes(pcBytes) }

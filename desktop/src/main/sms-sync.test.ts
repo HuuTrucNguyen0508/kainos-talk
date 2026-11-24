@@ -37,7 +37,9 @@ test('pairing needs the same code confirmed on both screens, and keeps only cert
   const { phone, code, confirm, paired } = await startPairing(port, 'Pixel 9');
   assert.ok(await until(() => server.state().pairing !== null));
   assert.deepEqual(server.state().pairing, { device: 'Pixel 9', code, pcAccepted: false, phoneConfirmed: false });
-  server.answerPairing(true);
+  server.answerPairing(true, code === '000000' ? '000001' : '000000');
+  assert.equal(server.state().pairing?.pcAccepted, false, 'a click for another code does nothing');
+  server.answerPairing(true, code);
   assert.ok(await until(() => server.state().pairing?.pcAccepted === true));
   assert.equal(server.state().phone, null, 'not paired until the phone confirms too');
   confirm();
@@ -49,16 +51,39 @@ test('pairing needs the same code confirmed on both screens, and keeps only cert
   assert.deepEqual(Object.keys(stored).sort(), ['fingerprint', 'id', 'name'], 'no secret of any kind');
 });
 
+test('while a phone is paired, another may ask to pair only after Connect another phone', async () => {
+  const server = await sync;
+  const stranger = await link(port, await newIdentity('Stranger'));
+  stranger.send({ t: 'pair', v: SYNC_VERSION, device: 'Stranger', nonce: 'x' });
+  assert.equal((await stranger.next('denied')).reason, 'paired');
+  await stranger.closed;
+  assert.equal(server.state().pairing, null, 'nothing shows on the PC');
+});
+
 test('a refused pairing and a second request while one is pending are turned away', async () => {
   const server = await sync;
+  server.allowPairing();
   const first = await startPairing(port, 'Stranger');
   const second = await link(port);
   second.send({ t: 'pair', v: SYNC_VERSION, device: 'Another', nonce: 'x' });
   await second.next('pairRefused');
   first.confirm();
-  server.answerPairing(false);
+  assert.ok(await until(() => server.state().pairing?.phoneConfirmed === true));
+  server.answerPairing(false, first.code);
   await first.phone.next('pairRefused');
   assert.equal(server.state().phone?.name, 'Pixel 9', 'the paired phone is kept');
+  const later = await link(port, await newIdentity('Later'));
+  later.send({ t: 'pair', v: SYNC_VERSION, device: 'Later', nonce: 'y' });
+  assert.equal((await later.next('denied')).reason, 'paired', "Don't connect closes Connect another phone");
+  await later.closed;
+});
+
+test('the paired phone itself may pair again, after Forget on the phone', async () => {
+  const server = await sync;
+  const again = await startPairing(port, 'Pixel 9');
+  assert.ok(await until(() => server.state().pairing !== null));
+  server.answerPairing(false, again.code);
+  await again.phone.next('pairRefused');
 });
 
 test('another device using the paired phone id is denied, and so is one with no certificate', async () => {
@@ -184,6 +209,38 @@ test('a call rings on the PC, is answered and hung up from it, and dials out by 
   phone.close();
   assert.ok(await until(() => server.state().phone?.connected === false));
   assert.equal(server.state().call, null, 'a phone gone means no call the PC can show');
+});
+
+test('a picture cut off by a disconnect is asked for again on the next connection', async () => {
+  const server = await sync;
+  const phone = await connectPaired(port, deviceId);
+  const cut = server.image('mms-part:9');
+  await phone.next('getImage');
+  phone.close();
+  assert.equal(await cut, null);
+  assert.ok(await until(() => server.state().phone?.connected === false));
+  const again = await connectPaired(port, deviceId);
+  const picture = server.image('mms-part:9');
+  assert.equal((await again.next('getImage')).id, 'mms-part:9');
+  again.send({ t: 'image', id: 'mms-part:9', mime: 'image/jpeg', data: 'AAEC', error: null });
+  assert.deepEqual(await picture, Buffer.from([0, 1, 2]));
+  again.close();
+  assert.ok(await until(() => server.state().phone?.connected === false));
+});
+
+test('a phone back on a new link before the old one closed gets its pictures on the new one', async () => {
+  const server = await sync;
+  const old = await connectPaired(port, deviceId);
+  const stranded = server.image('mms-part:10');
+  await old.next('getImage');
+  const fresh = await connectPaired(port, deviceId);
+  assert.equal(await stranded, null, 'the request on the old link ends with it');
+  const picture = server.image('mms-part:10');
+  assert.equal((await fresh.next('getImage')).id, 'mms-part:10');
+  fresh.send({ t: 'image', id: 'mms-part:10', mime: 'image/jpeg', data: 'AAEC', error: null });
+  assert.deepEqual(await picture, Buffer.from([0, 1, 2]));
+  fresh.close();
+  assert.ok(await until(() => server.state().phone?.connected === false));
 });
 
 test('mail and chats from other apps, as an older phone still sends them, are dropped without closing the connection', async () => {
@@ -358,4 +415,44 @@ test('forgetting the phone locks it out', async () => {
   phone.send({ t: 'hello', v: SYNC_VERSION, deviceId });
   await phone.next('denied');
   assert.ok(changes > 0);
+});
+
+test('a phone that takes the place of another starts with none of its call log or pictures', async () => {
+  const server = await sync;
+  const first = await startPairing(port, 'Pixel 9');
+  assert.ok(await until(() => server.state().pairing !== null));
+  server.answerPairing(true, first.code);
+  first.confirm();
+  const firstId = (await first.paired()).deviceId;
+  await first.phone.closed;
+  const old = await connectPaired(port, firstId);
+  old.send({ t: 'callLog', calls: [{ id: '9', kind: 'incoming', number: '+33612345678', name: 'Maman', key: null, timeMs: 1000, seconds: 64 }] });
+  assert.ok(await until(() => server.state().calls.length === 1));
+  const cached = server.image('mms-part:1');
+  await old.next('getImage');
+  old.send({ t: 'image', id: 'mms-part:1', mime: 'image/jpeg', data: 'AAEC', error: null });
+  assert.ok(await cached);
+
+  assert.equal(server.send('+33 6 12 34 56 78', 'Still there?'), true);
+  await old.next('send');
+  assert.equal(server.state().newText.sending, true);
+
+  server.allowPairing();
+  const galaxy = await newIdentity('Galaxy');
+  const next = await startPairing(port, 'Galaxy', galaxy);
+  assert.ok(await until(() => server.state().pairing !== null));
+  server.answerPairing(true, next.code);
+  next.confirm();
+  const nextId = (await next.paired()).deviceId;
+  await next.phone.closed;
+  assert.deepEqual(server.state().calls, []);
+  assert.deepEqual(server.state().newText, { sending: false, failure: null }, 'nothing pending or failed from the old phone');
+  await old.closed;
+  assert.deepEqual(server.state().newText, { sending: false, failure: null }, '... also once its link has closed');
+  const phone = await connectPaired(port, nextId, galaxy);
+  const asked = server.image('mms-part:1');
+  assert.equal((await phone.next('getImage')).id, 'mms-part:1', 'the old phone\'s picture is not served from the cache');
+  phone.send({ t: 'image', id: 'mms-part:1', mime: null, data: null, error: 'not available' });
+  assert.equal(await asked, null);
+  phone.close();
 });

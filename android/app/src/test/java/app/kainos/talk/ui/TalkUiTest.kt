@@ -1,6 +1,10 @@
 package app.kainos.talk.ui
 
 import android.content.Intent
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -8,7 +12,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import app.kainos.talk.sync.PairResult
+import app.kainos.talk.sync.PairingState
+import app.kainos.talk.sync.SyncClient
 import app.kainos.talk.sync.SyncStatus
 import app.kainos.talk.ui.talk.TalkApp
 import app.kainos.talk.ui.theme.KainosTheme
@@ -56,12 +61,58 @@ class TalkUiTest {
         assertEquals(listOf(true), sync.confirmations)
         compose.onNodeWithText("Now press Connect on the computer.").assertExists()
         sync.status.value = SyncStatus.Connected("studio-desktop")
-        sync.answer.complete(PairResult.Paired)
+        sync.pairing.value = PairingState.Idle
         compose.waitForIdle()
         compose.onNodeWithText("Connected. Your texts show on this computer.").assertExists()
         compose.onNodeWithText("Allow file notifications").assertExists()
         compose.onNodeWithText("Forget this computer").performClick()
         assertTrue(sync.forgotten)
+        compose.onNodeWithContentDescription("Connect to studio-desktop").assertExists()
+    }
+
+    @Test
+    fun pairingCodeSurvivesScreenRecreationAndCancelAfterConfirmReturnsToList() {
+        var generation by mutableIntStateOf(0)
+        compose.setContent {
+            key(generation) {
+                KainosTheme { TalkApp(hub, sync) }
+            }
+        }
+        compose.onNodeWithContentDescription("Connect to studio-desktop").performClick()
+        compose.onNodeWithContentDescription("Code 4 8 2 1 9 3").assertExists()
+        compose.onNodeWithText("Codes match").performClick()
+        compose.onNodeWithText("Now press Connect on the computer.").assertExists()
+
+        // Simulate full composition disposal and recreation (rotation or theme switch).
+        generation++
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Code 4 8 2 1 9 3").assertExists()
+        compose.onNodeWithText("Now press Connect on the computer.").assertExists()
+
+        compose.onNodeWithText("Cancel").performClick()
+        assertEquals(listOf(true, false), sync.confirmations)
+        compose.onNodeWithContentDescription("Connect to studio-desktop").assertExists()
+        compose.onAllNodesWithText(SyncClient.CODE_MISMATCH_MESSAGE).assertCountEquals(0)
+    }
+
+    @Test
+    fun cancelWhileContactingReturnsToListWithoutWarning() {
+        sync.pairing.value = PairingState.Connecting("studio-desktop")
+        start()
+        compose.onNodeWithText("Contacting studio-desktop…").assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+        assertEquals(listOf(false), sync.confirmations)
+        compose.onNodeWithContentDescription("Connect to studio-desktop").assertExists()
+        compose.onAllNodesWithText(SyncClient.CODE_MISMATCH_MESSAGE).assertCountEquals(0)
+    }
+
+    @Test
+    fun theyDontMatchShowsWarningOnConnectScreen() {
+        start()
+        compose.onNodeWithContentDescription("Connect to studio-desktop").performClick()
+        compose.onNodeWithText("They don't match").performClick()
+        assertEquals(listOf(false), sync.confirmations)
+        compose.onNodeWithText(SyncClient.CODE_MISMATCH_MESSAGE).assertIsDisplayed()
         compose.onNodeWithContentDescription("Connect to studio-desktop").assertExists()
     }
 

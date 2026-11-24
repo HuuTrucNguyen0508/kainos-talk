@@ -20,7 +20,7 @@ import { startClipboardSync, systemClipboard, type ClipboardSync } from './clipb
 import { startMediaPause } from './media-pause.ts';
 import { CLI_DOWNLOAD, DRIVE_FOLDER, findCli, formatBytes, inside, sizeUpTo, outcomeDetails, outcomeKind, outcomeLabel, startDriveBackup, type BackupOutcome, type OutcomeKind } from './drive-backup.ts';
 import { openAppsPage, type AppsPage } from './apps-page.ts';
-import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
+import { IMAGE_SCHEME, MAX_SMS_TEXT, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
 import { CLOUDFLARE_GUIDE, LOCAL_GUIDE, STREAMROOM_ID, parseServer, serverChoices, serverLabel, thisPc, withCurrent, withLocalPort, withServers, withoutServer, type StreamroomServers } from '../shared/streamroom.ts';
 import { askServerAddress, type ServerDialogMode } from './server-dialog.ts';
@@ -277,6 +277,8 @@ async function start(): Promise<void> {
         outcome.ok
           ? notifyPhone(`Received ${outcome.name}`, `From ${phoneName()}, in ${basename(dirname(outcome.path))}. Click to open it.`, () => void shell.openPath(outcome.path))
           : notifyPhone(`Could not receive ${outcome.name}`, outcome.error),
+      // A new page drops the drafts and pictures it held of the phone before.
+      onPaired: () => smsView()?.reloadIgnoringCache(),
       onFileSent: (outcome) =>
         outcome.ok ? notifyPhone(`Sent ${outcome.name}`, `It is on ${phoneName()}.`) : notifyPhone(`Could not send ${outcome.name}`, outcome.error),
       ...(process.env.KAINOS_SYNC_PORT && { port: Number(process.env.KAINOS_SYNC_PORT) }),
@@ -617,10 +619,6 @@ async function start(): Promise<void> {
   win.on('hide', layout);
   win.on('minimize', layout);
   win.on('restore', layout);
-  smsView()?.on('did-finish-load', () => {
-    inboxShown = undefined;
-    tellInboxShown();
-  });
 
   // Keyboard focus follows the active service when it becomes ready (at startup, after Retry,
   // Reload or a switch to a service that was still loading). Electron's webContents.focus()
@@ -944,13 +942,14 @@ async function start(): Promise<void> {
     void (async () => {
       if (turnedOn.includes('inbox')) await startSms().catch((error: unknown) => console.warn('Could not start the phone sync:', error));
       for (const id of turnedOn) if (!state.hibernatedServiceIds.includes(id)) runtimeById(id)?.wake();
-      for (const id of turnedOn) natives.get(id)?.startInBackground();
       if (!dockTabs().includes(state.activeServiceId)) {
         const tabs = dockTabs();
         const next = tabs.find((id) => !state.hibernatedServiceIds.includes(id)) ?? tabs[0];
         if (next) activate(next);
       }
       render();
+      // After render, which turns a desktop app on; one still off does not start.
+      for (const id of turnedOn) natives.get(id)?.startInBackground();
     })();
   }
 
@@ -1249,6 +1248,21 @@ async function start(): Promise<void> {
     if (response === 0) sms?.forgetPhone();
   }
 
+  /** Only after this may another phone ask to pair while one is paired: it would take that one's place. */
+  async function confirmConnectAnother(name: string): Promise<void> {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['Connect another phone', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      message: 'Connect another phone?',
+      detail: `For the next two minutes, another phone can ask to connect: in Kainos Talk on that phone, choose Connect to PC. If you connect it, it takes the place of ${name}, and ${name}'s texts leave this computer.`,
+    });
+    if (response !== 0) return;
+    sms?.allowPairing();
+    showOnTab('inbox');
+  }
+
   /** The phone island: a menu once a phone is paired; before that it leads to the Texts page's setup. */
   function openPhoneMenu(at: MenuPoint | undefined): void {
     const inbox = runtimes.find((runtime) => runtime.service.localPage === 'inbox')!;
@@ -1262,6 +1276,7 @@ async function start(): Promise<void> {
       { label: 'Open Texts', click: () => activate(inbox.service.id) },
       sendFilesItem(),
       { type: 'separator' },
+      { label: 'Connect another phone…', click: () => void confirmConnectAnother(name) },
       { label: `Forget ${name}…`, click: () => void confirmForgetPhone(name) },
     ]).popup(menuOptions(at));
   }
@@ -1303,6 +1318,12 @@ async function start(): Promise<void> {
     });
     contents.on('render-process-gone', () => clearPagePointer(contents));
     contents.on('destroyed', () => clearPagePointer(contents));
+    // A Texts page that (re)loads is told whether it is in sight, as the one before it was.
+    contents.on('did-finish-load', () => {
+      if (contents !== smsView()) return;
+      inboxShown = undefined;
+      tellInboxShown();
+    });
     handleShortcuts(contents);
   }
   for (const contents of unwiredPages) wirePage(contents);
@@ -1358,8 +1379,11 @@ async function start(): Promise<void> {
     if (event.sender === shownContents(runtimeById(state.activeServiceId))) revealBy({ kind: 'page', at });
   });
 
-  const smsContents = smsView();
-  const fromSms = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => smsContents !== undefined && event.sender === smsContents;
+  // The Texts page now: it has none while Texts is off, and a new one each time it is turned on.
+  const fromSms = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => {
+    const contents = smsView();
+    return contents !== undefined && event.sender === contents;
+  };
   // The page behind a desktop app's window asks about its own app only.
   const nativeOf = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => [...natives.keys()].find((id) => nativePage(id) === event.sender);
   ipcMain.handle(NativeChannel.getView, (event) => {
@@ -1372,13 +1396,13 @@ async function start(): Promise<void> {
   });
   ipcMain.handle(SmsChannel.getState, (event) => (fromSms(event) ? sms?.state() : undefined));
   ipcMain.on(SmsChannel.reply, (event, key: unknown, text: unknown) => {
-    if (fromSms(event) && typeof key === 'string' && typeof text === 'string' && text.trim() && text.length <= 5000) sms?.reply(key, text);
+    if (fromSms(event) && typeof key === 'string' && typeof text === 'string' && text.trim() && text.length <= MAX_SMS_TEXT) sms?.reply(key, text);
   });
   ipcMain.on(SmsChannel.markRead, (event, key: unknown) => {
     if (fromSms(event) && typeof key === 'string') sms?.markRead(key);
   });
-  ipcMain.on(SmsChannel.answerPairing, (event, accept: unknown) => {
-    if (fromSms(event)) sms?.answerPairing(accept === true);
+  ipcMain.on(SmsChannel.answerPairing, (event, accept: unknown, code: unknown) => {
+    if (fromSms(event) && typeof code === 'string') sms?.answerPairing(accept === true, code);
   });
   ipcMain.on(SmsChannel.forgetPhone, (event) => {
     if (fromSms(event)) sms?.forgetPhone();
@@ -1404,7 +1428,7 @@ async function start(): Promise<void> {
     else if (typeof key === 'string' && key.length <= 500) sms?.dial({ key });
   });
   ipcMain.on(SmsChannel.send, (event, to: unknown, text: unknown) => {
-    if (fromSms(event) && typeof to === 'string' && typeof text === 'string' && text.length <= 5000) sms?.send(to, text);
+    if (fromSms(event) && typeof to === 'string' && typeof text === 'string' && text.length <= MAX_SMS_TEXT) sms?.send(to, text);
   });
 
   forwardNotifications({

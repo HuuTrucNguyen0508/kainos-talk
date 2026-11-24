@@ -7,7 +7,7 @@ import java.security.MessageDigest
 
 /**
  * SMS sync with Kainos Talk on the PC: JSON frames, one per line, over TLS on the local
- * network. The PC is the server (desktop/src/main/sms-sync.ts); this phone is the client.
+ * network or the user's Tailscale network. The PC is the server (desktop/src/main/sms-sync.ts); this phone is the client.
  * `protocol/sms-sync-vectors.json` at the repo root holds test vectors both sides check.
  */
 object SyncProtocol {
@@ -46,7 +46,8 @@ object SyncProtocol {
 
     /**
      * The 6-digit code both screens show while pairing. It covers both devices' certificates, so
-     * a device in the middle (with certificates of its own) makes the two codes differ.
+     * a device in the middle (with certificates of its own) makes the two codes differ, unless it
+     * picks the last nonce by trying about a million: no side commits to its nonce first.
      */
     fun pairingCode(pcFingerprint: String, phoneFingerprint: String, phoneNonce: String, pcNonce: String): String {
         val digest = sha256("${pcFingerprint.uppercase()}:${phoneFingerprint.uppercase()}:$phoneNonce:$pcNonce".toByteArray(Charsets.UTF_8))
@@ -70,10 +71,10 @@ object SyncProtocol {
      * A host name is never local here, so nothing is looked up in DNS.
      */
     fun isLocalAddress(address: String): Boolean {
-        val ip = if (address.startsWith("::ffff:") && isIpv4(address.removePrefix("::ffff:"))) address.removePrefix("::ffff:") else address
+        val ip = unmapped(address)
         if (isIpv4(ip)) {
             val (a, b) = ip.split('.').map { it.toInt() }
-            return a == 10 || a == 127 || (a == 172 && b in 16..31) || (a == 192 && b == 168) || (a == 169 && b == 254)
+            return a == 10 || a == 127 || (a == 172 && b in 16..31) || (a == 192 && b == 168) || (a == 169 && b == 254) || isTailnetAddress(ip)
         }
         if (isIpv6(ip)) {
             val lower = ip.lowercase()
@@ -81,6 +82,22 @@ object SyncProtocol {
         }
         return false
     }
+
+    /** An address Tailscale hands out: 100.64.0.0/10, or fd7a:115c:a1e0::/48. */
+    fun isTailnetAddress(address: String): Boolean {
+        val ip = unmapped(address)
+        if (isIpv4(ip)) {
+            val (a, b) = ip.split('.').map { it.toInt() }
+            return a == 100 && b in 64..127
+        }
+        return isIpv6(ip) && ip.lowercase().startsWith("fd7a:115c:a1e0:")
+    }
+
+    /** At most this many Tailscale addresses are kept from a welcome. */
+    const val MAX_TAILNET_ADDRESSES = 4
+
+    private fun unmapped(address: String): String =
+        if (address.startsWith("::ffff:") && isIpv4(address.removePrefix("::ffff:"))) address.removePrefix("::ffff:") else address
 
     private fun isIpv4(text: String): Boolean {
         val parts = text.split('.')
@@ -292,7 +309,7 @@ object SyncProtocol {
             "pairCode" -> text("nonce", 100)?.let { PcFrame.PairCode(it) }
             "paired" -> text("deviceId", 100)?.let { PcFrame.Paired(it) }
             "pairRefused" -> PcFrame.PairRefused
-            "welcome" -> PcFrame.Welcome(text("name", 200) ?: "", held(o.optJSONObject("conversations")))
+            "welcome" -> PcFrame.Welcome(text("name", 200) ?: "", held(o.optJSONObject("conversations")), tailnet(o.optJSONArray("tailnet")))
             "denied" -> PcFrame.Denied(text("reason", 200) ?: "")
             "reply" -> {
                 val id = text("id", 100)
@@ -359,6 +376,14 @@ object SyncProtocol {
         }
     }
 
+    /** The PC's Tailscale addresses from a welcome; anything that isn't one is left out. */
+    private fun tailnet(a: JSONArray?): List<String> {
+        if (a == null) return emptyList()
+        return (0 until a.length()).mapNotNull { i -> (a.opt(i) as? String)?.takeIf { it.length <= 45 && isTailnetAddress(it) } }
+            .distinct()
+            .take(MAX_TAILNET_ADDRESSES)
+    }
+
     /** A welcome's key-to-hash map; a malformed entry is left out. */
     private fun held(o: JSONObject?): Map<String, String> {
         if (o == null) return emptyMap()
@@ -418,7 +443,8 @@ sealed interface PcFrame {
      * The PC accepted this phone. [conversations] is what it still holds from an earlier
      * connection: each key with the [SyncProtocol.frameHash] of the frame it holds.
      */
-    data class Welcome(val name: String, val conversations: Map<String, String> = emptyMap()) : PcFrame
+    /** [tailnet]: the PC's Tailscale addresses, tried when it isn't on this phone's Wi-Fi. An older PC sends none. */
+    data class Welcome(val name: String, val conversations: Map<String, String> = emptyMap(), val tailnet: List<String> = emptyList()) : PcFrame
     data class Denied(val reason: String) : PcFrame
     data class Reply(val id: String, val key: String, val text: String) : PcFrame
     data class Read(val key: String) : PcFrame

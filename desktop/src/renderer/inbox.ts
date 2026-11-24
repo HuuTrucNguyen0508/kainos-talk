@@ -1,4 +1,4 @@
-import { imageUrl, isPhoneNumber, type SmsApi, type SmsState } from '../shared/sms.ts';
+import { MAX_SMS_TEXT, imageUrl, isPhoneNumber, type SmsApi, type SmsState } from '../shared/sms.ts';
 import type { CallEntry, SyncConversation, SyncMessage } from '../shared/sync-protocol.ts';
 import { callLabel, caller, clock, matchingCalls, timeline } from './calls.ts';
 import { findCode, groupCode, matching, splitBySender, unreadIn } from './texts.ts';
@@ -167,6 +167,8 @@ let dialPrefill = '';
 let dismissedFailure: string | null = null;
 /** What is wrong with the number in the call form, found before it goes to the phone. */
 let dialProblem: string | null = null;
+/** What is wrong with the number in the new-text form; the text stays until it is fixed. */
+let newTextProblem: string | null = null;
 /** What the search box holds; both lists show matching conversations only. */
 let query = '';
 const drafts = new Map<string, string>();
@@ -188,11 +190,12 @@ function renderSetup(s: SmsState): void {
       root.replaceChildren(wrap(card));
       return;
     }
-    if (s.pairing.phoneConfirmed) card.append(el('p', '', 'The phone says the codes match.'));
+    // What the phone says before Connect is pressed here is not shown: any device can say it.
+    const shownCode = s.pairing.code;
     const accept = button('primary', 'Connect');
-    accept.addEventListener('click', () => api.answerPairing(true));
+    accept.addEventListener('click', () => api.answerPairing(true, shownCode));
     const refuse = button('secondary', "Don't connect");
-    refuse.addEventListener('click', () => api.answerPairing(false));
+    refuse.addEventListener('click', () => api.answerPairing(false, shownCode));
     const actions = el('div', 'actions');
     actions.append(accept, refuse);
     card.append(code, actions);
@@ -607,6 +610,7 @@ const DIAL = '\u0000dial';
 /** Nothing open in Calls: the middle pane is the call form. */
 function renderDial(s: SmsState, middle: HTMLElement): void {
   if (middle.dataset.key !== DIAL) {
+    dialProblem = null;
     const blank = el('div', 'blank');
     const form = el('form', 'new-form');
     const to = el('input', 'input');
@@ -646,6 +650,7 @@ function renderDial(s: SmsState, middle: HTMLElement): void {
   }
   const to = middle.querySelector<HTMLInputElement>('#dial-to')!;
   if (dialPrefill) {
+    dialProblem = null;
     to.value = dialPrefill;
     dialPrefill = '';
   }
@@ -670,6 +675,7 @@ function callBlocked(s: SmsState): string | undefined {
 /** Nothing open: the middle pane is the new-text form, ready to type into. */
 function renderNewText(s: SmsState, middle: HTMLElement): void {
   if (middle.dataset.key !== NEW_TEXT) {
+    newTextProblem = null;
     const blank = el('div', 'blank');
     const form = el('form', 'new-form');
     const lead = el('p', 'lead');
@@ -679,6 +685,7 @@ function renderNewText(s: SmsState, middle: HTMLElement): void {
     to.autocomplete = 'off';
     to.id = 'new-to';
     const body = el('textarea', 'input tall');
+    body.maxLength = MAX_SMS_TEXT;
     body.placeholder = 'Write your text';
     body.id = 'new-body';
     const toLabel = el('label', '', 'To');
@@ -691,9 +698,19 @@ function renderNewText(s: SmsState, middle: HTMLElement): void {
     const footer = el('footer');
     footer.append(send, el('p', 'composer-note'));
     form.append(el('h1', '', 'New text'), lead, toLabel, to, bodyLabel, body, footer);
+    to.addEventListener('input', () => {
+      if (!newTextProblem) return;
+      newTextProblem = null;
+      if (state) renderNewText(state, middle);
+    });
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       if (!to.value.trim() || !body.value.trim() || send.disabled) return;
+      newTextProblem = isPhoneNumber(to.value) ? null : 'Type a phone number: digits, with spaces, dashes or a leading + if you like.';
+      if (newTextProblem) {
+        if (state) renderNewText(state, middle);
+        return;
+      }
       api.send(to.value.trim(), body.value);
       body.value = '';
     });
@@ -710,8 +727,10 @@ function renderNewText(s: SmsState, middle: HTMLElement): void {
   const connected = s.phone?.connected === true;
   send.disabled = !connected || s.newText.sending;
   send.lastElementChild!.textContent = s.newText.sending ? 'Sending…' : 'Send';
-  note.toggleAttribute('data-failed', Boolean(s.newText.failure));
-  note.textContent = s.newText.failure
+  note.toggleAttribute('data-failed', Boolean(newTextProblem ?? s.newText.failure));
+  note.textContent = newTextProblem
+    ? newTextProblem
+    : s.newText.failure
     ? `Not sent: ${s.newText.failure}.`
     : connected
       ? 'Sent from your phone as a normal text.'
@@ -815,6 +834,7 @@ function composerFor(s: SmsState, conversation: SyncConversation, existing: HTML
   const form = el('form', 'composer');
   const textarea = existing ?? el('textarea');
   textarea.rows = 1;
+  textarea.maxLength = MAX_SMS_TEXT;
   textarea.placeholder = `Text ${conversation.title}`;
   textarea.setAttribute('aria-label', `Reply to ${conversation.title}`);
   if (!existing) {
@@ -939,4 +959,7 @@ api.onShown((now) => {
 api.onState(render);
 // A desktop notification was clicked: show that conversation, in its list.
 api.onOpenKey(open);
-void api.getState().then(render);
+// No state while the phone sync is still starting; it comes with the first change.
+void api.getState().then((s) => {
+  if (s) render(s);
+});

@@ -773,6 +773,9 @@ async function welcome(profile: string): Promise<void> {
     check(order === 'inbox proton-mail', '... and the dock has exactly the apps chosen', order);
     check(JSON.stringify(saved().enabledServiceIds) === '["inbox","proton-mail"]' && saved().welcomed === true, '... saved as chosen', JSON.stringify(saved()));
     check(await poll(() => listening(syncPort), Boolean, 10_000), 'Texts on starts listening for the phone');
+    // The Texts page made after startup still gets its state: it was dead until a restart once.
+    const setup = await poll(() => inService<string>(app, 'inbox', 'document.body.innerText').catch(() => ''), (t) => /Connect your phone/.test(t), 15_000);
+    check(/Connect your phone/.test(setup), '... and the Texts page, turned on after startup, explains how to connect a phone', setup.slice(0, 80));
 
     // Later: Choose apps… in the dock options menu, with Cancel, switching Texts off and Messenger on.
     if (dock) {
@@ -1036,7 +1039,7 @@ async function run(profile: string): Promise<void> {
     await page.locator('#phone').click();
     await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Open Texts', 5000);
     const linkedItems = await menuItems(app);
-    check(JSON.stringify(linkedItems) === '["Open Texts","Send files to phone…","Forget Pixel 9…"]', 'with the phone connected, its menu offers Send files to phone…', JSON.stringify(linkedItems));
+    check(JSON.stringify(linkedItems) === '["Open Texts","Send files to phone…","Connect another phone…","Forget Pixel 9…"]', 'with the phone connected, its menu offers Send files to phone…', JSON.stringify(linkedItems));
     await inService(app, 'inbox', `document.querySelector('.row[data-key="sms|0|s:mum"]').click(); 1`, true);
     await smsPhone.next('read');
     check((await poll(() => tabState(page, 'inbox'), (t) => t === ':', 5000)) === ':', 'reading every text clears the Texts count');
@@ -1757,7 +1760,7 @@ async function run(profile: string): Promise<void> {
     await page.locator('#phone').click();
     await poll(() => menus(app), (all) => all.at(-1)?.labels[0] === 'Open Texts', 5000);
     const phoneItems = await menuItems(app);
-    check(JSON.stringify(phoneItems) === '["Open Texts","(Send files to phone…)","Forget Pixel 9…"]', 'the phone island opens Open Texts, Send files to phone… (greyed out, the phone is away) and Forget this phone', JSON.stringify(phoneItems));
+    check(JSON.stringify(phoneItems) === '["Open Texts","(Send files to phone…)","Connect another phone…","Forget Pixel 9…"]', 'the phone island opens Open Texts, Send files to phone… (greyed out, the phone is away) , Connect another phone… and Forget this phone', JSON.stringify(phoneItems));
     check(await clickMenuItem(app, 'Forget'), 'the phone menu has Forget');
     check((await boxes(app)).some((b) => b.message === 'Forget Pixel 9?'), 'Forget asks first');
     check(/No phone/.test(await poll(() => page.locator('#phone').innerText(), (t) => /No phone/.test(t), 5000)), 'after Forget, the phone island says there is no phone');

@@ -24,10 +24,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
@@ -164,6 +166,8 @@ class SyncTransferTest {
         outgoing: OutgoingFileSource = OutgoingFileSource { null },
         incoming: IncomingFileSink = MemoryIncomingSink(),
         notifier: FileNotifier = FileNotifier {},
+        fileResultTimeoutMs: Long = TransferSession.RESULT_TIMEOUT_MS,
+        onOutgoingFileFailure: (String, String) -> Unit = { _, _ -> },
     ): SyncClient {
         SyncSettings(context).save(PairedPc("127.0.0.1", pcFingerprint, "phone-1", "Test PC"))
         return SyncClient(
@@ -178,6 +182,8 @@ class SyncTransferTest {
             outgoingFiles = outgoing,
             incomingFiles = incoming,
             fileNotifier = notifier,
+            fileResultTimeoutMs = fileResultTimeoutMs,
+            onOutgoingFileFailure = onOutgoingFileFailure,
         )
     }
 
@@ -465,6 +471,168 @@ class SyncTransferTest {
                 val shareFrame = conn.nextFrame { it.getString("t") == "shareText" }
                 assertEquals("https://example.com/watch?v=42", shareFrame.getString("text"))
             } finally {
+                scope.cancel()
+                SyncSettings(context).clear()
+            }
+        }
+    }
+
+    @Test
+    fun missingFileResultTimesOutSendsFileCancelReportsFailureAndContinuesQueue() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pcIdentity = identity("impostor.p12")
+        val uri1 = Uri.parse("content://test/stalled.bin")
+        val uri2 = Uri.parse("content://test/next.txt")
+        val failures = CopyOnWriteArrayList<Pair<String, String>>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        FakePcServer(pcIdentity).use { server ->
+            val client = newClient(
+                context, server.port, pcIdentity.fingerprint, scope,
+                outgoing = OutgoingFileSource { uri ->
+                    when (uri) {
+                        uri1 -> OutgoingFile("stalled.bin", 4L, "application/octet-stream", ByteArrayInputStream(byteArrayOf(1, 2, 3, 4)))
+                        uri2 -> OutgoingFile("next.txt", 2L, "text/plain", ByteArrayInputStream(byteArrayOf(65, 66)))
+                        else -> null
+                    }
+                },
+                fileResultTimeoutMs = 250L,
+                onOutgoingFileFailure = { name, error -> failures.add(name to error) },
+            )
+            try {
+                client.start()
+                val conn = server.awaitConnection()
+                withTimeout(5_000) { client.status.first { it is SyncStatus.Connected } }
+
+                assertEquals(OutboxResult.QUEUED, client.shareFiles(listOf(uri1, uri2)))
+
+                val offer1 = conn.nextFrame { it.getString("t") == "fileOffer" }
+                val id1 = offer1.getString("id")
+                conn.nextFrame { it.getString("t") == "fileEnd" && it.getString("id") == id1 }
+
+                // PC never sends fileResult: phone must time out, send fileCancel, report failure, and send the next file.
+                val cancel1 = conn.nextFrame(timeoutSec = 5) { it.getString("t") == "fileCancel" }
+                assertEquals(id1, cancel1.getString("id"))
+
+                val offer2 = conn.nextFrame(timeoutSec = 5) { it.getString("t") == "fileOffer" && it.getString("name") == "next.txt" }
+                val id2 = offer2.getString("id")
+                conn.nextFrame { it.getString("t") == "fileEnd" && it.getString("id") == id2 }
+                conn.send(SyncProtocol.fileResult(id2, null))
+
+                assertEquals(listOf("stalled.bin" to "no answer from the computer"), failures)
+            } finally {
+                scope.cancel()
+                SyncSettings(context).clear()
+            }
+        }
+    }
+
+    @Test
+    fun clipAndShareTextBypassInFlightOutgoingFile() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pcIdentity = identity("impostor.p12")
+        val uri = Uri.parse("content://test/holding.bin")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        FakePcServer(pcIdentity).use { server ->
+            val client = newClient(
+                context, server.port, pcIdentity.fingerprint, scope,
+                outgoing = OutgoingFileSource {
+                    OutgoingFile("holding.bin", 4L, "application/octet-stream", ByteArrayInputStream(byteArrayOf(9, 8, 7, 6)))
+                },
+            )
+            try {
+                client.start()
+                val conn = server.awaitConnection()
+                withTimeout(5_000) { client.status.first { it is SyncStatus.Connected } }
+
+                assertEquals(OutboxResult.QUEUED, client.shareFiles(listOf(uri)))
+                val offer = conn.nextFrame { it.getString("t") == "fileOffer" }
+                val id = offer.getString("id")
+                conn.nextFrame { it.getString("t") == "fileEnd" && it.getString("id") == id }
+
+                // While the file is still waiting on fileResult, clipboard and shared text must not be blocked.
+                assertEquals(OutboxResult.QUEUED, client.sendClip("quick clip"))
+                assertEquals(OutboxResult.QUEUED, client.shareText("https://quick.example"))
+
+                val clip = conn.nextFrame(timeoutSec = 5) { it.getString("t") == "clip" }
+                assertEquals("quick clip", clip.getString("text"))
+                val shared = conn.nextFrame(timeoutSec = 5) { it.getString("t") == "shareText" }
+                assertEquals("https://quick.example", shared.getString("text"))
+
+                conn.send(SyncProtocol.fileResult(id, null))
+            } finally {
+                scope.cancel()
+                SyncSettings(context).clear()
+            }
+        }
+    }
+
+    @Test
+    fun earlyFailedFileResultDuringMultiChunkUploadReportsFailureAndContinuesQueue() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pcIdentity = identity("impostor.p12")
+        val big = testBytes(600_000, seed = 21)
+        val uri1 = Uri.parse("content://test/rejected-midway.bin")
+        val uri2 = Uri.parse("content://test/after-reject.txt")
+        val allowSecondChunk = CountDownLatch(1)
+        val failures = CopyOnWriteArrayList<Pair<String, String>>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        FakePcServer(pcIdentity).use { server ->
+            val client = newClient(
+                context, server.port, pcIdentity.fingerprint, scope,
+                outgoing = OutgoingFileSource { uri ->
+                    when (uri) {
+                        uri1 -> {
+                            val gated = object : InputStream() {
+                                private var offset = 0
+                                override fun read(): Int = error("unused")
+                                override fun read(b: ByteArray, off: Int, len: Int): Int {
+                                    if (offset >= big.size) return -1
+                                    if (offset >= SyncProtocol.MAX_CHUNK_BYTES) {
+                                        allowSecondChunk.await(10, TimeUnit.SECONDS)
+                                    }
+                                    val n = minOf(len, big.size - offset)
+                                    System.arraycopy(big, offset, b, off, n)
+                                    offset += n
+                                    return n
+                                }
+                            }
+                            OutgoingFile("rejected-midway.bin", big.size.toLong(), "application/octet-stream", gated)
+                        }
+                        uri2 -> OutgoingFile("after-reject.txt", 2L, "text/plain", ByteArrayInputStream(byteArrayOf(79, 75)))
+                        else -> null
+                    }
+                },
+                onOutgoingFileFailure = { name, error -> failures.add(name to error) },
+            )
+            try {
+                client.start()
+                val conn = server.awaitConnection()
+                withTimeout(5_000) { client.status.first { it is SyncStatus.Connected } }
+
+                assertEquals(OutboxResult.QUEUED, client.shareFiles(listOf(uri1, uri2)))
+
+                val offer1 = conn.nextFrame { it.getString("t") == "fileOffer" }
+                val id1 = offer1.getString("id")
+                val chunk1 = conn.nextFrame { it.getString("t") == "fileChunk" }
+                assertEquals(id1, chunk1.getString("id"))
+
+                // Reject the upload after chunk 1, then ping/pong to guarantee the phone processed
+                // fileResult before chunk 2's read returns.
+                conn.send(SyncProtocol.fileResult(id1, "disk full"))
+                conn.send("""{"t":"ping"}""")
+                conn.nextFrame { it.getString("t") == "pong" }
+                allowSecondChunk.countDown()
+
+                val nextTransferFrame = conn.nextFrame { it.getString("t") in setOf("fileOffer", "fileChunk", "fileEnd") }
+                assertEquals("fileOffer", nextTransferFrame.getString("t"))
+                assertEquals("after-reject.txt", nextTransferFrame.getString("name"))
+                val id2 = nextTransferFrame.getString("id")
+                conn.nextFrame { it.getString("t") == "fileEnd" && it.getString("id") == id2 }
+                conn.send(SyncProtocol.fileResult(id2, null))
+
+                assertEquals(listOf("rejected-midway.bin" to "disk full"), failures)
+            } finally {
+                allowSecondChunk.countDown()
                 scope.cancel()
                 SyncSettings(context).clear()
             }

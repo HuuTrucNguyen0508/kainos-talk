@@ -63,7 +63,7 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 | `src/main/notifications.ts` | Turns page notifications into native ones; mute and click-to-focus. |
 | `src/preload/app.ts` | The dock page's only API, `window.kainos`. |
 | `src/preload/service.ts` | Routes each page's `Notification` calls through the app (see below). |
-| `src/main/vencord.ts` | Downloads, updates and loads the Vencord extension into Discord's session. |
+| `src/main/vencord.ts` | Downloads the pinned Vencord build and loads it into Discord's session. |
 | `src/renderer/` | The dock page (the floating islands or the strip, plus the loading and failed notices over the whole window) and the Texts page: plain TypeScript and CSS, no framework. `tokens.css` holds the five colour themes, one block each (`src/shared/theme.ts` lists them for main). |
 
 ## Behaviour notes
@@ -85,9 +85,13 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
 - **Vencord** runs in the Discord tab with its settings, plugins, themes and QuickCSS editor.
   The app loads the official Chrome extension build (`extension-chrome.zip` from Vencord's
   `devbuild` release) into the Discord session with Electron's extension support. It is kept in
-  `vencord/extension/` in the userData folder. The app checks for a new build at startup and
-  every 6 hours. A new build waits in `vencord/extension-next/` and takes over at the next launch;
-  the very first download loads right away and reloads Discord. Electron cannot run the
+  `vencord/extension/` in the userData folder. Only one build runs: the one pinned by its
+  SHA-256 in `VENCORD_BUILD` (`src/shared/vencord.ts`), so code in the signed-in Discord page
+  changes only with a Kainos build. A kept copy of it loads with no download; without one, the app
+  downloads the build, loads it only if it matches, and reloads Discord. Vencord replaces
+  `devbuild` in place every few days, so once it moves on, a fresh install gets no Vencord until
+  the pin is moved: download the zip, check it, and put its `sha256sum` and version in
+  `VENCORD_BUILD`. Electron cannot run the
   extension's service worker (keyboard shortcut commands) or its header rules, so the app drops
   the first and applies the second itself: Discord's content security policy is removed, and
   stylesheets from `raw.githubusercontent.com` are served as CSS, so themes can load from any
@@ -239,15 +243,21 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
     addresses. **A firewall must allow port 48090/tcp and 5353/udp from the local network**; with ufw:
     `sudo ufw allow from 192.168.0.0/16 to any port 48090 proto tcp` and
     `sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp` (mDNS is how the phone finds
-    the PC, so this one is required too).
+    the PC, so this one is required too). Over Tailscale, 48090/tcp must also be open on the
+    Tailscale interface; Tailscale's own Linux firewall rules accept everything on `tailscale0`
+    ahead of ufw, so on Linux nothing more is usually needed.
   - Pairing: the phone shows a 6-digit code, the Texts page shows the same one, and it completes
     only when the user confirms on both (Codes match on the phone, Connect on the PC). The code
-    covers both devices' certificates, so a device in the middle shows a different code.
+    covers both devices' certificates, so a device in the middle shows a different code, unless it
+    tries about a million nonces of its own first: neither side commits to its nonce before seeing
+    the other's (a known gap, for a later protocol version). While a phone is paired, the PC
+    turns away any other phone asking to pair, unless the user chose **Connect another phone…** in
+    the phone island's menu in the last two minutes.
   - Trust is mutual TLS with pinned certificates, as in Kainos Player: the phone has its own key
     in Android's key store, and each side accepts only the certificate it paired with. No shared
     secret exists. The PC keeps the phone's certificate fingerprint (`sms-sync/phone.json`).
     Protocol 2; a phone paired under protocol 1 (a secret) pairs again once.
-  - The protocol is still version 4. An older phone build also sends mail and chats of other apps
+  - The protocol is version 6 (`SYNC_VERSION`). An older phone build also sends mail and chats of other apps
     (`mail`, `mailRemoved`, and a `conversation` whose `source` is not `sms`); the PC reads and
     drops them without closing the connection. Only a conversation with no `source`, or `sms`,
     is kept.

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual, X509Certificate } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { announce } from './mdns.ts';
 import { createTransfers, isFileFrame, type FileOutcome, type TransferWire, type Transfers } from './file-transfer.ts';
 import { join } from 'node:path';
@@ -13,6 +13,8 @@ import {
   SYNC_VERSION,
   frameHash,
   isLocalAddress,
+  isTailnetAddress,
+  tailnetAddresses,
   pairingCode,
   parsePhoneFrame,
   type CallEntry,
@@ -44,6 +46,8 @@ export interface SmsSyncOptions {
   readonly onFileReceived?: (outcome: FileOutcome) => void;
   /** A file sent with `sendFiles` reached the phone, or did not. */
   readonly onFileSent?: (outcome: FileOutcome) => void;
+  /** A phone was paired, maybe in place of another: what the page holds of that one is stale. */
+  readonly onPaired?: () => void;
 }
 
 export interface SmsSync {
@@ -51,7 +55,10 @@ export interface SmsSync {
   /** Sends a reply through the phone; false when no phone is connected. */
   reply(key: string, text: string): boolean;
   markRead(key: string): void;
-  answerPairing(accept: boolean): void;
+  /** Answers the pairing request that shows `code`; a newer request with another code is left alone. */
+  answerPairing(accept: boolean, code: string): void;
+  /** Lets a phone pair for the next two minutes although one is paired already, which it replaces. */
+  allowPairing(): void;
   forgetPhone(): void;
   /** Sends a new text to a number through the phone; false when no phone is connected. */
   send(to: string, text: string): boolean;
@@ -98,6 +105,8 @@ const PING_EVERY_MS = 60_000;
 const PONG_GRACE_MS = 20_000;
 /** A connection that is not a connected phone (pairing, or one that never said hello) and went quiet. */
 const DEAD_AFTER_MS = 150_000;
+/** How long Connect another phone lets a phone ask to pair. */
+const PAIRING_OPEN_MS = 120_000;
 
 function readJson<T>(file: string): T | undefined {
   try {
@@ -208,13 +217,18 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
 
   /** Pairing ends once the user confirmed the code on both screens. */
   function finishPairing(): void {
-    if (!pairing || !pairing.pcAccepted || !pairing.phoneConfirmed) return changed();
+    if (!pairing || !pairing.pcAccepted) return;
+    // Waiting for the phone shows on the PC only after Connect; before it, nothing changes there.
+    if (!pairing.phoneConfirmed) return changed();
     const { line, device, phoneFingerprint } = pairing;
     phone = { id: randomUUID(), name: device, fingerprint: phoneFingerprint };
     writeJson(phoneFile, phone);
     connection?.socket.destroy();
-    conversations.clear();
-    hashes.clear();
+    connection = undefined;
+    transfers = undefined;
+    dropPhoneData();
+    pairingOpenUntil = 0;
+    options.onPaired?.();
     line.send({ t: 'paired', deviceId: phone.id });
     line.socket.end();
     endPairing();
@@ -234,6 +248,39 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
   const images = new Map<string, Buffer>();
   let imageBytes = 0;
   const imageWaiters = new Map<string, ((picture: Buffer | null) => void)[]>();
+  /** While a phone is paired, another may ask to pair only until then (after Connect another phone). */
+  let pairingOpenUntil = 0;
+
+  /** Everything the paired phone sent, dropped when it is forgotten or another phone takes its place. */
+  function dropPhoneData(): void {
+    for (const pending of replies.values()) clearTimeout(pending.timer);
+    replies.clear();
+    failures.clear();
+    conversations.clear();
+    hashes.clear();
+    seen.clear();
+    callLog = [];
+    call = null;
+    images.clear();
+    imageBytes = 0;
+    settleImageWaiters();
+  }
+  /** The phone's connection is gone (or replaced): what waited on it fails, and asks again next time. */
+  function connectionLost(): void {
+    // Out of touch, the PC can't tell when the call ends; a stale ringing bar is worse than none.
+    call = null;
+    for (const [id, pending] of replies) {
+      clearTimeout(pending.timer);
+      failures.set(pending.key, 'phone disconnected');
+      replies.delete(id);
+    }
+    settleImageWaiters();
+  }
+  /** Requests for pictures that will not come now: on a new connection they are asked for again. */
+  function settleImageWaiters(): void {
+    for (const waiters of imageWaiters.values()) for (const done of waiters) done(null);
+    imageWaiters.clear();
+  }
 
   // A reconnect brings the whole inbox as one frame per conversation; the app hears of it once.
   let changeQueued: NodeJS.Immediate | undefined;
@@ -355,6 +402,19 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       }
       clearTimeout(first);
       if (frame.t === 'pair' && frame.v === SYNC_VERSION) {
+        // Pairing happens on the Wi-Fi, where the phone finds this PC. Over Tailscale only the
+        // paired phone connects: other people's devices on a shared tailnet can't ask to pair.
+        if (isTailnetAddress(socket.remoteAddress ?? '')) {
+          line.send({ t: 'denied', reason: 'tailnet' });
+          return socket.end();
+        }
+        // A paired phone is replaced only when the user asked for that on this PC: any device on
+        // the network can ask to pair, and a paired one gets the clipboard, links and files.
+        // The paired phone itself may pair again (after Forget on the phone); it keeps its key.
+        if (phone && phoneFingerprint !== phone.fingerprint && Date.now() > pairingOpenUntil) {
+          line.send({ t: 'denied', reason: 'paired' });
+          return socket.end();
+        }
         if (pairing) {
           line.send({ t: 'pairRefused' });
           return socket.end();
@@ -382,7 +442,11 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       if (frame.t === 'hello' && frame.v === SYNC_VERSION && phone && frame.deviceId === phone.id) {
         if (timingSafeEqual(Buffer.from(phoneFingerprint), Buffer.from(phone.fingerprint))) {
           role = 'phone';
-          connection?.socket.destroy();
+          // A phone back on a new link before its old one closed: the old one's requests end now.
+          if (connection) {
+            connection.socket.destroy();
+            connectionLost();
+          }
           connection = line;
           connectedAt = Date.now();
           ownTransfers = transfers = createTransfers({
@@ -392,7 +456,7 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
             onSent: (outcome) => options.onFileSent?.(outcome),
           });
           const held = Object.fromEntries([...conversations.keys()].map((key) => [key, hashes.get(key) ?? '']));
-          line.send({ t: 'welcome', name: hostname(), conversations: held });
+          line.send({ t: 'welcome', name: hostname(), conversations: held, tailnet: tailnetAddresses(networkInterfaces()) });
           changed();
           return;
         }
@@ -429,13 +493,7 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       if (transfers === ownTransfers) transfers = undefined;
       if (connection === line) {
         connection = undefined;
-        // Out of touch, the PC can't tell when the call ends; a stale ringing bar is worse than none.
-        call = null;
-        for (const [id, pending] of replies) {
-          clearTimeout(pending.timer);
-          failures.set(pending.key, 'phone disconnected');
-          replies.delete(id);
-        }
+        connectionLost();
         changed();
       }
     });
@@ -516,11 +574,16 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       if (!connection) return Promise.resolve(null);
       return new Promise((resolve) => {
         const waiting = imageWaiters.get(id);
-        const timer = setTimeout(() => resolve(null), IMAGE_TIMEOUT_MS);
         const done = (picture: Buffer | null) => {
           clearTimeout(timer);
           resolve(picture);
         };
+        // A request given up on ends every wait on it, so the next one asks the phone again.
+        const timer = setTimeout(() => {
+          const all = imageWaiters.get(id) ?? [done];
+          imageWaiters.delete(id);
+          for (const other of all) other(null);
+        }, IMAGE_TIMEOUT_MS);
         if (waiting) return waiting.push(done);
         imageWaiters.set(id, [done]);
         connection!.send({ t: 'getImage', id });
@@ -534,25 +597,27 @@ export async function startSmsSync(options: SmsSyncOptions): Promise<SmsSync> {
       connection?.send({ t: 'read', key });
       changed();
     },
-    answerPairing(accept) {
-      if (!pairing) return;
+    answerPairing(accept, code) {
+      if (!pairing || pairing.code !== code) return;
       if (accept) {
         pairing.pcAccepted = true;
         return finishPairing();
       }
       pairing.line.send({ t: 'pairRefused' });
       pairing.line.socket.end();
+      // Refusing a stranger closes Connect another phone too; the user can open it again.
+      pairingOpenUntil = 0;
       endPairing();
+    },
+    allowPairing() {
+      pairingOpenUntil = Date.now() + PAIRING_OPEN_MS;
     },
     forgetPhone() {
       phone = undefined;
       writeJson(phoneFile, null);
       connection?.socket.destroy();
       connection = undefined;
-      conversations.clear();
-      hashes.clear();
-      callLog = [];
-      call = null;
+      dropPhoneData();
       changed();
     },
     stop() {

@@ -84,8 +84,12 @@ export const SmsChannel = {
 /** What the phone dials or texts: digits with spaces, dashes, dots or brackets and a leading +, 3 to 20 digits. */
 export function isPhoneNumber(raw: string): boolean {
   const digits = raw.replace(/\D/g, '').length;
-  return /^\+?[0-9 ().-]+$/.test(raw.trim()) && digits >= 3 && digits <= 20;
+  // The phone takes a number of up to 40 characters, separators included.
+  return /^\+?[0-9 ().-]+$/.test(raw.trim()) && raw.trim().length <= 40 && digits >= 3 && digits <= 20;
 }
+
+/** The longest text, reply or new, that goes to the phone. */
+export const MAX_SMS_TEXT = 5000;
 
 /** Pictures from messages, served to the inbox page alone; fetched from the phone the first time. */
 export const IMAGE_SCHEME = 'kainos-image';
@@ -96,11 +100,13 @@ export const imageUrl = (id: string) => `${IMAGE_SCHEME}://picture/${encodeURICo
 
 /** The SMS view's only API, exposed as window.kainosSms. */
 export interface SmsApi {
-  getState(): Promise<SmsState>;
+  /** None while the phone sync is still starting. */
+  getState(): Promise<SmsState | undefined>;
   onState(listener: (state: SmsState) => void): void;
   reply(key: string, text: string): void;
   markRead(key: string): void;
-  answerPairing(accept: boolean): void;
+  /** Answers the request showing `code`, so a click never lands on a newer one. */
+  answerPairing(accept: boolean, code: string): void;
   forgetPhone(): void;
   /** A new text to a phone number. */
   send(to: string, text: string): void;

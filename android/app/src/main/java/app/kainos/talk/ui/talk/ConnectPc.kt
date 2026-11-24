@@ -26,8 +26,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,7 +36,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.kainos.talk.sync.FoundPc
-import app.kainos.talk.sync.PairResult
+import app.kainos.talk.sync.PairingState
 import app.kainos.talk.sync.SaveFolder
 import app.kainos.talk.sync.SyncControl
 import app.kainos.talk.sync.SyncStatus
@@ -46,18 +44,6 @@ import app.kainos.talk.ui.theme.SwitchboardShapes
 import app.kainos.talk.ui.theme.sizes
 import app.kainos.talk.ui.theme.spacing
 import app.kainos.talk.ui.theme.switchboard
-import kotlinx.coroutines.launch
-
-/** Where pairing stands while this screen is open. */
-private sealed interface Pairing {
-    data object Idle : Pairing
-    data class Connecting(val name: String) : Pairing
-    data class Code(val code: String) : Pairing
-
-    /** The user said the codes match; the computer has to say so too. */
-    data class Confirmed(val code: String) : Pairing
-    data class Problem(val message: String) : Pairing
-}
 
 /**
  * Connect to PC, the app's home screen: pairs this phone with Kainos Talk on a computer so its
@@ -68,25 +54,13 @@ private sealed interface Pairing {
 fun ConnectPcScreen(sync: SyncControl, warning: @Composable () -> Unit = {}) {
     val status by sync.status.collectAsStateWithLifecycle()
     val found by sync.discovered.collectAsStateWithLifecycle()
-    var pairing by rememberSaveable(stateSaver = PairingSaver) { mutableStateOf<Pairing>(Pairing.Idle) }
-    val scope = rememberCoroutineScope()
+    val pairing by sync.pairing.collectAsStateWithLifecycle()
     val c = MaterialTheme.switchboard
     val sp = MaterialTheme.spacing
 
     DisposableEffect(sync) {
         sync.startDiscovery()
         onDispose { sync.stopDiscovery() }
-    }
-
-    fun pair(pc: FoundPc) {
-        pairing = Pairing.Connecting(pc.name)
-        scope.launch {
-            pairing = when (val result = sync.pair(pc) { code -> pairing = Pairing.Code(code) }) {
-                PairResult.Paired -> Pairing.Idle
-                PairResult.Refused -> Pairing.Problem("The PC didn't connect. If its code didn't match, someone else may be on your network; otherwise try again.")
-                is PairResult.Failed -> Pairing.Problem(result.reason)
-            }
-        }
     }
 
     Scaffold(
@@ -116,17 +90,17 @@ fun ConnectPcScreen(sync: SyncControl, warning: @Composable () -> Unit = {}) {
         ) {
             val current = pairing
             when {
-                current is Pairing.Code -> CodePanel(
+                current is PairingState.Code -> CodePanel(
                     current.code,
                     confirmed = false,
-                    onMatch = {
-                        pairing = Pairing.Confirmed(current.code)
-                        sync.confirmCode(true)
-                    },
+                    onMatch = { sync.confirmCode(true) },
                     onCancel = { sync.confirmCode(false) },
                 )
-                current is Pairing.Confirmed -> CodePanel(current.code, confirmed = true, onMatch = {}, onCancel = { sync.confirmCode(false) })
-                current is Pairing.Connecting -> Text("Contacting ${current.name}…", style = MaterialTheme.typography.bodyLarge, color = c.soft)
+                current is PairingState.Confirmed -> CodePanel(current.code, confirmed = true, onMatch = {}, onCancel = { sync.confirmCode(false) })
+                current is PairingState.Connecting -> {
+                    Text("Contacting ${current.name}…", style = MaterialTheme.typography.bodyLarge, color = c.soft)
+                    LinkButton("Cancel", onClick = { sync.confirmCode(false) })
+                }
                 status !is SyncStatus.NotPaired -> PairedPanel(status, onForget = sync::forget, onSmsAccess = sync::refreshInbox)
                 else -> {
                     Text(
@@ -139,8 +113,8 @@ fun ConnectPcScreen(sync: SyncControl, warning: @Composable () -> Unit = {}) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = c.soft,
                     )
-                    if (current is Pairing.Problem) Text(current.message, style = MaterialTheme.typography.bodyMedium, color = c.alert)
-                    FoundList(found, onPick = ::pair)
+                    if (current is PairingState.Problem) Text(current.message, style = MaterialTheme.typography.bodyMedium, color = c.alert)
+                    FoundList(found, onPick = sync::pair)
                     Text(
                         "Not listed? Check that Kainos Talk is open on the computer and that both are on the same Wi-Fi. A firewall on the computer must let Kainos Talk through.",
                         style = MaterialTheme.typography.bodyMedium,
@@ -213,9 +187,13 @@ private fun PairedPanel(status: SyncStatus, onForget: () -> Unit, onSmsAccess: (
     val c = MaterialTheme.switchboard
     val sp = MaterialTheme.spacing
     val (name, line, live) = when (status) {
-        is SyncStatus.Connected -> Triple(status.pcName, "Connected. Your texts show on this computer.", true)
+        is SyncStatus.Connected -> Triple(
+            status.pcName,
+            if (status.viaTailnet) "Connected over Tailscale. Your texts show on this computer." else "Connected. Your texts show on this computer.",
+            true,
+        )
         is SyncStatus.Connecting -> Triple(status.pcName, "Connecting…", false)
-        is SyncStatus.Offline -> Triple(status.pcName, "Can't reach it. Kainos Talk needs to be open on the computer, on the same Wi-Fi as this phone. Retrying.", false)
+        is SyncStatus.Offline -> Triple(status.pcName, "Can't reach it. Kainos Talk needs to be open on the computer, on the same Wi-Fi as this phone or on Tailscale with it. Retrying.", false)
         is SyncStatus.Mismatch -> Triple(status.pcName, "This phone and the computer run different versions of Kainos Talk. Update both; they reconnect by themselves.", false)
         is SyncStatus.Refused -> Triple(status.pcName, "The computer no longer knows this phone. Forget it, then connect again.", false)
         SyncStatus.NotPaired -> return
@@ -366,8 +344,3 @@ private fun FileNotificationAccess() {
     )
     LinkButton("Allow file notifications", onClick = { ask.launch(Manifest.permission.POST_NOTIFICATIONS) })
 }
-
-private val PairingSaver = androidx.compose.runtime.saveable.Saver<Pairing, String>(
-    save = { if (it is Pairing.Problem) "problem:${it.message}" else "" },
-    restore = { if (it.startsWith("problem:")) Pairing.Problem(it.removePrefix("problem:")) else Pairing.Idle },
-)

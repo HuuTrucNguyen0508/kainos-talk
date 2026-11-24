@@ -64,7 +64,11 @@ class SyncNetworkTest {
      * it drops the link without a TLS close (a reset, as when a laptop sleeps or leaves the hotspot),
      * so the phone's read fails instead of ending cleanly.
      */
-    private class WelcomingPc(identity: Pkcs12Identity, private val abort: Boolean = false) : AutoCloseable {
+    private class WelcomingPc(
+        identity: Pkcs12Identity,
+        private val abort: Boolean = false,
+        @Volatile var welcome: String = "{\"t\":\"welcome\",\"name\":\"PC\"}",
+    ) : AutoCloseable {
         private val tls = javax.net.ssl.SSLContext.getInstance("TLSv1.3").apply { init(identity.keyManagers(), null, null) }.socketFactory
         private val server = java.net.ServerSocket(0)
         val port get() = server.localPort
@@ -80,7 +84,7 @@ class SyncNetworkTest {
                             socket.soTimeout = 1_000
                             val reader = socket.getInputStream().bufferedReader()
                             reader.readLine()
-                            socket.getOutputStream().apply { write("{\"t\":\"welcome\",\"name\":\"PC\"}\n".toByteArray()); flush() }
+                            socket.getOutputStream().apply { write("$welcome\n".toByteArray()); flush() }
                             welcomes.put(System.nanoTime())
                             Thread.sleep(150)
                             if (abort) {
@@ -98,6 +102,57 @@ class SyncNetworkTest {
         fun next(): Long = welcomes.poll(30, java.util.concurrent.TimeUnit.SECONDS) ?: error("no connection to the PC")
 
         override fun close() = server.close()
+    }
+
+    @Test fun thePcsTailscaleAddressesAreKeptFromItsWelcome() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val identity = Pkcs12Identity(javaClass.classLoader!!.getResourceAsStream("sync/impostor.p12")!!, "kainos-test")
+        val pc = WelcomingPc(identity, welcome = """{"t":"welcome","name":"PC","tailnet":["100.101.102.103","8.8.8.8","fd7a:115c:a1e0::1234"]}""")
+        SyncSettings(context).save(PairedPc("127.0.0.1", identity.fingerprint, "test", "PC"))
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val client = SyncClient(context, FakeTalkHub(), FakeSmsStore(), scope,
+            Pkcs12Identity(javaClass.classLoader!!.getResourceAsStream("sync/phone.p12")!!, "kainos-test"),
+            port = pc.port, lanAvailable = MutableStateFlow(true))
+        try {
+            client.start()
+            pc.next()
+            val kept = withTimeout(5000) { while (SyncSettings(context).load()?.tailnet.isNullOrEmpty()) delay(20); SyncSettings(context).load()!! }
+            assertEquals(listOf("100.101.102.103", "fd7a:115c:a1e0::1234"), kept.tailnet)
+            assertEquals("the Wi-Fi address stays the first to try", "127.0.0.1", kept.host)
+            // A welcome without them (Tailscale down on the PC for now) keeps the ones known.
+            pc.welcome = """{"t":"welcome","name":"PC"}"""
+            pc.next()
+            pc.next()
+            assertEquals(kept.tailnet, SyncSettings(context).load()!!.tailnet)
+        } finally { scope.cancel(); pc.close(); SyncSettings(context).clear() }
+        Unit
+    }
+
+    @Test fun aSessionsSaveCannotBringBackAForgottenPc() {
+        val settings = SyncSettings(ApplicationProvider.getApplicationContext())
+        val pc = PairedPc("192.168.1.20", "00".repeat(32), "test", "PC")
+        settings.save(pc)
+        val learned = pc.copy(tailnet = listOf("100.101.102.103"))
+        assertTrue(settings.replace(pc, learned))
+        assertEquals(learned, settings.load())
+        settings.clear() // Forget
+        assertFalse(settings.replace(learned, learned.copy(pcName = "Renamed")))
+        assertNull(settings.load())
+    }
+
+    @Test fun aPcKnownOnTailscaleIsTriedWithoutWaitingForWifi() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        SyncSettings(context).save(PairedPc("127.0.0.1", "00".repeat(32), "test", "PC", tailnet = listOf("100.64.0.1")))
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val client = SyncClient(context, FakeTalkHub(), FakeSmsStore(), scope,
+            Pkcs12Identity(javaClass.classLoader!!.getResourceAsStream("sync/phone.p12")!!, "kainos-test"),
+            port = 1, lanAvailable = MutableStateFlow(false))
+        try {
+            client.start()
+            // The usual wait for Wi-Fi is 60 s; with Tailscale to try it is half a second.
+            withTimeout(3000) { client.status.first { it is SyncStatus.Connecting } }
+        } finally { scope.cancel(); SyncSettings(context).clear() }
+        Unit
     }
 
     @Test fun afterAConnectionWithoutLanTheNextReconnectDoesNotWaitForLanAgain() = reconnectsWithoutWaitingAgain(abort = false)

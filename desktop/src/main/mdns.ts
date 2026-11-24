@@ -1,5 +1,8 @@
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
-import { isLocalAddress } from '../shared/sync-protocol.ts';
+import { isLocalAddress, isTailnetAddress } from '../shared/sync-protocol.ts';
+
+/** A Wi-Fi or Ethernet address worth announcing: Tailscale's go to the phone in the welcome instead. */
+const isLanAddress = (address: string) => isLocalAddress(address) && !isTailnetAddress(address);
 
 /** What the PC announces on the local network. */
 export interface Announcement {
@@ -20,7 +23,7 @@ const VIRTUAL_INTERFACE = /^(docker|br-|veth|virbr|vmnet|vboxnet|tun|tap|wg|tail
  */
 export function eligibleInterfaces(interfaces: Readonly<Record<string, readonly NetworkInterfaceInfo[] | undefined>>): string[] {
   return Object.entries(interfaces)
-    .filter(([name, infos]) => !VIRTUAL_INTERFACE.test(name) && (infos ?? []).some((info) => !info.internal && info.family === 'IPv4' && isLocalAddress(info.address)))
+    .filter(([name, infos]) => !VIRTUAL_INTERFACE.test(name) && (infos ?? []).some((info) => !info.internal && info.family === 'IPv4' && isLanAddress(info.address)))
     .map(([name]) => name)
     .sort();
 }
@@ -112,7 +115,7 @@ async function announceInApp(announcement: Announcement): Promise<() => Promise<
   const allRecords = service.records.bind(service);
   service.records = () => {
     const lan = new Set(
-      eligibleInterfaces(networkInterfaces()).flatMap((name) => (networkInterfaces()[name] ?? []).filter((info) => isLocalAddress(info.address)).map((info) => info.address)),
+      eligibleInterfaces(networkInterfaces()).flatMap((name) => (networkInterfaces()[name] ?? []).filter((info) => isLanAddress(info.address)).map((info) => info.address)),
     );
     return allRecords().filter((record) => (record.type !== 'A' && record.type !== 'AAAA') || lan.has(String(record.data)));
   };

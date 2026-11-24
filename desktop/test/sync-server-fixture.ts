@@ -66,7 +66,7 @@ const sync = await startSmsSync({
 console.log('ready');
 for await (const line of createInterface({ input: process.stdin })) {
   const [command, key, ...rest] = line.split(' ');
-  if (command === 'accept') sync.answerPairing(true);
+  if (command === 'accept') sync.answerPairing(true, sync.state().pairing?.code ?? '');
   else if (command === 'reply') console.log(`replied ${sync.reply(key!, rest.join(' '))}`);
   else if (command === 'read') sync.markRead(key!);
   else if (command === 'send') console.log(`sent ${sync.send(key!, rest.join(' '))}`);

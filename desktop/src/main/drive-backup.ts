@@ -686,7 +686,9 @@ export function startDriveBackup(options: DriveBackupOptions): DriveBackup {
       // After a failed upload the list stays as it was, so the next run sends the changed files again.
       if (sent.clean) {
         const { uid } = await destination(cli!, ended);
-        await saveUploaded({ ...(uid && { destination: uid }), files: nextUploaded(trusted, scan, staged.placed) });
+        // Drive not answering now keeps the folder checked before this run, else every file goes up again.
+        const known = uid ?? (trusted === uploaded.files ? uploaded.destination : undefined);
+        await saveUploaded({ ...(known && { destination: known }), files: nextUploaded(trusted, scan, staged.placed) });
       }
       return sent.outcome;
     }

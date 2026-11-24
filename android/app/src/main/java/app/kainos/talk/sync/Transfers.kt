@@ -15,11 +15,13 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Log
 import app.kainos.talk.R
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
@@ -52,12 +54,16 @@ class OutgoingFile(
     }
 }
 
-/** One item queued for the live sync session's outbox. */
-internal sealed interface OutgoingRequest {
-    data class Clip(val text: String) : OutgoingRequest
-    data class ShareText(val text: String) : OutgoingRequest
-    data class SendUris(val uris: List<Uri>) : OutgoingRequest
-    data class SendFiles(val files: List<OutgoingFile>) : OutgoingRequest
+/** Small text frames (`clip`, `shareText`) that bypass the file upload queue. */
+internal sealed interface OutgoingText {
+    data class Clip(val text: String) : OutgoingText
+    data class ShareText(val text: String) : OutgoingText
+}
+
+/** Outgoing file batches drained one file at a time on the live sync session. */
+internal sealed interface OutgoingFiles {
+    data class Uris(val uris: List<Uri>) : OutgoingFiles
+    data class Prepared(val files: List<OutgoingFile>) : OutgoingFiles
 }
 
 /** Opens a shared Android content URI into an [OutgoingFile] with display name, size and MIME type. */
@@ -97,9 +103,10 @@ fun interface FileNotifier {
 }
 
 /**
- * Per-connection transfer engine: drains outgoing requests sequentially through [send] (one file
- * at a time, 256 KiB chunks so other frames interleave) and receives at most one incoming file at
- * a time from the PC. Dropping the connection aborts any partial incoming file and never resumes.
+ * Per-connection transfer engine: drains outgoing text frames and outgoing files through [send]
+ * (one file at a time, 256 KiB chunks so text and other frames interleave via [send]'s mutex) and
+ * receives at most one incoming file at a time from the PC. Dropping the connection aborts any
+ * partial incoming file and never resumes.
  */
 internal class TransferSession(
     private val send: suspend (String) -> Unit,
@@ -107,6 +114,12 @@ internal class TransferSession(
     private val incomingFiles: IncomingFileSink,
     private val fileNotifier: FileNotifier,
     private val onIncomingClip: (String) -> Unit,
+    /** How long to wait for `fileResult` after `fileEnd` before cancelling and moving on. */
+    private val resultTimeoutMs: Long = RESULT_TIMEOUT_MS,
+    /** Reports outgoing file failures and timeouts. */
+    private val onOutgoingFailure: (name: String, error: String) -> Unit = { name, error ->
+        Log.w(TAG, "outgoing file failed ($name): $error")
+    },
 ) {
     private sealed interface OutgoingOutcome {
         data object Ok : OutgoingOutcome
@@ -130,18 +143,25 @@ internal class TransferSession(
     private var activeOutgoing: ActiveOutgoing? = null
     private var activeIncoming: ActiveIncoming? = null
 
-    suspend fun drainOutbox(requests: ReceiveChannel<OutgoingRequest>) {
+    suspend fun drainTexts(requests: ReceiveChannel<OutgoingText>) {
         for (request in requests) {
             when (request) {
-                is OutgoingRequest.Clip -> send(SyncProtocol.clip(request.text))
-                is OutgoingRequest.ShareText -> send(SyncProtocol.shareText(request.text))
-                is OutgoingRequest.SendUris -> {
+                is OutgoingText.Clip -> send(SyncProtocol.clip(request.text))
+                is OutgoingText.ShareText -> send(SyncProtocol.shareText(request.text))
+            }
+        }
+    }
+
+    suspend fun drainFiles(requests: ReceiveChannel<OutgoingFiles>) {
+        for (request in requests) {
+            when (request) {
+                is OutgoingFiles.Uris -> {
                     for (uri in request.uris) {
                         val opened = withContext(Dispatchers.IO) { runCatching { outgoingFiles.open(uri) }.getOrNull() } ?: continue
                         sendOneFile(opened)
                     }
                 }
-                is OutgoingRequest.SendFiles -> {
+                is OutgoingFiles.Prepared -> {
                     try {
                         for (file in request.files) sendOneFile(file)
                     } finally {
@@ -161,33 +181,55 @@ internal class TransferSession(
             try {
                 val safeName = SyncProtocol.safeFileName(file.name).take(SyncProtocol.MAX_FILE_NAME)
                 val safeMime = file.mime?.takeIf { it.isNotBlank() }?.take(SyncProtocol.MAX_MIME)
+                fun reportOutcome(outcome: OutgoingOutcome) {
+                    when (outcome) {
+                        is OutgoingOutcome.Failed -> onOutgoingFailure(safeName, outcome.error ?: "failed")
+                        OutgoingOutcome.Ok, OutgoingOutcome.Cancelled -> Unit
+                    }
+                }
+                suspend fun finishIfCompleted(): Boolean {
+                    if (!done.isCompleted) return false
+                    reportOutcome(done.await())
+                    return true
+                }
                 send(SyncProtocol.fileOffer(id, safeName, file.size, safeMime))
                 val buffer = ByteArray(SyncProtocol.MAX_CHUNK_BYTES)
                 var sent = 0L
                 while (true) {
-                    if (done.isCompleted) return
+                    if (finishIfCompleted()) return
                     val count = try {
                         withContext(Dispatchers.IO) { readChunk(file.stream, buffer) }
                     } catch (_: IOException) {
                         send(SyncProtocol.fileCancel(id))
+                        onOutgoingFailure(safeName, "could not read file")
                         return
                     }
                     if (count == 0) break
                     if (sent + count > file.size) {
                         send(SyncProtocol.fileCancel(id))
+                        onOutgoingFailure(safeName, "file grew while sending")
                         return
                     }
-                    if (done.isCompleted) return
+                    if (finishIfCompleted()) return
                     send(SyncProtocol.fileChunk(id, buffer, count))
                     sent += count
                 }
-                if (done.isCompleted) return
+                if (finishIfCompleted()) return
                 if (sent != file.size) {
                     send(SyncProtocol.fileCancel(id))
+                    onOutgoingFailure(safeName, "file ended early")
                     return
                 }
                 send(SyncProtocol.fileEnd(id))
-                done.await()
+                // Match the desktop's 60 s result timeout so a lost fileResult never stalls later files.
+                val outcome = withTimeoutOrNull(resultTimeoutMs) { done.await() }
+                if (outcome == null) {
+                    if (activeOutgoing?.id == id) activeOutgoing = null
+                    send(SyncProtocol.fileCancel(id))
+                    onOutgoingFailure(safeName, "no answer from the computer")
+                } else {
+                    reportOutcome(outcome)
+                }
             } finally {
                 if (activeOutgoing?.id == id) activeOutgoing = null
             }
@@ -292,6 +334,12 @@ internal class TransferSession(
             total += read
         }
         return total
+    }
+
+    companion object {
+        /** A sent file the PC has not answered for this long after `fileEnd` is cancelled. */
+        const val RESULT_TIMEOUT_MS = 60_000L
+        private const val TAG = "TransferSession"
     }
 }
 

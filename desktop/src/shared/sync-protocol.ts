@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 
 /**
  * SMS sync between the Kainos phone app (client) and this PC (server): JSON frames, one per
- * line, over TLS on the local network. `protocol/sms-sync-vectors.json` at the repo root holds
+ * line, over TLS on the local network or the user's Tailscale network. `protocol/sms-sync-vectors.json` at the repo root holds
  * test vectors the phone's tests check too.
  */
 /**
@@ -26,7 +26,8 @@ export const MAX_FRAME_BYTES = 1_500_000;
 
 /**
  * The 6-digit code both screens show while pairing. It covers both devices' certificates, so a
- * device in the middle (with certificates of its own) makes the two codes differ.
+ * device in the middle (with certificates of its own) makes the two codes differ, unless it picks
+ * the last nonce by trying about a million: no side commits to its nonce first.
  */
 export function pairingCode(pcFingerprint: string, phoneFingerprint: string, phoneNonce: string, pcNonce: string): string {
   const digest = createHash('sha256').update(`${pcFingerprint.toUpperCase()}:${phoneFingerprint.toUpperCase()}:${phoneNonce}:${pcNonce}`, 'utf8').digest();
@@ -47,18 +48,52 @@ export function frameHash(line: string): string {
   return createHash('sha256').update(line, 'utf8').digest().subarray(0, 8).toString('hex');
 }
 
-/** Private, link-local and loopback addresses: the only ones either side talks to. */
+/**
+ * Private, link-local and loopback addresses, plus Tailscale's (100.64.0.0/10, and fd7a:… inside
+ * fc00::/7): the only ones either side talks to.
+ */
 export function isLocalAddress(address: string): boolean {
-  const ip = address.startsWith('::ffff:') && isIP(address.slice(7)) === 4 ? address.slice(7) : address;
+  const ip = unmapped(address);
   if (isIP(ip) === 4) {
     const [a = -1, b = -1] = ip.split('.').map(Number);
-    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || isTailnetAddress(ip);
   }
   if (isIP(ip) === 6) {
     const lower = ip.toLowerCase();
     return lower === '::1' || /^f[cd][0-9a-f]{2}:/.test(lower) || /^fe[89ab][0-9a-f]:/.test(lower);
   }
   return false;
+}
+
+/** An address Tailscale hands out: 100.64.0.0/10, or fd7a:115c:a1e0::/48. */
+export function isTailnetAddress(address: string): boolean {
+  const ip = unmapped(address);
+  if (isIP(ip) === 4) {
+    const [a = -1, b = -1] = ip.split('.').map(Number);
+    return a === 100 && b >= 64 && b <= 127;
+  }
+  return isIP(ip) === 6 && /^fd7a:115c:a1e0:/i.test(ip);
+}
+
+/** At most this many Tailscale addresses go in a welcome. */
+export const MAX_TAILNET_ADDRESSES = 4;
+
+/**
+ * This PC's Tailscale addresses for the welcome: the phone keeps them and tries them when the PC
+ * isn't on its Wi-Fi. Matched by range, since the interface's name differs by system, but one
+ * named Tailscale comes first, so a carrier's 100.64/10 addresses can't crowd it out. IPv4 first.
+ */
+export function tailnetAddresses(interfaces: Readonly<Record<string, readonly { address: string; internal: boolean }[] | undefined>>): string[] {
+  const found = Object.entries(interfaces)
+    .flatMap(([name, infos]) => (infos ?? []).map((info) => ({ ...info, tailscale: /tailscale/i.test(name) })))
+    .filter((info) => !info.internal && isTailnetAddress(info.address))
+    .sort((a, b) => Number(b.tailscale) - Number(a.tailscale) || Number(a.address.includes(':')) - Number(b.address.includes(':')))
+    .map((info) => info.address);
+  return [...new Set(found)].slice(0, MAX_TAILNET_ADDRESSES);
+}
+
+function unmapped(address: string): string {
+  return address.startsWith('::ffff:') && isIP(address.slice(7)) === 4 ? address.slice(7) : address;
 }
 
 export interface SyncMessage {
@@ -187,7 +222,11 @@ export type PcFrame =
    * Every conversation key the PC holds, with the `frameHash` of the frame it came in.
    * An empty hash means the PC changed it since (marked it read, say), so it is sent again.
    */
-  | { t: 'welcome'; name: string; conversations: Record<string, string> }
+  /**
+   * `tailnet`: this PC's Tailscale addresses (`tailnetAddresses`), so the phone can reach it off
+   * the Wi-Fi. Additive: an older phone ignores it, so the version stays.
+   */
+  | { t: 'welcome'; name: string; conversations: Record<string, string>; tailnet: string[] }
   | { t: 'denied'; reason: string }
   | { t: 'reply'; id: string; key: string; text: string }
   | { t: 'read'; key: string }

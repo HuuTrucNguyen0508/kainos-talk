@@ -34,9 +34,9 @@ before(async () => {
     onFileReceived: (outcome) => received.push(outcome),
     onFileSent: (outcome) => sent.push(outcome),
   });
-  const { phone, confirm, paired } = await startPairing(port, 'Pixel 9');
+  const { phone, code, confirm, paired } = await startPairing(port, 'Pixel 9');
   await until(() => server.state().pairing !== null);
-  server.answerPairing(true);
+  server.answerPairing(true, code);
   confirm();
   deviceId = (await paired()).deviceId;
   await phone.closed;

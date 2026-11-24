@@ -15,6 +15,7 @@ import app.kainos.talk.hub.ReplyResult
 import app.kainos.talk.hub.TalkHub
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -51,6 +52,7 @@ import java.security.SecureRandom
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509TrustManager
@@ -59,7 +61,8 @@ import javax.net.ssl.X509TrustManager
 sealed interface SyncStatus {
     data object NotPaired : SyncStatus
     data class Connecting(val pcName: String) : SyncStatus
-    data class Connected(val pcName: String) : SyncStatus
+    /** [viaTailnet]: reached at one of the PC's Tailscale addresses, not on the Wi-Fi. */
+    data class Connected(val pcName: String, val viaTailnet: Boolean = false) : SyncStatus
 
     /** Paired, but the PC could not be reached; retrying. */
     data class Offline(val pcName: String, val reason: String) : SyncStatus
@@ -74,18 +77,31 @@ sealed interface SyncStatus {
 sealed interface PairResult {
     data object Paired : PairResult
     data object Refused : PairResult
+    data object Cancelled : PairResult
     data class Failed(val reason: String) : PairResult
+}
+
+/** Where pairing stands; owned by [SyncClient] so rotation or a theme change keeps the code and socket alive. */
+sealed interface PairingState {
+    data object Idle : PairingState
+    data class Connecting(val name: String) : PairingState
+    data class Code(val code: String) : PairingState
+
+    /** The user said the codes match; the computer has to say so too. */
+    data class Confirmed(val code: String) : PairingState
+    data class Problem(val message: String) : PairingState
 }
 
 /** What the "Connect to PC" screen needs; a fake stands in for it in UI tests. */
 interface SyncControl {
     val status: StateFlow<SyncStatus>
     val discovered: StateFlow<List<FoundPc>>
+    val pairing: StateFlow<PairingState>
     fun startDiscovery()
     fun stopDiscovery()
 
-    /** Pairs with a PC found on the network; [onCode] gets the code both screens show. */
-    suspend fun pair(pc: FoundPc, onCode: (String) -> Unit): PairResult
+    /** Pairs with a PC found on the network; progress shows in [pairing]. */
+    fun pair(pc: FoundPc)
     fun forget()
 
     /** While pairing: the user compared the codes; true when they match, false to cancel. */
@@ -98,7 +114,7 @@ interface SyncControl {
 /**
  * The phone end of PC sync: keeps one TLS connection to the paired PC while the app runs, sends
  * it every text conversation the hub shows, and passes the PC's replies and reads to the hub.
- * Nothing goes anywhere but the paired PC, at a local address.
+ * Nothing goes anywhere but the paired PC, at a local or Tailscale address.
  */
 class SyncClient(
     context: Context,
@@ -125,7 +141,26 @@ class SyncClient(
     private val incomingFiles: IncomingFileSink = ChosenFolderSink(context),
     /** Notifies the user when a file from the PC is saved. */
     private val fileNotifier: FileNotifier = AndroidFileNotifier(context),
+    /** How long to wait for `fileResult` after `fileEnd`; tests use a shorter wait. */
+    private val fileResultTimeoutMs: Long = TransferSession.RESULT_TIMEOUT_MS,
+    /** Called when an outgoing file fails or times out waiting for the PC's answer. */
+    private val onOutgoingFileFailure: (name: String, error: String) -> Unit = { name, error ->
+        android.util.Log.w("SyncClient", "outgoing file failed ($name): $error")
+    },
 ) : SyncControl {
+    private class ActivePairing {
+        val confirmation = CompletableDeferred<Boolean>()
+        val cancelled = CompletableDeferred<Unit>()
+        val mismatch = AtomicBoolean(false)
+        @Volatile var socket: SSLSocket? = null
+    }
+
+    /** Separate queues so clipboard and shared text are never stuck behind a large file upload. */
+    private class SessionOutbox(
+        val texts: Channel<OutgoingText> = Channel(Channel.UNLIMITED),
+        val files: Channel<OutgoingFiles> = Channel(Channel.UNLIMITED),
+    )
+
     private val settings = SyncSettings(context)
     private val discovery = PcDiscovery(context)
     override fun refreshInbox() {
@@ -135,9 +170,13 @@ class SyncClient(
     private val statusState = MutableStateFlow<SyncStatus>(settings.load()?.let { SyncStatus.Connecting(it.pcName) } ?: SyncStatus.NotPaired)
     override val status: StateFlow<SyncStatus> = statusState
     override val discovered: StateFlow<List<FoundPc>> = discovery.found
+    private val pairingState = MutableStateFlow<PairingState>(PairingState.Idle)
+    override val pairing: StateFlow<PairingState> = pairingState
     private var loop: Job? = null
-    @Volatile private var pendingConfirmation: CompletableDeferred<Boolean>? = null
-    @Volatile private var activeOutbox: Channel<OutgoingRequest>? = null
+    private var pairingJob: Job? = null
+    private val pairingLock = Any()
+    @Volatile private var activePairing: ActivePairing? = null
+    @Volatile private var activeOutbox: SessionOutbox? = null
     @Volatile private var lastClipFromPc: String? = null
 
     /** True while a welcomed TLS session with the PC is open. */
@@ -150,7 +189,7 @@ class SyncClient(
         if (text.length > SyncProtocol.MAX_CLIP_CHARS) return OutboxResult.TOO_LONG
         if (text == lastClipFromPc) return OutboxResult.UNCHANGED
         lastClipFromPc = null
-        return if (outbox.trySend(OutgoingRequest.Clip(text)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
+        return if (outbox.texts.trySend(OutgoingText.Clip(text)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
     }
 
     /** Sends text or a link from Android's share sheet to the PC. */
@@ -158,14 +197,14 @@ class SyncClient(
         val outbox = activeOutbox ?: return OutboxResult.NOT_CONNECTED
         if (text.isEmpty()) return OutboxResult.EMPTY
         if (text.length > SyncProtocol.MAX_CLIP_CHARS) return OutboxResult.TOO_LONG
-        return if (outbox.trySend(OutgoingRequest.ShareText(text)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
+        return if (outbox.texts.trySend(OutgoingText.ShareText(text)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
     }
 
     /** Queues content URIs to stream to the PC; queues nothing when disconnected. */
     fun shareFiles(uris: List<Uri>): OutboxResult {
         val outbox = activeOutbox ?: return OutboxResult.NOT_CONNECTED
         if (uris.isEmpty()) return OutboxResult.EMPTY
-        return if (outbox.trySend(OutgoingRequest.SendUris(uris)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
+        return if (outbox.files.trySend(OutgoingFiles.Uris(uris)).isSuccess) OutboxResult.QUEUED else OutboxResult.NOT_CONNECTED
     }
 
     /** Queues already-opened files (preserving temporary share URI grants after activity finish). */
@@ -175,7 +214,7 @@ class SyncClient(
             return OutboxResult.NOT_CONNECTED
         }
         if (files.isEmpty()) return OutboxResult.EMPTY
-        if (outbox.trySend(OutgoingRequest.SendFiles(files)).isSuccess) return OutboxResult.QUEUED
+        if (outbox.files.trySend(OutgoingFiles.Prepared(files)).isSuccess) return OutboxResult.QUEUED
         files.forEach(OutgoingFile::close)
         return OutboxResult.NOT_CONNECTED
     }
@@ -185,7 +224,11 @@ class SyncClient(
         loop = scope.launch(Dispatchers.IO) { connectLoop() }
     }
 
-    override fun startDiscovery() = discovery.start()
+    override fun startDiscovery() {
+        val current = pairingState.value
+        if (current is PairingState.Problem) pairingState.compareAndSet(current, PairingState.Idle)
+        discovery.start()
+    }
 
     override fun stopDiscovery() = discovery.stop()
 
@@ -194,80 +237,213 @@ class SyncClient(
         val job = loop
         loop = null
         scope.launch { job?.cancelAndJoin() }
+        val current = pairingState.value
+        if (current is PairingState.Problem) pairingState.compareAndSet(current, PairingState.Idle)
         statusState.value = SyncStatus.NotPaired
     }
 
-    override suspend fun pair(pc: FoundPc, onCode: (String) -> Unit): PairResult = pairAt(pc.hosts, pc.fingerprint, pc.name, onCode)
-
-    /**
-     * Pairs with the PC at [host]. When the PC's mDNS record named its certificate, the one TLS
-     * shows must be the same.
-     */
-    internal suspend fun pairAt(hosts: List<String>, expectedFingerprint: String?, name: String, onCode: (String) -> Unit): PairResult = withContext(Dispatchers.IO) {
-        val local = hosts.filter { SyncProtocol.isLocalAddress(it) }
-        if (local.isEmpty()) return@withContext PairResult.Failed("That computer is not on your local network.")
-        var seen: String? = null
-        val (host, socket) = try {
-            openFirst(local, TrustOnFirstUse { seen = it })
-        } catch (e: Exception) {
-            return@withContext PairResult.Failed("Can't reach $name. Check that Kainos Talk is open on it and both are on the same Wi-Fi.")
-        }
-        if (expectedFingerprint != null && seen != expectedFingerprint) {
-            runCatching { socket.close() }
-            return@withContext PairResult.Failed("Another device answered for $name. Try again.")
-        }
-        val confirmation = CompletableDeferred<Boolean>()
-        pendingConfirmation = confirmation
-        try {
-            socket.use {
-                val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
-                val writer = OutputStreamWriter(socket.outputStream, Charsets.UTF_8)
-                val nonce = randomToken(16)
-                writer.write(SyncProtocol.pair(deviceName(), nonce) + "\n")
-                writer.flush()
-                val code = when (val first = SyncProtocol.parse(reader.readLine() ?: "")) {
-                    is PcFrame.PairCode -> first
-                    is PcFrame.Denied -> return@withContext PairResult.Failed(
-                        if (first.reason == "version") "This phone and $name run different versions of Kainos Talk. Update both, then connect." else "$name refused to connect.",
-                    )
-                    else -> return@withContext PairResult.Failed("The PC is busy pairing another phone. Try again in a minute.")
-                }
-                onCode(SyncProtocol.pairingCode(seen!!, identity.fingerprint, nonce, code.nonce))
-                socket.soTimeout = PAIRING_TIMEOUT_MS
-                coroutineScope {
-                    // The user's "Codes match" (or Cancel) and the PC's answer can come in any order.
-                    val confirm = launch {
-                        if (confirmation.await()) {
-                            writer.write(SyncProtocol.pairConfirm() + "\n")
-                            writer.flush()
-                        } else {
-                            runCatching { socket.close() }
+    override fun pair(pc: FoundPc) {
+        synchronized(pairingLock) {
+            val current = pairingState.value
+            if (current is PairingState.Connecting || current is PairingState.Code || current is PairingState.Confirmed) return
+            val attempt = ActivePairing()
+            activePairing = attempt
+            pairingState.value = PairingState.Connecting(pc.name)
+            val previous = pairingJob
+            pairingJob = scope.launch(Dispatchers.IO) {
+                try {
+                    previous?.join()
+                    val result = runPairAt(pc.hosts, pc.fingerprint, pc.name, attempt) { code ->
+                        if (!attempt.cancelled.isCompleted) {
+                            pairingState.compareAndSet(PairingState.Connecting(pc.name), PairingState.Code(code))
                         }
                     }
-                    val answer = runCatching { SyncProtocol.parse(reader.readLine() ?: "") }.getOrNull()
-                    confirm.cancel()
-                    when (answer) {
-                        is PcFrame.Paired -> {
-                            loop?.cancelAndJoin()
-                            settings.save(PairedPc(host, seen!!, answer.deviceId, pcName = name))
-                            statusState.value = SyncStatus.Connecting(name)
-                            start()
-                            PairResult.Paired
+                    val next = when (result) {
+                        PairResult.Paired -> PairingState.Idle
+                        PairResult.Cancelled -> if (attempt.mismatch.get()) {
+                            PairingState.Problem(CODE_MISMATCH_MESSAGE)
+                        } else {
+                            PairingState.Idle
                         }
-                        else -> PairResult.Refused
+                        PairResult.Refused -> PairingState.Problem(
+                            "The PC didn't connect. If its code didn't match, someone else may be on your network; otherwise try again.",
+                        )
+                        is PairResult.Failed -> PairingState.Problem(result.reason)
+                    }
+                    // The attempt ends and its outcome shows in one step, so a Cancel seen after
+                    // the outcome never lands on the finished attempt.
+                    synchronized(pairingLock) {
+                        if (activePairing === attempt) activePairing = null
+                        pairingState.value = next
+                    }
+                } finally {
+                    synchronized(pairingLock) {
+                        if (activePairing === attempt) activePairing = null
                     }
                 }
             }
-        } catch (e: Exception) {
-            PairResult.Failed("The connection to the PC dropped. Try again.")
-        } finally {
-            pendingConfirmation = null
         }
     }
 
-    /** The user compared the codes: true when they match ("Codes match"), false to cancel. */
+    /**
+     * Pairs with the PC at [hosts]. When the PC's mDNS record named its certificate, the one TLS
+     * shows must be the same.
+     */
+    internal suspend fun pairAt(hosts: List<String>, expectedFingerprint: String?, name: String, onCode: (String) -> Unit): PairResult {
+        val attempt = ActivePairing()
+        synchronized(pairingLock) { activePairing = attempt }
+        return try {
+            runPairAt(hosts, expectedFingerprint, name, attempt, onCode)
+        } finally {
+            synchronized(pairingLock) {
+                if (activePairing === attempt) activePairing = null
+            }
+        }
+    }
+
+    private suspend fun runPairAt(
+        hosts: List<String>,
+        expectedFingerprint: String?,
+        name: String,
+        attempt: ActivePairing,
+        onCode: (String) -> Unit,
+    ): PairResult = withContext(Dispatchers.IO) {
+        if (attempt.cancelled.isCompleted) return@withContext PairResult.Cancelled
+        val local = hosts.filter { SyncProtocol.isLocalAddress(it) }
+        if (local.isEmpty()) return@withContext PairResult.Failed("That computer is not on your local network.")
+        val job = currentCoroutineContext()[Job]
+        try {
+            coroutineScope {
+                // Closing the socket on Dispatchers.IO unblocks connect, handshake and readLine
+                // when the user taps Cancel (even after "Codes match") or the coroutine is cancelled.
+                val closer = launch(start = CoroutineStart.UNDISPATCHED) {
+                    try {
+                        attempt.cancelled.await()
+                    } finally {
+                        runCatching { attempt.socket?.close() }
+                    }
+                }
+                try {
+                    var seen: String? = null
+                    val (host, socket) = try {
+                        openFirst(
+                            local,
+                            TrustOnFirstUse { seen = it },
+                            shouldStop = { attempt.cancelled.isCompleted || job?.isActive == false },
+                        ) { sock ->
+                            attempt.socket = sock
+                            if (attempt.cancelled.isCompleted || job?.isActive == false) runCatching { sock.close() }
+                        }
+                    } catch (e: Exception) {
+                        currentCoroutineContext().ensureActive()
+                        return@coroutineScope if (attempt.cancelled.isCompleted) {
+                            PairResult.Cancelled
+                        } else {
+                            PairResult.Failed("Can't reach $name. Check that Kainos Talk is open on it and both are on the same Wi-Fi.")
+                        }
+                    }
+                    socket.use {
+                        if (attempt.cancelled.isCompleted) return@coroutineScope PairResult.Cancelled
+                        if (expectedFingerprint != null && seen != expectedFingerprint) {
+                            return@coroutineScope PairResult.Failed("Another device answered for $name. Try again.")
+                        }
+                        val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
+                        val writer = OutputStreamWriter(socket.outputStream, Charsets.UTF_8)
+                        val nonce = randomToken(16)
+                        writer.write(SyncProtocol.pair(deviceName(), nonce) + "\n")
+                        writer.flush()
+                        val code = when (val first = SyncProtocol.parse(reader.readLine() ?: "")) {
+                            is PcFrame.PairCode -> first
+                            is PcFrame.Denied -> return@coroutineScope PairResult.Failed(
+                                when (first.reason) {
+                                    "version" -> "This phone and $name run different versions of Kainos Talk. Update both, then connect."
+                                    "paired" -> "$name is connected to another phone. To connect this one instead, click that phone's name in the dock on $name, choose Connect another phone…, and try again here."
+                                    else -> "$name refused to connect."
+                                },
+                            )
+                            else -> {
+                                currentCoroutineContext().ensureActive()
+                                return@coroutineScope if (attempt.cancelled.isCompleted) {
+                                    PairResult.Cancelled
+                                } else {
+                                    PairResult.Failed("The PC is busy pairing another phone. Try again in a minute.")
+                                }
+                            }
+                        }
+                        onCode(SyncProtocol.pairingCode(seen!!, identity.fingerprint, nonce, code.nonce))
+                        socket.soTimeout = PAIRING_TIMEOUT_MS
+                        val confirmSent = AtomicBoolean(false)
+                        val confirm = launch {
+                            if (attempt.confirmation.await() && !attempt.cancelled.isCompleted) {
+                                if (runCatching {
+                                        writer.write(SyncProtocol.pairConfirm() + "\n")
+                                        writer.flush()
+                                    }.isSuccess
+                                ) {
+                                    confirmSent.set(true)
+                                }
+                            }
+                        }
+                        val answer = runCatching { SyncProtocol.parse(reader.readLine() ?: "") }.getOrNull()
+                        if (answer is PcFrame.Paired) {
+                            confirm.cancelAndJoin()
+                        } else {
+                            confirm.cancel()
+                        }
+                        currentCoroutineContext().ensureActive()
+                        when {
+                            // The PC already paired this phone, so a Cancel tapped as it answered
+                            // comes too late: keeping the pairing matches what the PC saved.
+                            answer is PcFrame.Paired && confirmSent.get() -> {
+                                loop?.cancelAndJoin()
+                                settings.save(PairedPc(host, seen!!, answer.deviceId, pcName = name))
+                                statusState.value = SyncStatus.Connecting(name)
+                                start()
+                                PairResult.Paired
+                            }
+                            attempt.cancelled.isCompleted -> PairResult.Cancelled
+                            else -> PairResult.Refused
+                        }
+                    }
+                } finally {
+                    closer.cancel()
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            if (attempt.cancelled.isCompleted) PairResult.Cancelled
+            else PairResult.Failed("The connection to the PC dropped. Try again.")
+        }
+    }
+
+    /** The user compared the codes: true when they match ("Codes match"), false to cancel at any step. */
     override fun confirmCode(matches: Boolean) {
-        pendingConfirmation?.complete(matches)
+        val attempt = activePairing
+        if (matches) {
+            if (attempt == null || attempt.cancelled.isCompleted) return
+            if (attempt.confirmation.complete(true)) {
+                val current = pairingState.value
+                if (current is PairingState.Code) {
+                    pairingState.compareAndSet(current, PairingState.Confirmed(current.code))
+                }
+            }
+        } else {
+            if (attempt == null) {
+                // A screen left over from an attempt that is gone; a warning stays until read.
+                synchronized(pairingLock) {
+                    val current = pairingState.value
+                    if (activePairing == null && (current is PairingState.Connecting || current is PairingState.Code || current is PairingState.Confirmed)) {
+                        pairingState.value = PairingState.Idle
+                    }
+                }
+                return
+            }
+            if (pairingState.value is PairingState.Code) attempt.mismatch.set(true)
+            attempt.cancelled.complete(Unit)
+            attempt.confirmation.complete(false)
+        }
     }
 
     private suspend fun connectLoop() {
@@ -282,7 +458,8 @@ class SyncClient(
             var pc = settings.load() ?: return
             statusState.value = SyncStatus.Offline(pc.pcName, "Waiting for Wi-Fi or Ethernet")
             // A phone sharing its own connection has no Wi-Fi or Ethernet to wait for: after a while, try anyway.
-            val onLan = withTimeoutOrNull(if (withoutLan) LAN_PROBE_MS else lanWaitMs) { lanAvailable.first { it } } != null
+            // Nor does one that can reach the PC over Tailscale, from anywhere.
+            val onLan = withTimeoutOrNull(if (withoutLan || pc.tailnet.isNotEmpty()) LAN_PROBE_MS else lanWaitMs) { lanAvailable.first { it } } != null
             statusState.value = SyncStatus.Connecting(pc.pcName)
             // The PC is known by its certificate. After a failure, look for it on the network: the
             // router may have given it a new address since.
@@ -293,7 +470,7 @@ class SyncClient(
             // The PC answered at that address: a drop after this needs no search for it.
             var welcomed = false
             try {
-                val outcome = session(pc, candidates) {
+                val outcome = session(pc, candidates, preferTailnet = !onLan) {
                     welcomed = true
                     withoutLan = !onLan
                     // A link that worked starts the next retry from the shortest wait, however it ends.
@@ -324,11 +501,20 @@ class SyncClient(
 
     private enum class Outcome { CLOSED, CLOSED_AFTER_WELCOME, DENIED, MISMATCH }
 
-    /** One connection, until it drops. [addresses] are where discovery last saw the PC. */
-    private suspend fun session(pc: PairedPc, addresses: List<String>, onWelcome: () -> Unit): Outcome = coroutineScope {
-        val (host, socket) = openFirst((listOf(pc.host) + addresses).distinct(), Pinned(pc.fingerprint))
-        // Remember where it answered, as the first place to try next time.
-        if (host != pc.host) settings.save(pc.copy(host = host))
+    /**
+     * One connection, until it drops. [addresses] are where discovery last saw the PC. Its Tailscale
+     * addresses come after those, or first when [preferTailnet] (no Wi-Fi or Ethernet is up).
+     */
+    private suspend fun session(pc: PairedPc, addresses: List<String>, preferTailnet: Boolean, onWelcome: () -> Unit): Outcome = coroutineScope {
+        val lan = listOf(pc.host) + addresses
+        val (host, socket) = openFirst((if (preferTailnet) pc.tailnet + lan else lan + pc.tailnet).distinct(), Pinned(pc.fingerprint))
+        val viaTailnet = SyncProtocol.isTailnetAddress(host)
+        var saved = pc
+        fun remember(updated: PairedPc) {
+            if (updated != saved && settings.replace(saved, updated)) saved = updated
+        }
+        // Remember where it answered on the Wi-Fi, as the first place to try next time.
+        if (!viaTailnet) remember(saved.copy(host = host))
         // A blocking read ignores cancellation; closing the socket ends it (Forget, app exit).
         val closer = launch {
             try {
@@ -349,7 +535,7 @@ class SyncClient(
             // The PC pings every 60 s; silence for 90 s means the connection is dead.
             socket.soTimeout = 90_000
             val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
-            val outbox = Channel<OutgoingRequest>(Channel.UNLIMITED)
+            val outbox = SessionOutbox()
             val transfers = TransferSession(
                 send = ::send,
                 outgoingFiles = outgoingFiles,
@@ -359,14 +545,17 @@ class SyncClient(
                     lastClipFromPc = text
                     clipboard.setText(text)
                 },
+                resultTimeoutMs = fileResultTimeoutMs,
+                onOutgoingFailure = onOutgoingFileFailure,
             )
             send(SyncProtocol.hello(pc.deviceId))
             val welcome = when (val answer = SyncProtocol.parse(reader.readLine() ?: return@coroutineScope Outcome.CLOSED)) {
                 is PcFrame.Welcome -> {
                     val name = answer.name.ifBlank { pc.host }
-                    if (name != pc.pcName) settings.save(pc.copy(pcName = name))
+                    // A PC with Tailscale down for the moment sends none: the last ones known still count.
+                    remember(saved.copy(pcName = name, tailnet = answer.tailnet.ifEmpty { saved.tailnet }))
                     activeOutbox = outbox
-                    statusState.value = SyncStatus.Connected(name)
+                    statusState.value = SyncStatus.Connected(name, viaTailnet)
                     onWelcome()
                     answer
                 }
@@ -377,7 +566,8 @@ class SyncClient(
             }
             val syncer = launch { syncConversations(welcome, ::send) }
             val caller = launch { syncCalls(::send) }
-            val sender = launch { transfers.drainOutbox(outbox) }
+            val textSender = launch { transfers.drainTexts(outbox.texts) }
+            val fileSender = launch { transfers.drainFiles(outbox.files) }
             try {
                 while (isActive) {
                     val line = withContext(Dispatchers.IO) { reader.readLine() } ?: break
@@ -420,15 +610,17 @@ class SyncClient(
                 }
             } finally {
                 if (activeOutbox === outbox) activeOutbox = null
-                outbox.close()
+                outbox.texts.close()
+                outbox.files.close()
                 while (true) {
-                    val pending = outbox.tryReceive().getOrNull() ?: break
-                    if (pending is OutgoingRequest.SendFiles) pending.files.forEach(OutgoingFile::close)
+                    val pending = outbox.files.tryReceive().getOrNull() ?: break
+                    if (pending is OutgoingFiles.Prepared) pending.files.forEach(OutgoingFile::close)
                 }
                 transfers.abortIncoming()
                 syncer.cancel()
                 caller.cancel()
-                sender.cancel()
+                textSender.cancel()
+                fileSender.cancel()
             }
             Outcome.CLOSED_AFTER_WELCOME
         } finally {
@@ -508,11 +700,17 @@ class SyncClient(
     }
 
     /** The first of [hosts] that answers, and its socket. */
-    private fun openFirst(hosts: List<String>, trust: X509TrustManager): Pair<String, SSLSocket> {
+    private fun openFirst(
+        hosts: List<String>,
+        trust: X509TrustManager,
+        shouldStop: () -> Boolean = { false },
+        onSocket: (SSLSocket) -> Unit = {},
+    ): Pair<String, SSLSocket> {
         var last: Exception? = null
         for (host in hosts.filter { SyncProtocol.isLocalAddress(it) }) {
+            if (shouldStop()) break
             try {
-                return host to openSocket(host, trust)
+                return host to openSocket(host, trust, onSocket)
             } catch (e: Exception) {
                 last = e
             }
@@ -520,12 +718,13 @@ class SyncClient(
         throw last ?: java.io.IOException("no local address")
     }
 
-    private fun openSocket(host: String, trust: X509TrustManager): SSLSocket {
+    private fun openSocket(host: String, trust: X509TrustManager, onSocket: (SSLSocket) -> Unit = {}): SSLSocket {
         val context = SSLContext.getInstance("TLSv1.3")
         // The phone's own certificate goes along on every connection: it is how the PC knows it.
         context.init(identity.keyManagers(), arrayOf(trust), SecureRandom())
         val socket = context.socketFactory.createSocket() as SSLSocket
         try {
+            onSocket(socket)
             socket.enabledProtocols = arrayOf("TLSv1.3")
             socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
             socket.soTimeout = HANDSHAKE_TIMEOUT_MS
@@ -556,6 +755,8 @@ class SyncClient(
         private const val LAN_WAIT_MS = 60_000L
         /** How long a reconnect looks for Wi-Fi or Ethernet once the PC has been reached without them. */
         private const val LAN_PROBE_MS = 500L
+        internal const val CODE_MISMATCH_MESSAGE =
+            "The codes didn't match, so this phone didn't connect. Another device on this Wi-Fi may have answered. Try again."
     }
 }
 

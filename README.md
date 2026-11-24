@@ -25,7 +25,9 @@ On first launch the PC app asks which apps you want; change them any time with *
 in the Kainos mark's menu on the dock.
 
 The PC and the phone find each other on the local network; on Linux the PC's firewall must allow
-48090/tcp and 5353/udp from it (see [desktop/README.md](desktop/README.md)).
+48090/tcp and 5353/udp from it (see [desktop/README.md](desktop/README.md)). When both are on the
+same [Tailscale](https://tailscale.com) network, they stay connected away from the Wi-Fi too: the
+phone learns the PC's Tailscale address the first time they connect on the Wi-Fi.
 
 The Streamroom tab opens a [Streamroom](https://github.com/HuuTrucNguyen0508/streamroom) server you
 choose under **Server** in its tab's menu. Kainos runs none itself:

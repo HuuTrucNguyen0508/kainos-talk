@@ -48,6 +48,24 @@ class SyncProtocolTest {
     }
 
     @Test
+    fun tailscaleAddressesAreToldApart() {
+        val addresses = vectors.getJSONObject("addresses")
+        val tailnet = addresses.getJSONArray("tailnet")
+        for (i in 0 until tailnet.length()) assertTrue(tailnet.getString(i), SyncProtocol.isTailnetAddress(tailnet.getString(i)))
+        val not = addresses.getJSONArray("notTailnet")
+        for (i in 0 until not.length()) assertEquals(not.getString(i), false, SyncProtocol.isTailnetAddress(not.getString(i)))
+    }
+
+    @Test
+    fun aWelcomeKeepsOnlyThePcsTailscaleAddresses() {
+        assertEquals(
+            PcFrame.Welcome("PC", tailnet = listOf("100.101.102.103", "fd7a:115c:a1e0::1234")),
+            SyncProtocol.parse("""{"t":"welcome","name":"PC","tailnet":["100.101.102.103","192.168.1.20","8.8.8.8",5,"100.101.102.103","fd7a:115c:a1e0::1234"]}"""),
+        )
+        assertEquals(PcFrame.Welcome("PC"), SyncProtocol.parse("""{"t":"welcome","name":"PC","tailnet":"100.101.102.103"}"""))
+    }
+
+    @Test
     fun aWelcomeCarriesWhatThePcHolds() {
         assertEquals(PcFrame.Welcome("PC"), SyncProtocol.parse("""{"t":"welcome","name":"PC"}"""))
         assertEquals(
