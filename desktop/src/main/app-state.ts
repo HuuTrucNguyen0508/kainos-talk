@@ -4,6 +4,7 @@ import { normalizeHidden, normalizeOrder, visibleServices } from '../shared/dock
 import { DEFAULT_SERVERS, parseServers, type StreamroomServers } from '../shared/streamroom.ts';
 import { isAwayMode, type AwayMode } from '../shared/services.ts';
 import { parseThemeChoice, type ThemeChoice } from '../shared/theme.ts';
+import { parseFolders, parseOutcome, type BackupOutcome } from './drive-backup.ts';
 
 export interface Rect {
   readonly x: number;
@@ -44,6 +45,14 @@ export interface AppState {
   readonly sendClipboard: boolean;
   /** The folder the user chose for files from the phone; without one they go to ~/Downloads. */
   readonly receiveFolder?: string;
+  /** Folders backed up to Proton Drive while its tab is on. */
+  readonly driveBackupFolders: readonly string[];
+  /** Folders inside those left out of the backup. */
+  readonly driveBackupSkipped?: readonly string[];
+  /** How the last backup went. */
+  readonly driveBackupLast?: BackupOutcome;
+  /** This PC's folder in Drive, named when the first folder was picked. */
+  readonly drivePc?: string;
 }
 
 /** What the registry says about the services, for reading and defaulting the state. */
@@ -78,6 +87,7 @@ export function defaultState(serviceIds: readonly string[], rules: StateRules = 
     enabledServiceIds: [],
     welcomed: false,
     sendClipboard: true,
+    driveBackupFolders: [],
   };
 }
 
@@ -134,6 +144,7 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
   const savedOrder = Array.isArray(raw.serviceOrder) ? raw.serviceOrder : [];
   const newcomers = (rules.startHibernated ?? []).filter((id) => !savedOrder.includes(id));
   const savedHibernated = Array.isArray(raw.hibernatedServiceIds) ? raw.hibernatedServiceIds : [];
+  const driveBackupLast = parseOutcome(raw.driveBackupLast);
   return {
     bounds: parseRect(raw.bounds),
     maximized: raw.maximized === true,
@@ -151,6 +162,10 @@ export function parseAppState(raw: unknown, serviceIds: readonly string[], rules
     welcomed: Array.isArray(raw.enabledServiceIds) ? raw.welcomed === true : true,
     sendClipboard: raw.sendClipboard !== false,
     ...(typeof raw.receiveFolder === 'string' && isAbsolute(raw.receiveFolder) && { receiveFolder: raw.receiveFolder }),
+    driveBackupFolders: parseFolders(raw.driveBackupFolders),
+    ...(parseFolders(raw.driveBackupSkipped).length > 0 && { driveBackupSkipped: parseFolders(raw.driveBackupSkipped) }),
+    ...(driveBackupLast && { driveBackupLast }),
+    ...(typeof raw.drivePc === 'string' && raw.drivePc.trim() !== '' && !/[\\/]/.test(raw.drivePc) && { drivePc: raw.drivePc }),
   };
 }
 

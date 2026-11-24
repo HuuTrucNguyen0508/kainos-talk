@@ -27,6 +27,8 @@ test('round-trips through the state file', () => {
       enabledServiceIds: ['proton-mail', 'whatsapp'],
       welcomed: true,
       sendClipboard: false,
+      driveBackupFolders: ['/home/me/Documents'],
+      driveBackupLast: { at: 1_700_000_000_000, ok: true, sentBytes: 17, failed: 0 },
     };
     saveAppState(file, state);
     assert.deepEqual(loadAppState(file, ids), state);
@@ -74,6 +76,7 @@ test('a missing or broken file gives defaults', () => {
       enabledServiceIds: [],
       welcomed: false,
       sendClipboard: true,
+      driveBackupFolders: [],
     });
     writeFileSync(file, '{ not json');
     assert.equal(loadAppState(file, ids).activeServiceId, 'proton-mail');
@@ -109,6 +112,7 @@ test('drops unknown services and bad fields one by one', () => {
     enabledServiceIds: ids,
     welcomed: true,
     sendClipboard: true,
+    driveBackupFolders: [],
   });
   assert.equal(parseAppState({ bounds: { x: 0, y: 0, width: 100, height: 100 } }, ids).bounds, undefined, 'too small');
 });
@@ -141,19 +145,19 @@ test('a state file from before the websites stayed awake still loads, and drops 
 test('a state file from the side bar still loads bounds, active service and muting, and drops the side and auto-hide', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], barSide: 'right', barAutoHide: true }, ids);
-  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true });
+  assert.deepEqual(state, { bounds, maximized: true, activeServiceId: 'whatsapp', mutedServiceIds: ['discord'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true, driveBackupFolders: [] });
 });
 
 test('a state file from the aligned dock still loads bounds, active service and muting, drops the alignment and hides the dock', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlign: 'end' }, ids);
-  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true });
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: false, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true, driveBackupFolders: [] });
 });
 
 test('a state file from before themes still loads everything else and matches the system', () => {
   const bounds = { x: 40, y: 30, width: 1100, height: 700 };
   const state = parseAppState({ bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true }, ids);
-  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true });
+  assert.deepEqual(state, { bounds, maximized: false, activeServiceId: 'discord', mutedServiceIds: ['whatsapp'], dockAlwaysShown: true, theme: 'system', serviceOrder: ids, hiddenServiceIds: [], hibernatedServiceIds: [], awayModes: {}, streamroom: DEFAULT_SERVERS, enabledServiceIds: ids, welcomed: true, sendClipboard: true, driveBackupFolders: [] });
 });
 
 test('keeps each named theme, and anything else matches the system', () => {
@@ -179,6 +183,7 @@ test('a state file from before the dock could be rearranged still loads everythi
     enabledServiceIds: ids,
     welcomed: true,
     sendClipboard: true,
+    driveBackupFolders: [],
   });
 });
 
@@ -226,4 +231,24 @@ test('a chosen folder for phone files is kept only as an absolute path', () => {
   assert.equal('receiveFolder' in parseAppState({}, ids), false);
   assert.equal('receiveFolder' in parseAppState({ receiveFolder: 'relative/dir' }, ids), false);
   assert.equal('receiveFolder' in parseAppState({ receiveFolder: 42 }, ids), false);
+});
+
+test('Drive backup folders are kept as absolute paths once each, and a bad last result is dropped', () => {
+  const state = parseAppState({ driveBackupFolders: ['/home/me/Documents', 'relative', 7, '/home/me/Documents', '/mnt/data'] }, ids);
+  assert.deepEqual(state.driveBackupFolders, ['/home/me/Documents', '/mnt/data']);
+  assert.deepEqual(parseAppState({}, ids).driveBackupFolders, []);
+  assert.deepEqual(parseAppState({ driveBackupSkipped: ['/home/me/Documents/Code', 'Code', 3] }, ids).driveBackupSkipped, ['/home/me/Documents/Code']);
+  assert.equal('driveBackupSkipped' in parseAppState({ driveBackupSkipped: [] }, ids), false);
+  const last = { at: 1_700_000_000_000, ok: false, sentBytes: 0, failed: 0, error: 'Failed to load session', signIn: true, missing: ['/mnt/data'] };
+  assert.deepEqual(parseAppState({ driveBackupLast: last }, ids).driveBackupLast, last);
+  assert.equal('driveBackupLast' in parseAppState({ driveBackupLast: { at: 'yesterday', ok: true } }, ids), false);
+  const details = { at: 1, ok: false, sentBytes: 4, failed: 1, error: 'a: x', failures: [{ name: 'a', error: 'x' }], links: 2, lowSpace: true };
+  assert.deepEqual(parseAppState({ driveBackupLast: details }, ids).driveBackupLast, details);
+});
+
+test("this PC's Drive folder name is kept once given, and never as a path", () => {
+  assert.equal(parseAppState({ drivePc: 'desk' }, ids).drivePc, 'desk');
+  assert.equal('drivePc' in parseAppState({}, ids), false);
+  assert.equal('drivePc' in parseAppState({ drivePc: '  ' }, ids), false);
+  assert.equal('drivePc' in parseAppState({ drivePc: '../x' }, ids), false);
 });

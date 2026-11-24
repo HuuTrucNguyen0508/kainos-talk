@@ -1,6 +1,7 @@
 import { BaseWindow, Menu, powerMonitor, clipboard, type MenuItemConstructorOptions, Notification, Tray, WebContentsView, app, dialog, ipcMain, nativeImage, nativeTheme, protocol, screen, session, shell, type IpcMainEvent, type WebContents } from 'electron';
-import { statSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
+import { basename, dirname, join, parse, relative, sep } from 'node:path';
 import { Channel, parseDockIndex, parseDockSize, parseMenuPoint, type DockFrame, type DockSize, type MenuPoint, type Snapshot } from '../shared/ipc.ts';
 import { parsePagePointer, type PagePointer } from '../shared/dock-edge.ts';
 import { moveService, successor, visibleServices } from '../shared/dock-order.ts';
@@ -17,6 +18,7 @@ import { startSmsSync, type SmsSync } from './sms-sync.ts';
 import { startCallAudio } from './call-audio.ts';
 import { startClipboardSync, systemClipboard, type ClipboardSync } from './clipboard-sync.ts';
 import { startMediaPause } from './media-pause.ts';
+import { CLI_DOWNLOAD, DRIVE_FOLDER, findCli, formatBytes, inside, sizeUpTo, outcomeDetails, outcomeKind, outcomeLabel, startDriveBackup, type BackupOutcome, type OutcomeKind } from './drive-backup.ts';
 import { openAppsPage, type AppsPage } from './apps-page.ts';
 import { IMAGE_SCHEME, SmsChannel, isCopyableCode } from '../shared/sms.ts';
 import { THEMES, resolveTheme, type ThemeChoice } from '../shared/theme.ts';
@@ -24,7 +26,9 @@ import { CLOUDFLARE_GUIDE, LOCAL_GUIDE, STREAMROOM_ID, parseServer, serverChoice
 import { askServerAddress, type ServerDialogMode } from './server-dialog.ts';
 import { createCallPopup } from './call-popup.ts';
 import { callTab } from './call-tab.ts';
-import { watchHyprland } from './hyprland.ts';
+import { connectHyprland, watchHyprland } from './hyprland.ts';
+import { createNativeWindow, type NativeWindow } from './native-window.ts';
+import { NativeChannel, type NativeAppView } from '../shared/native-app.ts';
 
 import { claimingService, sharedLink } from './navigation.ts';
 import { openExternal } from './open-external.ts';
@@ -80,7 +84,7 @@ async function start(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   const serviceIds = SERVICES.map((service) => service.id);
   /** Kainos' own page (Texts) always keeps its tab. */
-  const unhideable = SERVICES.filter((service) => service.localPage).map((service) => service.id);
+  const unhideable = SERVICES.filter((service) => service.localPage === 'inbox').map((service) => service.id);
   const statePath = join(app.getPath('userData'), 'kainos-state.json');
   let state: AppState = loadAppState(statePath, serviceIds, {
     unhideable,
@@ -323,6 +327,67 @@ async function start(): Promise<void> {
     await running?.stop();
   }
   if (isOn('inbox')) await startSms();
+
+  // Folders backed up to Proton Drive through Proton's command-line tool, while the Drive tab is on.
+  // Not on Windows: Proton's own Windows app backs up folders there, and the copy each run makes
+  // would push long paths past Windows' limit.
+  const DRIVE_ID = 'proton-drive';
+  const backupsHere = process.platform !== 'win32';
+  const home = app.getPath('home');
+  const driveCli = () => findCli(home);
+  // This PC's folder in Drive keeps the name it got with the first folder, even if the PC is renamed.
+  const drivePc = state.drivePc ?? hostname();
+  if (!state.drivePc && state.driveBackupFolders.length > 0) updateState({ drivePc }, 0);
+  /** Never backed up, even inside a picked folder. */
+  const driveExclude = [
+    // Kainos' own data holds every service's login.
+    app.getPath('userData'),
+    // Games and the trash: large, and nothing a backup should bring back.
+    join(home, '.local', 'share', 'Steam'),
+    join(home, '.steam'),
+    join(home, '.var', 'app', 'com.valvesoftware.Steam'),
+    join(home, '.local', 'share', 'Trash'),
+    // The system's live views of processes and devices, if someone picks a folder above them.
+    ...(process.platform === 'linux' ? ['/proc', '/sys', '/dev', '/run'] : []),
+  ];
+  const driveBackup = startDriveBackup({
+    folders: () => state.driveBackupFolders,
+    skip: () => state.driveBackupSkipped ?? [],
+    enabled: () => backupsHere && isOn(DRIVE_ID),
+    cli: driveCli,
+    workDir: join(app.getPath('userData'), 'drive-backup'),
+    home,
+    pc: drivePc,
+    exclude: driveExclude,
+    everyMs: 60 * 60_000,
+    firstAfterMs: 2 * 60_000,
+    onDone: (outcome, asked) => {
+      const was: OutcomeKind = state.driveBackupLast ? outcomeKind(state.driveBackupLast) : 'ok';
+      updateState({ driveBackupLast: outcome }, 0);
+      // A scheduled run speaks up when its kind of result changes (failing, a new problem, working
+      // again), not every hour after.
+      if (asked || outcomeKind(outcome) !== was) notifyBackup(outcome, was);
+    },
+  });
+  // After sleep, the network takes a moment to come back.
+  powerMonitor.on('resume', () => driveBackup.woke());
+  function notifyBackup(outcome: BackupOutcome, was: OutcomeKind): void {
+    if (!Notification.isSupported()) return;
+    const kind = outcomeKind(outcome);
+    const title =
+      kind === 'ok'
+        ? was === 'ok'
+          ? 'Backed up to Proton Drive'
+          : 'Proton Drive backups work again'
+        : kind === 'signed-out' || kind === 'failed' || kind === 'refused'
+          ? 'Proton Drive backup failed'
+          : 'Proton Drive backup incomplete';
+    const body = [`${outcomeLabel(outcome, new Date())}.`, ...outcomeDetails(outcome, homeRelative)].join(' ');
+    const notification = new Notification({ title, body, icon: icons.plain });
+    notification.on('click', () => showOnTab(DRIVE_ID));
+    notification.show();
+  }
+  const homeRelative = (path: string) => (path === home ? '~' : path.startsWith(home + sep) ? `~${path.slice(home.length)}` : path);
   // Pictures stay as bytes in main; the inbox page shows them by URL, and no other session can.
   session.fromPartition(partitionFor(SERVICES.find((service) => service.localPage === 'inbox')!)).protocol.handle(IMAGE_SCHEME, async (request) => {
     const picture = (await sms?.image(decodeURIComponent(new URL(request.url).pathname.slice(1)))) ?? null;
@@ -358,6 +423,25 @@ async function start(): Promise<void> {
     }),
   );
   const runtimeById = (id: string) => runtimes.find((runtime) => runtime.service.id === id);
+  // Desktop apps on a tab (Thunderbird): on Hyprland their own window sits over the tab.
+  const hyprland = connectHyprland();
+  const natives = new Map<string, NativeWindow>();
+  for (const service of SERVICES) {
+    const nativeApp = service.nativeApp;
+    if (!nativeApp) continue;
+    natives.set(service.id, createNativeWindow({ app: nativeApp, hyprland, title: () => win.getTitle(), onChange: () => sendNativeView(service.id) }));
+  }
+  const nativePage = (id: string) => (natives.has(id) ? runtimeById(id)?.view()?.webContents : undefined);
+  function nativeView(id: string): NativeAppView | undefined {
+    const service = findService(id);
+    const native = natives.get(id);
+    return service && native ? { name: service.name, icon: service.icon, state: native.state() } : undefined;
+  }
+  function sendNativeView(id: string): void {
+    const page = nativePage(id);
+    const view = nativeView(id);
+    if (page && !page.isDestroyed() && view) page.send(NativeChannel.view, view);
+  }
   /** The page a service shows: its call while that is in front, else its page. */
   const shownContents = (runtime: ServiceRuntime | undefined) => (runtime?.callInFront() ? runtime.call() : runtime?.view())?.webContents;
   const runtimeOf = (contents: WebContents) =>
@@ -464,13 +548,16 @@ async function start(): Promise<void> {
     const [width = 0, height = 0] = win.getContentSize();
     const active = runtimeById(state.activeServiceId);
     const activeContents = shownContents(active);
+    // A desktop app's window covers whatever is under it, the dock too, and takes the pointer
+    // that would bring an auto-hiding dock up; so on its tab the dock keeps its strip.
+    const nativeActive = active?.service.nativeApp !== undefined;
     feed({ kind: 'page', at: activeContents ? pagePointers.get(activeContents) ?? 'away' : 'away' });
     // A service that is loading or failed stays hidden, so the dock page can show why.
     const activeReady = active?.status().kind === 'ready';
     // A page in HTML fullscreen (a video, a stream) covers the dock too.
     const activeFullscreen = active?.fullscreen() === true;
-    feed({ kind: 'active', active: !state.dockAlwaysShown && activeReady && !activeFullscreen });
-    const placed = layoutBar({ width, height, activeReady, activeFullscreen, pinned: state.dockAlwaysShown, onScreen: onScreen(reveal.phase), group });
+    feed({ kind: 'active', active: !state.dockAlwaysShown && !nativeActive && activeReady && !activeFullscreen });
+    const placed = layoutBar({ width, height, activeReady, activeFullscreen, pinned: state.dockAlwaysShown || nativeActive, onScreen: onScreen(reveal.phase), group });
     // While the tab on screen has a call on, the call strip sits at the top of the page's place
     // (not over a fullscreen video), and the call or the page fills the rest.
     const activeCall = activeReady && !activeFullscreen && active?.call() !== undefined;
@@ -487,6 +574,13 @@ async function start(): Promise<void> {
       call?.setVisible(shown && runtime.callInFront());
       view.setBounds(bounds);
       view.setVisible(shown && !runtime.callInFront());
+    }
+    // The app's window goes on its tab while the tab is on screen, and out of sight otherwise.
+    const windowShown = win.isVisible() && !win.isMinimized() && apps === undefined;
+    for (const [id, native] of natives) {
+      native.setEnabled(isOn(id) && !state.hiddenServiceIds.includes(id));
+      const tabShown = windowShown && id === state.activeServiceId && activeReady;
+      native.place({ area: tabShown ? below : undefined, content: { width, height } });
     }
     callStrip.setBounds({ ...area, height: stripHeight });
     callStrip.setVisible(activeCall);
@@ -518,10 +612,11 @@ async function start(): Promise<void> {
     inboxShown = shown;
     view?.webContents.send(SmsChannel.shown, shown);
   }
-  win.on('show', tellInboxShown);
-  win.on('hide', tellInboxShown);
-  win.on('minimize', tellInboxShown);
-  win.on('restore', tellInboxShown);
+  // layout() also moves a desktop app's window away with the window, and back.
+  win.on('show', layout);
+  win.on('hide', layout);
+  win.on('minimize', layout);
+  win.on('restore', layout);
   smsView()?.on('did-finish-load', () => {
     inboxShown = undefined;
     tellInboxShown();
@@ -536,7 +631,9 @@ async function start(): Promise<void> {
   function focusActiveService(): void {
     const runtime = runtimeById(state.activeServiceId);
     if (runtime?.status().kind !== 'ready') return;
-    if (win.isFocused()) shownContents(runtime)?.focus();
+    const native = natives.get(runtime.service.id);
+    if (native && win.isFocused()) native.focus();
+    else if (win.isFocused()) shownContents(runtime)?.focus();
     else focusOnWindowFocus = true;
   }
   win.on('focus', () => {
@@ -657,7 +754,7 @@ async function start(): Promise<void> {
     runtimeById(id)?.setCallInFront(true);
     activate(id);
   }
-  watchHyprland(() => win.getTitle(), openCall);
+  watchHyprland(hyprland, () => win.getTitle(), openCall);
   win.on('show', openCall);
   win.on('restore', openCall);
 
@@ -847,6 +944,7 @@ async function start(): Promise<void> {
     void (async () => {
       if (turnedOn.includes('inbox')) await startSms().catch((error: unknown) => console.warn('Could not start the phone sync:', error));
       for (const id of turnedOn) if (!state.hibernatedServiceIds.includes(id)) runtimeById(id)?.wake();
+      for (const id of turnedOn) natives.get(id)?.startInBackground();
       if (!dockTabs().includes(state.activeServiceId)) {
         const tabs = dockTabs();
         const next = tabs.find((id) => !state.hibernatedServiceIds.includes(id)) ?? tabs[0];
@@ -866,6 +964,18 @@ async function start(): Promise<void> {
     const tabs = dockTabs();
     const place = tabs.indexOf(id);
     const asleep = state.hibernatedServiceIds.includes(id);
+    const native = natives.get(id);
+    if (native) {
+      // The app is a program of its own: no page to reload, notifications or login of Kainos' to manage.
+      Menu.buildFromTemplate([
+        { label: native.state().kind === 'placed' ? `Bring ${name} here` : `Open ${name}`, click: () => native.open() },
+        { type: 'separator' },
+        { label: 'Move left', enabled: place > 0, click: () => moveInDock(id, place - 1) },
+        { label: 'Move right', enabled: place >= 0 && place < tabs.length - 1, click: () => moveInDock(id, place + 1) },
+        { label: 'Hide from dock', click: () => hideFromDock(id) },
+      ]).popup(menuOptions(at));
+      return;
+    }
     Menu.buildFromTemplate([
       asleep
         ? { label: `Wake ${name}`, click: () => wake(id) }
@@ -879,6 +989,7 @@ async function start(): Promise<void> {
       ...(canHibernate(runtime.service) ? [{ label: 'In the background', submenu: awayMenu(runtime) }] : []),
       { label: muted ? 'Unmute notifications' : 'Mute notifications', click: () => setMuted(id, !muted) },
       ...(id === STREAMROOM_ID ? [{ label: 'Server', submenu: serverMenu() }] : []),
+      ...(id === DRIVE_ID && backupsHere ? [{ label: 'Back up folders', submenu: backupMenu() }] : []),
       { type: 'separator' },
       { label: 'Move left', enabled: place > 0, click: () => moveInDock(id, place - 1) },
       { label: 'Move right', enabled: place >= 0 && place < tabs.length - 1, click: () => moveInDock(id, place + 1) },
@@ -899,7 +1010,7 @@ async function start(): Promise<void> {
   }
 
   /** Kainos' own pages: the dock, the Texts page and the call strip. Service pages keep their own colours. */
-  const themedPages = () => [dockContents, smsView(), serverDialog, apps?.view.webContents, callStrip.webContents, callPopupContents].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
+  const themedPages = () => [dockContents, smsView(), ...[...natives.keys()].map(nativePage), serverDialog, apps?.view.webContents, callStrip.webContents, callPopupContents].filter((contents): contents is WebContents => contents !== undefined && !contents.isDestroyed());
   function chooseTheme(theme: ThemeChoice): void {
     updateState({ theme }, 0);
     paintThemeBackground();
@@ -939,6 +1050,157 @@ async function start(): Promise<void> {
       },
       { label: `Folder for phone files (${basename(receiveFolder())})…`, click: () => void chooseReceiveFolder() },
     ]).popup(menuOptions(at));
+  }
+
+  /** The Drive tab's Back up folders: how the last run went and why, the folders, and Back up now. */
+  function backupMenu(): MenuItemConstructorOptions[] {
+    const cli = driveCli();
+    const folders = state.driveBackupFolders;
+    const running = driveBackup.running();
+    const last = state.driveBackupLast;
+    const status = !cli ? 'Needs the Proton Drive CLI' : running ? 'Backing up…' : outcomeLabel(last, new Date());
+    const details = last && !running ? outcomeDetails(last, homeRelative) : [];
+    return [
+      { label: status, enabled: false },
+      ...(details.length > 0 ? [{ label: 'Details', submenu: details.map((line) => ({ label: shorten(line), enabled: false })) }] : []),
+      ...(cli ? [] : [{ label: 'Get the Proton Drive CLI…', click: () => openExternal(CLI_DOWNLOAD) }]),
+      running
+        ? { label: 'Cancel backup', click: () => driveBackup.cancel() }
+        : { label: 'Back up now', enabled: cli !== undefined && folders.length > 0, click: () => void driveBackup.backUpNow() },
+      { type: 'separator' },
+      ...folders.map((folder) => ({
+        label: homeRelative(folder),
+        submenu: [
+          {
+            label: 'Stop backing up',
+            click: () => {
+              const left = state.driveBackupFolders.filter((path) => path !== folder);
+              updateState({ driveBackupFolders: left, driveBackupSkipped: skipsInside(left, skipped()) }, 0);
+              driveBackup.folderRemoved();
+            },
+          },
+          { type: 'separator' as const },
+          // Ticked: left out. Unticking backs it up again, starting now.
+          ...skipsInside([folder], skipped()).map((skip) => ({
+            label: `Skip ${relative(folder, skip)}`,
+            type: 'checkbox' as const,
+            checked: true,
+            click: () => {
+              updateState({ driveBackupSkipped: skipped().filter((path) => path !== skip) }, 0);
+              if (isOn(DRIVE_ID)) driveBackup.foldersChanged();
+            },
+          })),
+          {
+            label: 'Skip a folder inside…',
+            click: async () => {
+              const skip = await chooseSkip([folder]);
+              if (!skip) return;
+              updateState({ driveBackupSkipped: [...skipped(), skip] }, 0);
+              // A run that is on may be uploading it: it ends and runs again without it.
+              driveBackup.folderRemoved();
+            },
+          },
+        ],
+      })),
+      { label: 'Add a folder…', click: () => void addBackupFolders() },
+      { type: 'separator' },
+      // Without a tray icon (most Wayland desktops), closing the window quits Kainos.
+      { label: `Every hour while Kainos is open, into ${DRIVE_FOLDER} in Drive`, enabled: false },
+    ];
+  }
+  const shorten = (line: string) => (line.length > 100 ? `${line.slice(0, 99)}…` : line);
+  const skipped = () => state.driveBackupSkipped ?? [];
+  /** The skipped folders inside one of `folders`, not one of them itself. */
+  const skipsInside = (folders: readonly string[], skips: readonly string[]) =>
+    skips.filter((skip) => folders.some((folder) => skip !== folder && inside(skip, folder)));
+
+  /** Asks for a folder inside one of `folders` to leave out of the backup. */
+  async function chooseSkip(folders: readonly string[]): Promise<string | undefined> {
+    const options: Electron.OpenDialogOptions = { title: 'Leave out of the backup', buttonLabel: 'Skip', defaultPath: folders[0] ?? home, properties: ['openDirectory'] };
+    const { canceled, filePaths } = win.isVisible() ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    const path = filePaths[0];
+    if (canceled || !path) return undefined;
+    let skip: string;
+    try {
+      skip = realpathSync(path);
+    } catch {
+      return undefined;
+    }
+    if (skipsInside(folders, [skip]).length > 0) return skip;
+    const names = folders.map(homeRelative).join(', ');
+    await dialog.showMessageBox(win, { type: 'error', message: `Could not skip ${homeRelative(path)}`, detail: `Pick a folder inside ${names}.` });
+    return undefined;
+  }
+
+  async function addBackupFolders(): Promise<void> {
+    const options: Electron.OpenDialogOptions = { title: 'Back up to Proton Drive', buttonLabel: 'Back up', defaultPath: home, properties: ['openDirectory', 'multiSelections'] };
+    const { canceled, filePaths } = win.isVisible() ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    if (canceled || filePaths.length === 0) return;
+    // Saved by real path, so a link that later points elsewhere cannot change what is uploaded.
+    let picked: string[] = [];
+    for (const path of filePaths) {
+      try {
+        picked.push(realpathSync(path));
+      } catch {
+        await dialog.showMessageBox(win, { type: 'error', message: `Could not add ${homeRelative(path)}`, detail: 'The folder can no longer be found. Is its disk still connected?' });
+      }
+    }
+    // A whole disk holds the system itself, and every other user's files.
+    const disks = picked.filter((path) => parse(path).root === path);
+    if (disks.length > 0) {
+      await dialog.showMessageBox(win, { type: 'error', message: `Could not add ${disks.join(', ')}`, detail: 'That is a whole disk. Pick the folders on it you want backed up.' });
+    }
+    picked = picked.filter((path) => !disks.includes(path));
+    if (picked.length === 0) return;
+    // Picking a skipped folder backs it up again.
+    let skips: readonly string[] = skipped().filter((skip) => !picked.includes(skip));
+    // The whole home folder holds SSH keys, browser profiles and every app's data.
+    const realHome = realpathSync(home);
+    if (picked.some((path) => inside(realHome, path))) {
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'warning',
+        buttons: ['Back up', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        message: 'Back up your whole home folder?',
+        detail: 'It includes SSH keys, browser profiles and every app’s data and caches, so the first backup can be very large. Picking folders such as Documents is faster.',
+      });
+      if (response !== 0) return;
+    } else {
+      const confirmed = await bigBackupConfirmed(picked, skips);
+      if (!confirmed) return;
+      skips = confirmed;
+    }
+    updateState({ driveBackupFolders: [...new Set([...state.driveBackupFolders, ...picked])], driveBackupSkipped: skips, drivePc }, 0);
+    // The first backup of a new folder starts now, not within the hour.
+    if (isOn(DRIVE_ID)) driveBackup.foldersChanged();
+  }
+
+  /**
+   * Past 10 GB or 100,000 files, a first backup takes hours and Proton slows it down: the user
+   * confirms it, or skips folders inside until it fits. Counting stops at the limit, so even a huge
+   * folder answers in seconds. Resolves to the skipped folders, or nothing if the user cancelled.
+   */
+  async function bigBackupConfirmed(folders: readonly string[], skips: readonly string[]): Promise<readonly string[] | undefined> {
+    const limit = { bytes: 10 * 1024 ** 3, files: 100_000 };
+    for (;;) {
+      const size = await sizeUpTo(folders, { home, exclude: driveExclude, skip: skips }, limit);
+      if (!size.more) return skips;
+      const names = folders.map(homeRelative).join(', ');
+      const amount = size.bytes > limit.bytes ? `more than ${formatBytes(limit.bytes)}` : `more than ${limit.files.toLocaleString()} files`;
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'warning',
+        buttons: ['Back up', 'Skip a folder inside…', 'Cancel'],
+        defaultId: 1,
+        cancelId: 2,
+        message: `Back up ${amount}?`,
+        detail: `${names} holds ${amount}, even leaving out caches such as node_modules and the folders you skipped. The first backup would take hours, and Proton slows down large uploads. Skip the folders inside it that you could get back elsewhere; code in Git repositories is usually already backed up.`,
+      });
+      if (response === 0) return skips;
+      if (response !== 1) return undefined;
+      const skip = await chooseSkip(folders);
+      if (skip) skips = [...skips, skip];
+    }
   }
 
   /**
@@ -1098,6 +1360,16 @@ async function start(): Promise<void> {
 
   const smsContents = smsView();
   const fromSms = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => smsContents !== undefined && event.sender === smsContents;
+  // The page behind a desktop app's window asks about its own app only.
+  const nativeOf = (event: IpcMainEvent | Electron.IpcMainInvokeEvent) => [...natives.keys()].find((id) => nativePage(id) === event.sender);
+  ipcMain.handle(NativeChannel.getView, (event) => {
+    const id = nativeOf(event);
+    return id ? nativeView(id) : undefined;
+  });
+  ipcMain.on(NativeChannel.open, (event) => {
+    const id = nativeOf(event);
+    if (id) natives.get(id)?.open();
+  });
   ipcMain.handle(SmsChannel.getState, (event) => (fromSms(event) ? sms?.state() : undefined));
   ipcMain.on(SmsChannel.reply, (event, key: unknown, text: unknown) => {
     if (fromSms(event) && typeof key === 'string' && typeof text === 'string' && text.trim() && text.length <= 5000) sms?.reply(key, text);
@@ -1190,12 +1462,24 @@ async function start(): Promise<void> {
 
   app.on('second-instance', showWindow);
   app.on('activate', showWindow);
-  app.on('before-quit', () => {
+  /** Desktop apps on a tab go back to ordinary windows before Kainos goes. */
+  let released = false;
+  app.on('before-quit', (event) => {
     quitting = true;
     updateState({}, 0);
+    if (released || natives.size === 0) return;
+    event.preventDefault();
+    void Promise.allSettled([...natives.values()].map((native) => native.release())).then(() => {
+      released = true;
+      app.quit();
+    });
   });
   // Stopping Texts stops the clipboard watcher; quitting has to as well, or wl-paste outlives Kainos.
-  app.on('will-quit', () => clipboardSync?.stop());
+  // A backup in progress stops too; the next run uploads what it missed.
+  app.on('will-quit', () => {
+    clipboardSync?.stop();
+    driveBackup.stop();
+  });
 
   // The local pages load once their IPC handlers exist: a page that asks for its theme earlier
   // gets no answer and stays on the system theme.
@@ -1204,4 +1488,6 @@ async function start(): Promise<void> {
   // First launch, or nothing left on: Kainos opens on Choose your apps.
   if (!state.welcomed || state.enabledServiceIds.length === 0) showApps();
   render();
+  // A desktop app on a tab starts with Kainos, out of sight, as the websites load with it.
+  for (const [id, native] of natives) if (isOn(id)) native.startInBackground();
 }

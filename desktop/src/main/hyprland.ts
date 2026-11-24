@@ -1,4 +1,4 @@
-import { connect } from 'node:net';
+import { connect, type Socket } from 'node:net';
 import { join } from 'node:path';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
@@ -29,37 +29,76 @@ export function onScreen(window: Record<string, unknown>, monitors: readonly unk
 /** Hyprland answers at once; one that does not is taken as no answer. */
 const REQUEST_TIMEOUT_MS = 2_000;
 
-/** Hyprland events after which a window may have come on screen or left it. */
-const SHOWING_EVENTS = new Set(['workspace', 'workspacev2', 'activespecial', 'activespecialv2', 'movewindow', 'movewindowv2', 'openwindow', 'moveworkspace', 'moveworkspacev2']);
+export interface Hyprland {
+  /** Asks Hyprland's request socket; `j/clients` and the like answer JSON. Undefined when no answer came. */
+  ask(request: string): Promise<unknown>;
+  /** Runs a dispatcher, written in Lua as Hyprland 0.57 takes them (`hl.dsp.window.float({...})`). */
+  dispatch(lua: string): Promise<boolean>;
+  /** Calls `listener` with each batch of event lines (`name>>data`) from the event socket. */
+  onEvents(listener: (lines: readonly string[]) => void): void;
+}
 
-/**
- * On Hyprland, calls `onShown` each time the app's window, titled `title()`, comes onto a screen:
- * its special workspace opened, its workspace switched to, or the window moved or mapped there.
- * Elsewhere it does nothing. Wayland tells an app none of this; Hyprland's own sockets do.
- */
-export function watchHyprland(title: () => string, onShown: () => void): void {
+/** The event's name: what comes before `>>`. */
+export const eventName = (line: string) => line.slice(0, line.indexOf('>>'));
+
+/** Hyprland's sockets, when Kainos runs on Hyprland; undefined elsewhere. */
+export function connectHyprland(): Hyprland | undefined {
   const signature = process.env.HYPRLAND_INSTANCE_SIGNATURE;
   const runtime = process.env.XDG_RUNTIME_DIR;
-  if (!signature || !runtime) return;
+  if (!signature || !runtime) return undefined;
   const dir = join(runtime, 'hypr', signature);
 
-  const ask = (request: string) =>
-    new Promise<unknown>((resolve) => {
+  const send = (request: string) =>
+    new Promise<string | undefined>((resolve) => {
       let answer = '';
       const socket = connect(join(dir, '.socket.sock'), () => socket.end(request));
       socket.setEncoding('utf8');
       socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy());
       socket.on('close', () => resolve(undefined));
       socket.on('data', (chunk: string) => (answer += chunk));
-      socket.on('end', () => {
-        try {
-          resolve(JSON.parse(answer));
-        } catch {
-          resolve(undefined);
-        }
-      });
+      socket.on('end', () => resolve(answer));
       socket.on('error', () => resolve(undefined));
     });
+  const ask = async (request: string) => {
+    const answer = await send(request);
+    try {
+      return answer === undefined ? undefined : (JSON.parse(answer) as unknown);
+    } catch {
+      return undefined;
+    }
+  };
+  const dispatch = async (lua: string) => (await send(`dispatch ${lua}`))?.trim() === 'ok';
+
+  const listeners: ((lines: readonly string[]) => void)[] = [];
+  let events: Socket | undefined;
+  const onEvents = (listener: (lines: readonly string[]) => void) => {
+    listeners.push(listener);
+    if (events) return;
+    events = connect(join(dir, '.socket2.sock'));
+    events.setEncoding('utf8');
+    let buffer = '';
+    events.on('data', (chunk: string) => {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const each of listeners) each(lines);
+    });
+    events.on('error', (error) => console.warn('Hyprland events unavailable:', error.message));
+  };
+  return { ask, dispatch, onEvents };
+}
+
+/** Hyprland events after which a window may have come on screen or left it. */
+const SHOWING_EVENTS = new Set(['workspace', 'workspacev2', 'activespecial', 'activespecialv2', 'movewindow', 'movewindowv2', 'openwindow', 'moveworkspace', 'moveworkspacev2']);
+
+/**
+ * On Hyprland (`hyprland` given), calls `onShown` each time the app's window, titled `title()`, comes onto a screen:
+ * its special workspace opened, its workspace switched to, or the window moved or mapped there.
+ * Elsewhere it does nothing. Wayland tells an app none of this; Hyprland's own sockets do.
+ */
+export function watchHyprland(hyprland: Hyprland | undefined, title: () => string, onShown: () => void): void {
+  if (!hyprland) return;
+  const { ask } = hyprland;
 
   /** Unknown until the first look, so a window already on screen at startup is not news. */
   let shown: boolean | undefined;
@@ -89,17 +128,10 @@ export function watchHyprland(title: () => string, onShown: () => void): void {
     looking = false;
   }
 
-  const events = connect(join(dir, '.socket2.sock'));
-  events.setEncoding('utf8');
-  let buffer = '';
-  events.on('data', (chunk: string) => {
-    buffer += chunk;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
+  hyprland.onEvents((lines) => {
     // Hyprland may give a closed window's address to the next window.
     if (address !== undefined && lines.includes(`closewindow>>${address.replace(/^0x/, '')}`)) address = undefined;
-    if (lines.some((line) => SHOWING_EVENTS.has(line.slice(0, line.indexOf('>>'))))) void look();
+    if (lines.some((line) => SHOWING_EVENTS.has(eventName(line)))) void look();
   });
-  events.on('error', (error) => console.warn('Hyprland events unavailable:', error.message));
   void look();
 }

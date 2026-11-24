@@ -1,7 +1,7 @@
 # Kainos Talk desktop
 
 Electron shell that hosts Proton Mail, Discord, WhatsApp, Messenger, Streamroom and Gmail in one window, plus a
-Texts page for the phone's SMS and RCS, each switched on or off on Choose your apps. A dock that slides up from the bottom of the window switches between them; each
+Thunderbird tab and a Texts page for the phone's SMS and RCS, each switched on or off on Choose your apps. A dock that slides up from the bottom of the window switches between them; each
 service runs in its own `WebContentsView` with its own persistent login (`persist:service-<id>`).
 The websites that are on load at startup. In the background they sleep and keep notifying, or
 hibernate after a while, as each one's **In the background** choice says (see **In the background**);
@@ -208,6 +208,21 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   (`accounts.google.com`) in the Gmail tab see Firefox: its user agent in the requests, without
   Chrome's `Sec-CH-UA` client hints, and in the page's `navigator`. Whether Google accepts that
   can only be checked by signing in; if it still refuses, Gmail cannot be used in Kainos.
+- **Thunderbird** is a desktop program, not a website, and Electron cannot hold another program's
+  window, so on Hyprland Kainos places Thunderbird's own main window over the tab instead
+  (`src/main/native-window.ts`): floating, without border, rounding or shadow, exactly on the
+  tab's place above the dock, which keeps its strip on this tab. It follows Kainos' window when
+  that moves, resizes or changes workspace (checked twice a second while Kainos floats, since
+  Hyprland reports no drag), and waits on the hidden `special:kainos` workspace while another tab
+  is open, Kainos is hidden or minimised, or Choose your apps is up. Kainos starts it at launch,
+  out of sight, through Hyprland, so it belongs to the session rather than to Kainos. Quitting
+  Kainos, turning Thunderbird off or hiding its tab hands the window back as an ordinary tiled
+  one on Kainos' workspace. Only the window that opened titled "Mozilla Thunderbird" is placed; a
+  message being written opens as usual. Its tab's page (`renderer/native.html`) shows only while
+  Thunderbird's window is not there: starting, closed (with Open Thunderbird) or not installed.
+  Thunderbird keeps its own notifications and unread count. Off Hyprland, the tab opens
+  Thunderbird in a window of its own. It is opt-in. If Kainos crashes, the window stays on
+  `special:kainos` until Kainos starts again or that workspace is toggled.
 - **Messenger** opens `www.messenger.com`. Sign-in and security checks may pass through
   `www.facebook.com`, which stays inside the view.
 - **Texts** is not a website. Google refuses its sign-in inside Kainos ("This browser or app may not

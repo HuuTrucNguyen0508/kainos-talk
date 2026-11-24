@@ -757,7 +757,7 @@ async function welcome(profile: string): Promise<void> {
     };
     check(JSON.stringify(first) === JSON.stringify({ title: 'Choose your apps', cancel: false, start: true, status: 'Pick at least one app.', on: 0 }), '... with nothing on, no Cancel, and Start waiting for a choice', JSON.stringify(first));
     const names = await choose.locator('.name').allInnerTexts();
-    check(JSON.stringify(names) === JSON.stringify(['Texts', 'Proton Mail', 'Discord', 'WhatsApp', 'Messenger', 'Streamroom', 'Gmail', 'Proton Drive']), '... listing every app, Gmail and Proton Drive included', JSON.stringify(names));
+    check(JSON.stringify(names) === JSON.stringify(['Texts', 'Proton Mail', 'Discord', 'WhatsApp', 'Messenger', 'Streamroom', 'Gmail', 'Proton Drive', 'Thunderbird']), '... listing every app, Gmail, Proton Drive and Thunderbird included', JSON.stringify(names));
     check((await views(app)) === 2, '... while no service page loads behind it (only the dock and this page)', String(await views(app)));
     check(!(await listening(syncPort)), '... and nothing listens for the phone yet');
     await choose.locator('.app', { hasText: 'Texts' }).click();
@@ -2050,7 +2050,7 @@ async function run(profile: string): Promise<void> {
       await sleep(300);
       check((await activeTab(page)) === 'whatsapp', 'dropping a tab does not select it', await activeTab(page));
       const savedOrder = () => (JSON.parse(readFileSync(stateFile, 'utf8')) as { serviceOrder?: string[] }).serviceOrder?.join(' ');
-      check((await poll(async () => savedOrder(), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom gmail proton-drive', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom gmail proton-drive', '... and the new order is saved at once, Gmail and Proton Drive (off) still last', savedOrder());
+      check((await poll(async () => savedOrder(), (o) => o === 'inbox proton-mail whatsapp discord messenger streamroom gmail proton-drive thunderbird', 3000)) === 'inbox proton-mail whatsapp discord messenger streamroom gmail proton-drive thunderbird', '... and the new order is saved at once, Gmail, Proton Drive and Thunderbird (off) still last', savedOrder());
       check(/Discord moved to tab 4 of 6/.test(await announced(page)), '... and screen readers hear where it went', await announced(page));
 
       // A click with no movement still selects.
@@ -2175,7 +2175,7 @@ async function run(profile: string): Promise<void> {
   check(JSON.stringify(saved.bounds) === JSON.stringify({ x: 120, y: 90, width: 1100, height: 720 }), 'saves window size and position', JSON.stringify(saved.bounds));
   check(JSON.stringify(saved.mutedServiceIds) === '["discord"]', 'keeps the muted list', JSON.stringify(saved.mutedServiceIds));
   check(saved.theme === 'carbon', 'saves the picked theme', String(saved.theme));
-  check(JSON.stringify(saved.serviceOrder) === '["inbox","proton-mail","whatsapp","discord","messenger","streamroom","gmail","proton-drive"]' && JSON.stringify(saved.hiddenServiceIds) === '["messenger"]', 'saves the dock order and the hidden Messenger', JSON.stringify({ serviceOrder: saved.serviceOrder, hiddenServiceIds: saved.hiddenServiceIds }));
+  check(JSON.stringify(saved.serviceOrder) === '["inbox","proton-mail","whatsapp","discord","messenger","streamroom","gmail","proton-drive","thunderbird"]' && JSON.stringify(saved.hiddenServiceIds) === '["messenger"]', 'saves the dock order and the hidden Messenger', JSON.stringify({ serviceOrder: saved.serviceOrder, hiddenServiceIds: saved.hiddenServiceIds }));
   check(JSON.stringify(saved.hibernatedServiceIds) === '["streamroom"]', 'saves Streamroom as hibernating', JSON.stringify(saved.hibernatedServiceIds));
   check(saved.dockAlwaysShown === true && !('dockAlign' in saved) && !('barSide' in saved) && !('barAutoHide' in saved), 'saves Always show the dock, and nothing of the old alignment or side bar', JSON.stringify({ dockAlwaysShown: saved.dockAlwaysShown, dockAlign: saved.dockAlign, barSide: saved.barSide }));
 
