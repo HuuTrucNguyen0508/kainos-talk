@@ -46,7 +46,8 @@ test('dispatcher arguments are quoted for Lua and the command for the shell', ()
   assert.equal(shellLine(['thunderbird', '-P', "Bob's mail"]), `thunderbird -P 'Bob'\\''s mail'`);
 });
 
-test('the program is looked up on the PATH; one that is not there is missing', () => {
+// The Thunderbird tab runs on Linux (Hyprland) only; this test uses POSIX PATH and exec bits.
+test('the program is looked up on the PATH; one that is not there is missing', { skip: process.platform === 'win32' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'kainos-path-'));
   try {
     const program = join(dir, 'thunderbird');
