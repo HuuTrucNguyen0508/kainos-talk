@@ -119,7 +119,12 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   Bakelite when it is dark), or one of Switchboard (teal and ink), Daylight (light), Bakelite (warm
   dark), Carbon (black, white and greys; the services' logos are the only colour) and Aubergine
   (plum). It applies at once and is kept with the window state. The websites keep their own
-  colours. The left island holds the Kainos mark and
+  colours. **Start at login**, in the same menu, starts Kainos Talk when you log in, so the phone
+  reaches the PC after a restart without opening anything first. On Linux it writes
+  `~/.config/autostart/kainos-talk.desktop`, which GNOME, KDE and most desktops run. A Hyprland
+  session without UWSM doesn't, so start its generated unit from the config:
+  `systemctl --user start 'app-kainos\x2dtalk@autostart.service'`. On Windows it is the app's
+  login item. The left island holds the Kainos mark and
   one tab per service (logo, name, then its unread count, a dot for new activity, a bell for muted,
   a red mark when it failed to load or, on Texts, when the phone is not connected). When the names
   no longer fit, every tab but the active one drops its name, then the active name hides too.

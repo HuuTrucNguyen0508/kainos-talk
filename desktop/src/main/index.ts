@@ -35,6 +35,7 @@ import { openExternal } from './open-external.ts';
 import { createServiceRuntime, type ServiceRuntime } from './service-runtime.ts';
 import { shortcutFor } from './shortcuts.ts';
 import { trayHostPresent } from './tray-host.ts';
+import { loginItem } from './login-item.ts';
 import { chromeUserAgent } from './user-agent.ts';
 
 const APP_NAME = 'Kainos Talk';
@@ -1039,6 +1040,7 @@ async function start(): Promise<void> {
         label: 'Theme',
         submenu: choices.map(({ id, name }) => ({ label: name, type: 'radio', checked: state.theme === id, click: () => chooseTheme(id) })),
       },
+      startAtLoginItem(),
       { type: 'separator' },
       sendFilesItem(),
       {
@@ -1049,6 +1051,29 @@ async function start(): Promise<void> {
       },
       { label: `Folder for phone files (${basename(receiveFolder())})…`, click: () => void chooseReceiveFolder() },
     ]).popup(menuOptions(at));
+  }
+
+  const atLogin = loginItem({ platform: process.platform, env: process.env, execPath: process.execPath, isPackaged: app.isPackaged, appPath: app.getAppPath(), api: app });
+  /** Starting at login keeps the phone's link up after a restart, with no window to open first. */
+  function startAtLoginItem(): MenuItemConstructorOptions {
+    let on = false;
+    try {
+      on = atLogin.enabled();
+    } catch (error) {
+      console.warn('could not read the login item', error);
+    }
+    return {
+      label: 'Start at login',
+      type: 'checkbox',
+      checked: on,
+      click: () => {
+        try {
+          atLogin.set(!on);
+        } catch (error) {
+          dialog.showErrorBox(APP_NAME, `Could not ${on ? 'stop' : 'start'} Kainos Talk at login: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    };
   }
 
   /** The Drive tab's Back up folders: how the last run went and why, the folders, and Back up now. */
