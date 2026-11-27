@@ -13,7 +13,7 @@ import { keepAway } from './away.ts';
 import { layoutBar } from './bar.ts';
 import { REVEAL_TIMING, initialReveal, onScreen, raised, stepReveal, type RevealEvent, type RevealPhase, type RevealState } from './dock-reveal.ts';
 import { forwardNotifications } from './notifications.ts';
-import { startVencord } from './vencord.ts';
+import { mirrorVencordThemes, startVencord } from './vencord.ts';
 import { startSmsSync, type SmsSync } from './sms-sync.ts';
 import { startCallAudio } from './call-audio.ts';
 import { startClipboardSync, systemClipboard, type ClipboardSync } from './clipboard-sync.ts';
@@ -164,6 +164,8 @@ async function start(): Promise<void> {
       for (const runtime of runtimes) if (runtime.service.clientMod === 'vencord') runtime.reload();
     },
   });
+  // Desktop Vencord's themes folder: themes uploaded in the Discord tab follow their files there.
+  const vencordThemes = mirrorVencordThemes(join(app.getPath('appData'), 'Vencord', 'themes'));
 
   // The Texts page: the phone's SMS and RCS conversations, over the local network. It starts
   // before the service views, so the page's first request finds it ready. A change from the phone
@@ -420,6 +422,7 @@ async function start(): Promise<void> {
         if (apps) win.contentView.addChildView(apps.view);
         if (unwiredPages) unwiredPages.push(view.webContents);
         else wirePage(view.webContents);
+        if (service.clientMod === 'vencord') vencordThemes.attach(view.webContents);
       },
       onViewClosed: (view) => win.contentView.removeChildView(view),
       openLink,

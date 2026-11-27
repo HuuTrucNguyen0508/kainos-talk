@@ -88,3 +88,27 @@ function isRawGitHub(url: string): boolean {
     return false;
   }
 }
+
+/**
+ * Page script for the Discord tab: each theme Vencord already holds is replaced by the file of the
+ * same name from desktop Vencord's themes folder when their text differs. A file the page has no
+ * theme for is left out, so the folder never adds themes. Resolves to the names it replaced, or
+ * null while Vencord has not started.
+ */
+export function refreshThemesScript(files: Readonly<Record<string, string>>): string {
+  return `(async (files) => {
+  const themes = window.VencordNative?.themes;
+  const settings = window.Vencord?.Settings;
+  if (!themes || !settings) return null;
+  const replaced = [];
+  for (const { fileName } of await themes.getThemesList()) {
+    const css = Object.hasOwn(files, fileName) ? files[fileName] : undefined;
+    if (css === undefined || (await themes.getThemeData(fileName)) === css) continue;
+    await themes.uploadTheme(fileName, css);
+    replaced.push(fileName);
+  }
+  // Vencord Web reads its themes again only when this setting changes.
+  if (replaced.some((name) => settings.enabledThemes.includes(name))) settings.enabledThemes = [...settings.enabledThemes];
+  return replaced;
+})(${JSON.stringify(files)})`;
+}

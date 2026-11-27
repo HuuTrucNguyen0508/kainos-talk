@@ -1,9 +1,9 @@
-import { net, session, type Session } from 'electron';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { net, session, type Session, type WebContents } from 'electron';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { unzipSync } from 'fflate';
 import { partitionFor, type ServiceDefinition } from '../shared/services.ts';
-import { VENCORD_BUILD, VENCORD_URL, checkPinned, extensionFiles, vencordHeaders } from '../shared/vencord.ts';
+import { VENCORD_BUILD, VENCORD_URL, checkPinned, extensionFiles, refreshThemesScript, vencordHeaders } from '../shared/vencord.ts';
 
 /** Marks which download a folder holds. */
 const SOURCE_FILE = '.kainos-source-sha256';
@@ -82,4 +82,59 @@ function readSource(dir: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export interface ThemeMirror {
+  /** Brings a Discord page's themes up to date on each load, and whenever the folder changes. */
+  attach(contents: WebContents): void;
+}
+
+/**
+ * Keeps the themes uploaded to Vencord in the Discord tab in step with desktop Vencord's themes
+ * folder, which other tools may rewrite (a theme that follows the desktop's colours, say). Only
+ * themes the page already has are updated; see `refreshThemesScript`. Without the folder at
+ * startup, nothing is mirrored.
+ */
+export function mirrorVencordThemes(dir: string): ThemeMirror {
+  const pages = new Set<WebContents>();
+  const refresh = (contents: WebContents) => {
+    const files = readThemes(dir);
+    if (Object.keys(files).length === 0 || contents.isDestroyed()) return;
+    contents.executeJavaScript(refreshThemesScript(files)).catch((error: unknown) => console.warn('Could not refresh Vencord themes:', error));
+  };
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    // Themes are often written beside their file and renamed over it, so the folder is watched.
+    watch(dir, () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => pages.forEach(refresh), 250);
+    }).on('error', (error) => console.warn('Stopped watching Vencord themes:', error));
+  } catch {
+    // No themes folder.
+  }
+  return {
+    attach(contents) {
+      pages.add(contents);
+      contents.on('dom-ready', () => refresh(contents));
+      contents.once('destroyed', () => pages.delete(contents));
+    },
+  };
+}
+
+/** The folder's CSS files by name. */
+function readThemes(dir: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.css') || name.startsWith('.')) continue;
+      try {
+        files[name] = readFileSync(join(dir, name), 'utf8');
+      } catch {
+        // Gone or unreadable since the listing.
+      }
+    }
+  } catch {
+    // No themes folder.
+  }
+  return files;
 }

@@ -97,6 +97,12 @@ PyGObject, plus network access. Screenshots go to `.verify/` (git-ignored), or t
   stylesheets from `raw.githubusercontent.com` are served as CSS, so themes can load from any
   host. Vencord keeps its settings in Discord's site storage, so **Sign out of Discord also
   resets Vencord**.
+  Themes uploaded in Vencord's settings follow desktop Vencord's themes folder
+  (`~/.config/Vencord/themes` on Linux): on each Discord load, and whenever a file there changes,
+  every uploaded theme with a file of the same name there takes that file's text, and Vencord
+  applies it at once. A file there that was never uploaded is not added, and the folder must exist
+  when the app starts. This lets a desktop theme that a script rewrites (one that follows the
+  wallpaper, say) reach the Discord tab without uploading it again.
 - **Texts and the websites.** Texts, first in the dock, shows the SMS and RCS conversations the paired
   phone sends, lets you reply or start a new text, and raises a desktop notification for each new
   text (mute it from its menu like any service). Its id stays `inbox`, because that names its
